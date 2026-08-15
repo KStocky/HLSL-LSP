@@ -3,6 +3,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <filesystem>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -118,4 +119,30 @@ TEST_CASE("DXC IntelliSense requires the root source", "[dxc]") {
     hlsl_intellisense::dxc::Intellisense intellisense;
 
     CHECK_THROWS_AS(intellisense.parse(shader_path, {{"other.hlsl", ""}}), std::invalid_argument);
+}
+
+TEST_CASE("DXC IntelliSense consumes unsaved include buffers", "[dxc][includes][integration]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    const auto directory = std::filesystem::current_path() / "unsaved-includes";
+    std::filesystem::create_directories(directory);
+    const auto root = (directory / "root.hlsl").generic_string();
+    const auto include = std::filesystem::path{root}.parent_path() / "dependency.hlsli";
+    const std::string root_text =
+        "#include \"dependency.hlsli\"\nfloat4 main() : SV_Target { return includeValue; }\n";
+    const std::string include_text = "static const float4 includeValue = 1.0.xxxx;\n";
+
+    auto translation_unit =
+        intellisense.parse(root, {{root, root_text}, {include.generic_string(), include_text}});
+
+    const auto diagnostics = translation_unit.diagnostics();
+    INFO(include.string());
+    INFO(include.generic_string());
+    std::string messages;
+    for (const auto& diagnostic : diagnostics) {
+        messages += diagnostic.message;
+        messages += '\n';
+    }
+    INFO(messages);
+    CHECK(diagnostics.empty());
+    std::filesystem::remove_all(directory);
 }

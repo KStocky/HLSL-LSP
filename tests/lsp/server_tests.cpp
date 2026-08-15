@@ -58,6 +58,14 @@ class TestDirectory final {
 #endif
 }
 
+[[nodiscard]] std::string workspace_uri() {
+#ifdef _WIN32
+    return "file:///C:/workspace";
+#else
+    return "file:///workspace";
+#endif
+}
+
 [[nodiscard]] std::string valid_hlsl() {
     return "template<typename T>\n"
            "T combine(T left, T right) {\n"
@@ -115,13 +123,17 @@ TEST_CASE("LSP handler enforces lifecycle and invalid parameters", "[lsp][handle
     CHECK(lifecycle_error->error.code == -32002);
 
     const auto initialized = server.handle(hlsl_intellisense::json_rpc::Request{
-        .id = std::int64_t{2}, .method = "initialize", .params = Json::object()});
+        .id = std::int64_t{2},
+        .method = "initialize",
+        .params = Json{{"workspaceFolders",
+                        Json::array({Json{{"uri", workspace_uri()}, {"name", "workspace"}}})}}});
     REQUIRE(initialized.has_value());
     const auto* response = std::get_if<hlsl_intellisense::json_rpc::Response>(&*initialized);
     REQUIRE(response != nullptr);
     CHECK(response->result["capabilities"]["positionEncoding"] == "utf-16");
     CHECK(response->result["capabilities"]["textDocumentSync"]["change"] == 2);
     CHECK(response->result["capabilities"].contains("completionProvider"));
+    CHECK(response->result["capabilities"]["workspace"]["workspaceFolders"]["supported"] == true);
 
     static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
         .method = "initialized", .params = Json::object()}));
@@ -249,4 +261,277 @@ TEST_CASE("Server applies workspace configuration to DXC analysis",
     REQUIRE(notifications.size() == 1);
     CHECK(notifications.front().method == "textDocument/publishDiagnostics");
     CHECK((*notifications.front().params)["diagnostics"].empty());
+}
+
+TEST_CASE("Server resolves virtual include mappings for DXC",
+          "[lsp][configuration][includes][integration]") {
+    TestDirectory directory;
+    std::filesystem::create_directories(directory.path() / "Engine");
+    {
+        std::ofstream config{directory.path() / "shadertoolsconfig.json"};
+        REQUIRE(config);
+        config << R"({"root":true,"hlsl.virtualDirectoryMappings":{"/Engine":"Engine"}})";
+        REQUIRE(config);
+    }
+    {
+        std::ofstream include{directory.path() / "Engine" / "Common.hlsli"};
+        REQUIRE(include);
+        include << "static const float4 engineValue = 1.0.xxxx;\n";
+        REQUIRE(include);
+    }
+
+    const auto document = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "virtual.hlsl").string());
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    hlsl_intellisense::lsp::Server server{
+        [&notifications](const auto& value) { notifications.push_back(value); }};
+
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params = Json{{"textDocument",
+                        {{"uri", document.uri()},
+                         {"languageId", "hlsl"},
+                         {"version", 1},
+                         {"text", "#include \"/Engine/Common.hlsli\"\n"
+                                  "float4 main() : SV_Target { return engineValue; }\n"}}}}}));
+
+    REQUIRE(notifications.size() == 1);
+    CHECK((*notifications.front().params)["diagnostics"].empty());
+}
+
+TEST_CASE("Editing an open include reanalyzes dependent root shaders",
+          "[lsp][includes][integration]") {
+    TestDirectory directory;
+    const auto root_path = directory.path() / "root.hlsl";
+    const auto include_path = directory.path() / "dependency.hlsli";
+    {
+        std::ofstream include{include_path};
+        REQUIRE(include);
+        include << "static const float4 includeValue = 1.0.xxxx;\n";
+        REQUIRE(include);
+    }
+
+    const auto root = hlsl_intellisense::workspace::DocumentUri::from_path(root_path.string());
+    const auto include =
+        hlsl_intellisense::workspace::DocumentUri::from_path(include_path.string());
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    hlsl_intellisense::lsp::Server server{
+        [&notifications](const auto& value) { notifications.push_back(value); }};
+
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params = Json{{"textDocument",
+                        {{"uri", root.uri()},
+                         {"languageId", "hlsl"},
+                         {"version", 1},
+                         {"text", "#include \"dependency.hlsli\"\n"
+                                  "float4 main() : SV_Target { return includeValue; }\n"}}}}}));
+    REQUIRE(notifications.size() == 1);
+    CHECK((*notifications.back().params)["diagnostics"].empty());
+
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params = Json{{"textDocument",
+                        {{"uri", include.uri()},
+                         {"languageId", "hlsl"},
+                         {"version", 1},
+                         {"text", "static const float4 otherValue = 1.0.xxxx;\n"}}}}}));
+    REQUIRE(notifications.size() == 3);
+    CHECK((*notifications.back().params)["uri"] == root.uri());
+    CHECK(!(*notifications.back().params)["diagnostics"].empty());
+
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didChange",
+        .params = Json{
+            {"textDocument", {{"uri", include.uri()}, {"version", 2}}},
+            {"contentChanges",
+             Json::array({Json{{"text", "static const float4 includeValue = 2.0.xxxx;\n"}}})}}}));
+    REQUIRE(notifications.size() == 5);
+    CHECK((*notifications.back().params)["uri"] == root.uri());
+    CHECK((*notifications.back().params)["version"] == 1);
+    INFO((*notifications.back().params)["diagnostics"].dump());
+    CHECK((*notifications.back().params)["diagnostics"].empty());
+}
+
+TEST_CASE("Configuration change notifications reload open shaders",
+          "[lsp][configuration][integration]") {
+    TestDirectory directory;
+    const auto config_path = directory.path() / "shadertoolsconfig.json";
+    {
+        std::ofstream config{config_path};
+        REQUIRE(config);
+        config << R"({"root":true})";
+        REQUIRE(config);
+    }
+
+    const auto document = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "configured.hlsl").string());
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    hlsl_intellisense::lsp::Server server{
+        [&notifications](const auto& value) { notifications.push_back(value); }};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params = Json{{"textDocument",
+                        {{"uri", document.uri()},
+                         {"languageId", "hlsl"},
+                         {"version", 1},
+                         {"text", "#ifndef CONFIGURED\n#error missing configuration\n#endif\n"
+                                  "float4 main() : SV_Target { return 1.0.xxxx; }\n"}}}}}));
+    REQUIRE(notifications.size() == 1);
+    CHECK(!(*notifications.back().params)["diagnostics"].empty());
+
+    {
+        std::ofstream config{config_path, std::ios::trunc};
+        REQUIRE(config);
+        config << R"({"root":true,"hlsl.preprocessorDefinitions":{"CONFIGURED":1}})";
+        REQUIRE(config);
+    }
+    static_cast<void>(server.handle(
+        hlsl_intellisense::json_rpc::Notification{.method = "workspace/didChangeConfiguration",
+                                                  .params = Json{{"settings", Json::object()}}}));
+
+    REQUIRE(notifications.size() == 2);
+    CHECK((*notifications.back().params)["diagnostics"].empty());
+}
+
+TEST_CASE("Opening a previously missing include invalidates dependent roots",
+          "[lsp][includes][integration]") {
+    TestDirectory directory;
+    const auto root = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "root.hlsl").string());
+    const auto include = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "missing.hlsli").string());
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    hlsl_intellisense::lsp::Server server{
+        [&notifications](const auto& value) { notifications.push_back(value); }};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params = Json{{"textDocument",
+                        {{"uri", root.uri()},
+                         {"languageId", "hlsl"},
+                         {"version", 1},
+                         {"text", "#include \"missing.hlsli\"\n"
+                                  "float4 main() : SV_Target { return includeValue; }\n"}}}}}));
+    REQUIRE(notifications.size() == 1);
+    CHECK(!(*notifications.back().params)["diagnostics"].empty());
+
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params = Json{{"textDocument",
+                        {{"uri", include.uri()},
+                         {"languageId", "hlsl"},
+                         {"version", 1},
+                         {"text", "static const float4 includeValue = 1.0.xxxx;\n"}}}}}));
+
+    REQUIRE(notifications.size() == 3);
+    CHECK((*notifications.back().params)["uri"] == root.uri());
+    CHECK((*notifications.back().params)["diagnostics"].empty());
+}
+
+TEST_CASE("Watched disk include changes invalidate dependent roots",
+          "[lsp][includes][integration]") {
+    TestDirectory directory;
+    const auto include_path = directory.path() / "dependency.hlsli";
+    {
+        std::ofstream include{include_path};
+        REQUIRE(include);
+        include << "static const float4 includeValue = 1.0.xxxx;\n";
+        REQUIRE(include);
+    }
+    const auto root = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "root.hlsl").string());
+    const auto include =
+        hlsl_intellisense::workspace::DocumentUri::from_path(include_path.string());
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    hlsl_intellisense::lsp::Server server{
+        [&notifications](const auto& value) { notifications.push_back(value); }};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params = Json{{"textDocument",
+                        {{"uri", root.uri()},
+                         {"languageId", "hlsl"},
+                         {"version", 1},
+                         {"text", "#include \"dependency.hlsli\"\n"
+                                  "float4 main() : SV_Target { return includeValue; }\n"}}}}}));
+    REQUIRE(notifications.size() == 1);
+    CHECK((*notifications.back().params)["diagnostics"].empty());
+
+    {
+        std::ofstream changed{include_path, std::ios::trunc};
+        REQUIRE(changed);
+        changed << "static const float4 otherValue = 1.0.xxxx;\n";
+        REQUIRE(changed);
+    }
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "workspace/didChangeWatchedFiles",
+        .params = Json{{"changes", Json::array({Json{{"uri", include.uri()}, {"type", 2}}})}}}));
+
+    REQUIRE(notifications.size() == 2);
+    CHECK((*notifications.back().params)["uri"] == root.uri());
+    CHECK(!(*notifications.back().params)["diagnostics"].empty());
+}
+
+TEST_CASE("Macro includes use open buffers and conservative invalidation",
+          "[lsp][includes][integration]") {
+    TestDirectory directory;
+    const auto include_path = directory.path() / "dependency.hlsli";
+    {
+        std::ofstream include{include_path};
+        REQUIRE(include);
+        include << "static const float4 includeValue = 1.0.xxxx;\n";
+        REQUIRE(include);
+    }
+    const auto root = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "root.hlsl").string());
+    const auto include =
+        hlsl_intellisense::workspace::DocumentUri::from_path(include_path.string());
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    hlsl_intellisense::lsp::Server server{
+        [&notifications](const auto& value) { notifications.push_back(value); }};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params = Json{{"textDocument",
+                        {{"uri", root.uri()},
+                         {"languageId", "hlsl"},
+                         {"version", 1},
+                         {"text", "#define HEADER \"dependency.hlsli\"\n#include HEADER\n"
+                                  "float4 main() : SV_Target { return includeValue; }\n"}}}}}));
+    REQUIRE(notifications.size() == 1);
+    CHECK((*notifications.back().params)["diagnostics"].empty());
+
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params = Json{{"textDocument",
+                        {{"uri", include.uri()},
+                         {"languageId", "hlsl"},
+                         {"version", 1},
+                         {"text", "static const float4 otherValue = 1.0.xxxx;\n"}}}}}));
+
+    REQUIRE(notifications.size() == 3);
+    CHECK((*notifications.back().params)["uri"] == root.uri());
+    CHECK(!(*notifications.back().params)["diagnostics"].empty());
 }

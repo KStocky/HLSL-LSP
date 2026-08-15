@@ -12,6 +12,8 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 namespace hlsl_intellisense::lsp {
 
@@ -32,6 +34,10 @@ class Server final {
 
     struct Analysis {
         std::int64_t version;
+        std::string root_uri;
+        std::string dxc_root_path;
+        std::unordered_set<std::string> dependency_identities;
+        bool has_dynamic_includes{};
         dxc::TranslationUnit translation_unit;
     };
 
@@ -44,8 +50,13 @@ class Server final {
     void did_change(const std::optional<json_rpc::Json>& params);
     void did_save(const std::optional<json_rpc::Json>& params);
     void did_close(const std::optional<json_rpc::Json>& params);
+    void did_change_configuration(const std::optional<json_rpc::Json>& params);
+    void did_change_workspace_folders(const std::optional<json_rpc::Json>& params);
+    void did_change_watched_files(const std::optional<json_rpc::Json>& params);
     void exit(const std::optional<json_rpc::Json>& params);
+    void analyze_affected(std::string_view uri);
     void analyze_and_publish(std::string_view uri);
+    void reanalyze_all();
     void publish_diagnostics(const workspace::SourceSnapshot& snapshot,
                              const std::vector<dxc::Diagnostic>& diagnostics);
     void require_running() const;
@@ -55,6 +66,7 @@ class Server final {
     workspace::DocumentStore documents_;
     dxc::Intellisense intellisense_;
     std::unordered_map<std::string, Analysis> analyses_;
+    std::unordered_set<std::string> workspace_folders_;
     NotificationSender sender_;
     Logger logger_;
     State state_{State::uninitialized};

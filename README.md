@@ -8,6 +8,7 @@ with:
 - DXC diagnostics for open HLSL documents
 - DXC-backed code completion
 - Hierarchical `shadertoolsconfig.json` compiler configuration
+- Transitive, virtual, open-buffer, and dependency-aware include handling
 - HLSL 2021 enabled by default
 
 ## Requirements

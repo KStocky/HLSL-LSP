@@ -3,6 +3,7 @@
 #include <hlsl_intellisense/json_rpc/framing.h>
 #include <hlsl_intellisense/workspace/configuration.h>
 #include <hlsl_intellisense/workspace/error.h>
+#include <hlsl_intellisense/workspace/include_resolver.h>
 #include <hlsl_intellisense/workspace/text_position.h>
 
 #include <algorithm>
@@ -199,6 +200,23 @@ dxc_position(std::string_view text, workspace::Position request_position) {
     }
 }
 
+[[nodiscard]] bool same_document_path(std::string_view left, std::string_view right) {
+    try {
+        return workspace::DocumentUri::from_path(left).identity() ==
+               workspace::DocumentUri::from_path(right).identity();
+    } catch (const workspace::DocumentError&) {
+        return left == right;
+    }
+}
+
+[[nodiscard]] std::string workspace_folder_identity(const Json& folder) {
+    try {
+        return workspace::DocumentUri::from_uri(string_member(folder, "uri")).identity();
+    } catch (const workspace::DocumentError& error) {
+        invalid_params(error.what());
+    }
+}
+
 } // namespace
 
 Server::Server(NotificationSender sender, Logger logger)
@@ -226,6 +244,15 @@ void Server::register_handlers() {
                                               [this](const auto& params) { did_save(params); });
     dispatcher_.register_notification_handler("textDocument/didClose",
                                               [this](const auto& params) { did_close(params); });
+    dispatcher_.register_notification_handler(
+        "workspace/didChangeConfiguration",
+        [this](const auto& params) { did_change_configuration(params); });
+    dispatcher_.register_notification_handler(
+        "workspace/didChangeWorkspaceFolders",
+        [this](const auto& params) { did_change_workspace_folders(params); });
+    dispatcher_.register_notification_handler(
+        "workspace/didChangeWatchedFiles",
+        [this](const auto& params) { did_change_watched_files(params); });
     dispatcher_.register_notification_handler("exit", [this](const auto& params) { exit(params); });
 }
 
@@ -261,13 +288,36 @@ Json Server::initialize(const std::optional<Json>& params) {
     if (state_ != State::uninitialized) {
         throw HandlerError{json_rpc::invalid_request_code, "Initialize may only be requested once"};
     }
-    static_cast<void>(object_params(params));
+    const auto& value = object_params(params);
+    if (const auto folders = value.find("workspaceFolders");
+        folders != value.end() && !folders->is_null()) {
+        if (!folders->is_array()) {
+            invalid_params("workspaceFolders must be an array or null");
+        }
+        for (const auto& folder : *folders) {
+            workspace_folders_.insert(workspace_folder_identity(folder));
+        }
+    } else if (const auto root_uri = value.find("rootUri");
+               root_uri != value.end() && !root_uri->is_null()) {
+        if (!root_uri->is_string()) {
+            invalid_params("rootUri must be a string or null");
+        }
+        try {
+            workspace_folders_.insert(
+                workspace::DocumentUri::from_uri(root_uri->get_ref<const std::string&>())
+                    .identity());
+        } catch (const workspace::DocumentError& error) {
+            invalid_params(error.what());
+        }
+    }
     state_ = State::awaiting_initialized;
     return {{"capabilities",
              {{"positionEncoding", "utf-16"},
               {"textDocumentSync",
                {{"openClose", true}, {"change", 2}, {"save", {{"includeText", true}}}}},
-              {"completionProvider", {{"resolveProvider", false}}}}},
+              {"completionProvider", {{"resolveProvider", false}}},
+              {"workspace",
+               {{"workspaceFolders", {{"supported", true}, {"changeNotifications", true}}}}}}},
             {"serverInfo", {{"name", "HLSL-LSP"}, {"version", "0.1.0"}}}};
 }
 
@@ -308,7 +358,7 @@ Json Server::completion(const std::optional<Json>& params) {
     }
     const auto [line, column] = dxc_position(snapshot.text(), request_position);
     const auto completions =
-        analysis->second.translation_unit.complete(snapshot.path(), line, column);
+        analysis->second.translation_unit.complete(analysis->second.dxc_root_path, line, column);
 
     Json items = Json::array();
     for (const auto& completion_item : completions) {
@@ -338,7 +388,7 @@ void Server::did_open(const std::optional<Json>& params) {
         const auto uri = string_member(document, "uri");
         documents_.did_open(uri, string_member(document, "languageId"),
                             integer_member(document, "version"), string_member(document, "text"));
-        analyze_and_publish(uri);
+        analyze_affected(uri);
     } catch (const std::exception& error) {
         log(error.what());
     }
@@ -380,7 +430,7 @@ void Server::did_change(const std::optional<Json>& params) {
             changes.push_back(std::move(change));
         }
         documents_.did_change(uri, integer_member(document, "version"), changes);
-        analyze_and_publish(uri);
+        analyze_affected(uri);
     } catch (const std::exception& error) {
         log(error.what());
     }
@@ -399,7 +449,7 @@ void Server::did_save(const std::optional<Json>& params) {
             text = item->get<std::string>();
         }
         documents_.did_save(uri, std::move(text));
-        analyze_and_publish(uri);
+        analyze_affected(uri);
     } catch (const std::exception& error) {
         log(error.what());
     }
@@ -410,11 +460,90 @@ void Server::did_close(const std::optional<Json>& params) {
         require_running();
         const auto uri = string_member(object_member(object_params(params), "textDocument"), "uri");
         const auto snapshot = documents_.snapshot(uri);
+        std::vector<std::string> affected_roots;
+        for (const auto& [root_identity, analysis] : analyses_) {
+            if (root_identity != snapshot.document_uri().identity() &&
+                (analysis.has_dynamic_includes ||
+                 analysis.dependency_identities.contains(snapshot.document_uri().identity()))) {
+                affected_roots.push_back(analysis.root_uri);
+            }
+        }
         documents_.did_close(uri);
         analyses_.erase(snapshot.document_uri().identity());
+        for (const auto& root_uri : affected_roots) {
+            analyze_and_publish(root_uri);
+        }
         sender_(json_rpc::Notification{
             .method = "textDocument/publishDiagnostics",
             .params = Json{{"uri", snapshot.uri()}, {"diagnostics", Json::array()}}});
+    } catch (const std::exception& error) {
+        log(error.what());
+    }
+}
+
+void Server::did_change_configuration(const std::optional<Json>& params) {
+    try {
+        require_running();
+        static_cast<void>(object_params(params));
+        reanalyze_all();
+    } catch (const std::exception& error) {
+        log(error.what());
+    }
+}
+
+void Server::did_change_workspace_folders(const std::optional<Json>& params) {
+    try {
+        require_running();
+        const auto& event = object_member(object_params(params), "event");
+        const auto& removed = member(event, "removed");
+        const auto& added = member(event, "added");
+        if (!removed.is_array() || !added.is_array()) {
+            invalid_params("Workspace folder changes must contain added and removed arrays");
+        }
+        for (const auto& folder : removed) {
+            workspace_folders_.erase(workspace_folder_identity(folder));
+        }
+        for (const auto& folder : added) {
+            workspace_folders_.insert(workspace_folder_identity(folder));
+        }
+        reanalyze_all();
+    } catch (const std::exception& error) {
+        log(error.what());
+    }
+}
+
+void Server::did_change_watched_files(const std::optional<Json>& params) {
+    try {
+        require_running();
+        const auto& changes = member(object_params(params), "changes");
+        if (!changes.is_array()) {
+            invalid_params("Watched file changes must be an array");
+        }
+
+        std::unordered_set<std::string> changed_identities;
+        for (const auto& change : changes) {
+            try {
+                changed_identities.insert(
+                    workspace::DocumentUri::from_uri(string_member(change, "uri")).identity());
+            } catch (const workspace::DocumentError& error) {
+                invalid_params(error.what());
+            }
+        }
+
+        std::vector<std::string> affected_roots;
+        for (const auto& [root_identity, analysis] : analyses_) {
+            const auto affected =
+                analysis.has_dynamic_includes ||
+                std::ranges::any_of(changed_identities, [&analysis](const auto& identity) {
+                    return analysis.dependency_identities.contains(identity);
+                });
+            if (affected && !changed_identities.contains(root_identity)) {
+                affected_roots.push_back(analysis.root_uri);
+            }
+        }
+        for (const auto& root_uri : affected_roots) {
+            analyze_and_publish(root_uri);
+        }
     } catch (const std::exception& error) {
         log(error.what());
     }
@@ -427,33 +556,61 @@ void Server::exit(const std::optional<Json>& params) {
     exit_requested_ = true;
 }
 
+void Server::analyze_affected(std::string_view uri) {
+    const auto changed = documents_.snapshot(uri);
+    std::vector<std::string> affected_roots;
+    for (const auto& [root_identity, analysis] : analyses_) {
+        if (root_identity != changed.document_uri().identity() &&
+            (analysis.has_dynamic_includes ||
+             analysis.dependency_identities.contains(changed.document_uri().identity()))) {
+            affected_roots.push_back(analysis.root_uri);
+        }
+    }
+
+    analyze_and_publish(uri);
+    for (const auto& root_uri : affected_roots) {
+        analyze_and_publish(root_uri);
+    }
+}
+
 void Server::analyze_and_publish(std::string_view uri) {
     const auto snapshot = documents_.snapshot(uri);
     const auto identity = snapshot.document_uri().identity();
     auto analysis = analyses_.find(identity);
     const auto open_documents = documents_.open_snapshots();
-    std::vector<dxc::SourceFile> sources;
-    sources.reserve(open_documents.size());
-    std::ranges::transform(open_documents, std::back_inserter(sources), [](const auto& document) {
-        return dxc::SourceFile{document.path(), document.text()};
-    });
+    workspace::WorkspaceConfiguration configuration;
+    const auto shader_directory = std::filesystem::path{snapshot.path()}.parent_path();
+    std::error_code error;
+    if (std::filesystem::is_directory(shader_directory, error)) {
+        configuration = workspace::load_workspace_configuration(shader_directory);
+    } else if (error && error != std::errc::no_such_file_or_directory) {
+        throw std::filesystem::filesystem_error{"Unable to inspect shader directory",
+                                                shader_directory, error};
+    }
+    auto resolved = workspace::resolve_includes(snapshot, open_documents, configuration);
+    const auto dxc_root_path = resolved.sources.front().path;
     if (analysis == analyses_.end()) {
-        dxc::CompilerOptions options;
-        const auto shader_directory = std::filesystem::path{snapshot.path()}.parent_path();
-        std::error_code error;
-        if (std::filesystem::is_directory(shader_directory, error)) {
-            options = workspace::load_workspace_configuration(shader_directory).compiler_options();
-        } else if (error && error != std::errc::no_such_file_or_directory) {
-            throw std::filesystem::filesystem_error{"Unable to inspect shader directory",
-                                                    shader_directory, error};
-        }
-        auto translation_unit = intellisense_.parse(snapshot.path(), std::move(sources), options);
+        auto translation_unit = intellisense_.parse(dxc_root_path, std::move(resolved.sources),
+                                                    configuration.compiler_options());
         analysis =
-            analyses_.emplace(identity, Analysis{snapshot.version(), std::move(translation_unit)})
+            analyses_
+                .emplace(identity,
+                         Analysis{snapshot.version(), snapshot.uri(), dxc_root_path,
+                                  std::move(resolved.dependency_identities),
+                                  resolved.has_dynamic_includes, std::move(translation_unit)})
                 .first;
     } else {
-        analysis->second.translation_unit.reparse(std::move(sources));
+        if (!resolved.dependency_identities.empty() ||
+            !analysis->second.dependency_identities.empty()) {
+            analysis->second.translation_unit = intellisense_.parse(
+                dxc_root_path, std::move(resolved.sources), configuration.compiler_options());
+        } else {
+            analysis->second.translation_unit.reparse(std::move(resolved.sources));
+        }
         analysis->second.version = snapshot.version();
+        analysis->second.dxc_root_path = dxc_root_path;
+        analysis->second.dependency_identities = std::move(resolved.dependency_identities);
+        analysis->second.has_dynamic_includes = resolved.has_dynamic_includes;
     }
 
     const auto latest = documents_.snapshot(uri);
@@ -462,11 +619,20 @@ void Server::analyze_and_publish(std::string_view uri) {
     }
 }
 
+void Server::reanalyze_all() {
+    const auto open_documents = documents_.open_snapshots();
+    analyses_.clear();
+    for (const auto& document : open_documents) {
+        analyze_and_publish(document.uri());
+    }
+}
+
 void Server::publish_diagnostics(const workspace::SourceSnapshot& snapshot,
                                  const std::vector<dxc::Diagnostic>& diagnostics) {
     Json items = Json::array();
     for (const auto& diagnostic : diagnostics) {
-        if (!diagnostic.location.path.empty() && diagnostic.location.path != snapshot.path()) {
+        if (!diagnostic.location.path.empty() &&
+            !same_document_path(diagnostic.location.path, snapshot.path())) {
             continue;
         }
         items.push_back({{"range", lsp_range(diagnostic_range(snapshot, diagnostic))},

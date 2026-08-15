@@ -46,6 +46,7 @@ target_sources(hlsl_workspace
         src/workspace/configuration.cpp
         src/workspace/document_store.cpp
         src/workspace/document_uri.cpp
+        src/workspace/include_resolver.cpp
         src/workspace/text_position.cpp
     PUBLIC
         FILE_SET HEADERS
@@ -55,6 +56,7 @@ target_sources(hlsl_workspace
             include/hlsl_intellisense/workspace/document_store.h
             include/hlsl_intellisense/workspace/document_uri.h
             include/hlsl_intellisense/workspace/error.h
+            include/hlsl_intellisense/workspace/include_resolver.h
             include/hlsl_intellisense/workspace/text_position.h)
 target_link_libraries(hlsl_workspace
     PUBLIC
@@ -172,6 +174,7 @@ if(BUILD_TESTING)
         tests/workspace/configuration_tests.cpp
         tests/workspace/document_store_tests.cpp
         tests/workspace/document_uri_tests.cpp
+        tests/workspace/include_resolver_tests.cpp
         tests/workspace/text_position_tests.cpp)
     target_link_libraries(hlsl-workspace-tests PRIVATE
         Catch2::Catch2WithMain
