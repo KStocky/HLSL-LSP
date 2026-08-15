@@ -1,15 +1,14 @@
 # HLSL-LSP
 
 An editor-independent HLSL language server built around DXC's
-`IDxcIntelliSense` API. The current proof of concept demonstrates:
+`IDxcIntelliSense` API. The `hlsl-lsp` executable is an LSP 3.17 stdio server
+with:
 
-- Parsing an unsaved HLSL translation unit
-- Enabling HLSL 2021 with `-HV 2021`
-- Analyzing function templates and overloaded operators
-- Reading diagnostics
-- Requesting code completion
-- Resolving a symbol definition
-- Incrementally reparsing an edited buffer
+- UTF-16 incremental document synchronization
+- DXC diagnostics for open HLSL documents
+- DXC-backed code completion
+- Hierarchical `shadertoolsconfig.json` compiler configuration
+- HLSL 2021 enabled by default
 
 ## Requirements
 

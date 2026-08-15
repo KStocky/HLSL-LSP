@@ -9,6 +9,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <vector>
 
 namespace hlsl_intellisense::workspace {
 
@@ -60,6 +61,7 @@ class DocumentStore {
     [[nodiscard]] bool contains(std::string_view uri) const;
     [[nodiscard]] const DocumentState& document(std::string_view uri) const;
     [[nodiscard]] SourceSnapshot snapshot(std::string_view uri) const;
+    [[nodiscard]] std::vector<SourceSnapshot> open_snapshots() const;
 
   private:
     [[nodiscard]] DocumentUri normalize(std::string_view uri) const;

@@ -43,6 +43,7 @@ hlsl_enable_clang_tidy(hlsl_json_rpc)
 add_library(hlsl_workspace STATIC)
 target_sources(hlsl_workspace
     PRIVATE
+        src/workspace/configuration.cpp
         src/workspace/document_store.cpp
         src/workspace/document_uri.cpp
         src/workspace/text_position.cpp
@@ -50,12 +51,17 @@ target_sources(hlsl_workspace
         FILE_SET HEADERS
         BASE_DIRS include
         FILES
+            include/hlsl_intellisense/workspace/configuration.h
             include/hlsl_intellisense/workspace/document_store.h
             include/hlsl_intellisense/workspace/document_uri.h
             include/hlsl_intellisense/workspace/error.h
             include/hlsl_intellisense/workspace/text_position.h)
 target_link_libraries(hlsl_workspace
-    PUBLIC hlsl_project_options)
+    PUBLIC
+        hlsl_dxc
+        hlsl_project_options
+    PRIVATE
+        nlohmann_json::nlohmann_json)
 hlsl_enable_clang_tidy(hlsl_workspace)
 
 if(WIN32)
@@ -109,13 +115,29 @@ if(WIN32)
 endif()
 hlsl_enable_clang_tidy(hlsl_dxc)
 
-add_executable(hlsl-intellisense-poc
+add_library(hlsl_lsp STATIC)
+target_sources(hlsl_lsp
+    PRIVATE
+        src/lsp/server.cpp
+    PUBLIC
+        FILE_SET HEADERS
+        BASE_DIRS include
+        FILES include/hlsl_intellisense/lsp/server.h)
+target_link_libraries(hlsl_lsp
+    PUBLIC
+        hlsl_dxc
+        hlsl_json_rpc
+        hlsl_workspace
+        hlsl_project_options)
+hlsl_enable_clang_tidy(hlsl_lsp)
+
+add_executable(hlsl-lsp
     src/app/main.cpp)
-target_link_libraries(hlsl-intellisense-poc PRIVATE
-    hlsl_dxc
+target_link_libraries(hlsl-lsp PRIVATE
+    hlsl_lsp
     hlsl_project_options)
-hlsl_enable_clang_tidy(hlsl-intellisense-poc)
-hlsl_copy_dxc_runtime(hlsl-intellisense-poc)
+hlsl_enable_clang_tidy(hlsl-lsp)
+hlsl_copy_dxc_runtime(hlsl-lsp)
 
 if(BUILD_TESTING)
     add_executable(hlsl-intellisense-tests
@@ -126,6 +148,15 @@ if(BUILD_TESTING)
         hlsl_project_options)
     hlsl_enable_clang_tidy(hlsl-intellisense-tests)
     hlsl_copy_dxc_runtime(hlsl-intellisense-tests)
+
+    add_executable(hlsl-lsp-tests
+        tests/lsp/server_tests.cpp)
+    target_link_libraries(hlsl-lsp-tests PRIVATE
+        Catch2::Catch2WithMain
+        hlsl_lsp
+        hlsl_project_options)
+    hlsl_enable_clang_tidy(hlsl-lsp-tests)
+    hlsl_copy_dxc_runtime(hlsl-lsp-tests)
 
     add_executable(hlsl-json-rpc-tests
         tests/json_rpc/dispatcher_tests.cpp
@@ -138,6 +169,7 @@ if(BUILD_TESTING)
     hlsl_enable_clang_tidy(hlsl-json-rpc-tests)
 
     add_executable(hlsl-workspace-tests
+        tests/workspace/configuration_tests.cpp
         tests/workspace/document_store_tests.cpp
         tests/workspace/document_uri_tests.cpp
         tests/workspace/text_position_tests.cpp)
@@ -152,6 +184,7 @@ if(BUILD_TESTING)
     catch_discover_tests(hlsl-intellisense-tests)
     catch_discover_tests(hlsl-json-rpc-tests)
     catch_discover_tests(hlsl-workspace-tests)
+    catch_discover_tests(hlsl-lsp-tests)
 endif()
 
 hlsl_add_format_targets()

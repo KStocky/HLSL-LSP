@@ -111,6 +111,18 @@ SourceSnapshot DocumentStore::snapshot(std::string_view uri) const {
     return SourceSnapshot{state.document_uri, state.language_id, state.version, state.text};
 }
 
+std::vector<SourceSnapshot> DocumentStore::open_snapshots() const {
+    std::vector<SourceSnapshot> result;
+    result.reserve(documents_.size());
+    for (const auto& [identity, state] : documents_) {
+        static_cast<void>(identity);
+        if (state.open) {
+            result.emplace_back(state.document_uri, state.language_id, state.version, state.text);
+        }
+    }
+    return result;
+}
+
 DocumentUri DocumentStore::normalize(std::string_view uri) const {
     return DocumentUri::from_uri(uri, path_style_);
 }

@@ -97,6 +97,9 @@ TEST_CASE("DXC IntelliSense reports diagnostics", "[dxc][integration]") {
     CHECK(std::ranges::any_of(diagnostics, [](const auto& diagnostic) {
         return diagnostic.severity == hlsl_intellisense::dxc::DiagnosticSeverity::error;
     }));
+    CHECK(std::ranges::any_of(diagnostics, [](const auto& diagnostic) {
+        return diagnostic.location.line > 0 && diagnostic.location.column > 0;
+    }));
 }
 
 TEST_CASE("DXC IntelliSense reparses edited sources", "[dxc][integration]") {

@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <iterator>
+#include <regex>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -192,6 +193,32 @@ class TaskString final {
     throw std::runtime_error{"DXC returned an unknown diagnostic severity"};
 }
 
+[[nodiscard]] auto safe_diagnostic_location(IDxcDiagnostic& diagnostic,
+                                            std::string_view fallback_path) -> SourceLocation {
+    char* formatted{};
+    const auto options = static_cast<DxcDiagnosticDisplayOptions>( // NOLINT
+        DxcDiagnostic_DisplaySourceLocation | DxcDiagnostic_DisplayColumn);
+    if (FAILED(diagnostic.FormatDiagnostic(options, &formatted))) {
+        return {.path = std::string{fallback_path}};
+    }
+    TaskString owned_formatted{formatted};
+
+    static const std::regex location_pattern{R"(^(.+):([0-9]+):([0-9]+):)"};
+    std::cmatch match;
+    const std::string text{owned_formatted.view()};
+    if (!std::regex_search(text.c_str(), match, location_pattern)) {
+        return {.path = std::string{fallback_path}};
+    }
+
+    try {
+        return {.path = match[1].str(),
+                .line = static_cast<std::uint32_t>(std::stoul(match[2].str())),
+                .column = static_cast<std::uint32_t>(std::stoul(match[3].str()))};
+    } catch (const std::exception&) {
+        return {.path = std::string{fallback_path}};
+    }
+}
+
 } // namespace
 
 struct Intellisense::Impl final {
@@ -304,10 +331,10 @@ auto TranslationUnit::diagnostics() const -> std::vector<Diagnostic> {
         check(diagnostic->GetSpelling(&spelling), "GetSpelling");
         TaskString owned_spelling{spelling};
 
-        result.push_back(
-            Diagnostic{.severity = map_severity(severity),
-                       .message = std::string{owned_spelling.view()},
-                       .location = SourceLocation{.path = implementation_->root_path}});
+        result.push_back(Diagnostic{
+            .severity = map_severity(severity),
+            .message = std::string{owned_spelling.view()},
+            .location = safe_diagnostic_location(*diagnostic.get(), implementation_->root_path)});
     }
     return result;
 }

@@ -169,3 +169,15 @@ TEST_CASE("Save, close, reopen, and snapshots preserve lifecycle semantics",
     CHECK(store.document("file:///C:/Work/Test.hlsl").version == 20);
     CHECK(store.document("file:///C:/Work/Test.hlsl").language_id == "hlsl-next");
 }
+
+TEST_CASE("Open snapshots exclude closed documents", "[workspace][document-store]") {
+    workspace::DocumentStore store{workspace::PathStyle::posix};
+    store.did_open("file:///workspace/root.hlsl", "hlsl", 1, "root");
+    store.did_open("file:///workspace/include.hlsli", "hlsl", 2, "include");
+    store.did_close("file:///workspace/include.hlsli");
+
+    const auto snapshots = store.open_snapshots();
+    REQUIRE(snapshots.size() == 1);
+    CHECK(snapshots.front().path() == "/workspace/root.hlsl");
+    CHECK(snapshots.front().text() == "root");
+}

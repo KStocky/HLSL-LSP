@@ -1,26 +1,19 @@
-#include <hlsl_intellisense/dxc/intellisense.h>
+#include <hlsl_intellisense/lsp/server.h>
 
 #include <cstdlib>
-#include <exception>
 #include <iostream>
 
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#endif
+
 int main() {
-    try {
-        constexpr auto file_name = "prototype.hlsl";
-        constexpr auto source =
-            "float4 main() : SV_Target { return float4(1.0, 0.0, 0.0, 1.0); }\n";
-
-        hlsl_intellisense::dxc::Intellisense intellisense;
-        const auto translation_unit = intellisense.parse(file_name, {{file_name, source}});
-        if (!translation_unit.diagnostics().empty()) {
-            std::cerr << "error: valid HLSL produced diagnostics\n";
-            return EXIT_FAILURE;
-        }
-
-        std::cout << "HLSL-LSP DXC analysis succeeded\n";
-        return EXIT_SUCCESS;
-    } catch (const std::exception& error) {
-        std::cerr << "error: " << error.what() << '\n';
+#ifdef _WIN32
+    if (_setmode(_fileno(stdin), _O_BINARY) == -1 || _setmode(_fileno(stdout), _O_BINARY) == -1) {
+        std::cerr << "HLSL-LSP: unable to configure binary stdio\n";
         return EXIT_FAILURE;
     }
+#endif
+    return hlsl_intellisense::lsp::run(std::cin, std::cout, std::cerr);
 }
