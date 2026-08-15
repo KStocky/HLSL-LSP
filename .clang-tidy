@@ -1,0 +1,14 @@
+Checks: >
+  -*,
+  bugprone-*,
+  -bugprone-exception-escape,
+  -bugprone-throwing-static-initialization,
+  clang-analyzer-*,
+  cppcoreguidelines-slicing,
+  modernize-use-nullptr,
+  modernize-use-override,
+  performance-*,
+  portability-*,
+  readability-redundant-*
+WarningsAsErrors: '*'
+HeaderFilterRegex: '^(include|src|tests)[\\/]'

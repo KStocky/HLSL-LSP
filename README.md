@@ -1,7 +1,7 @@
-# HLSLIntellisense
+# HLSL-LSP
 
-A proof of concept for driving DXC's `IDxcIntelliSense` API from modern C++.
-It currently demonstrates:
+An editor-independent HLSL language server built around DXC's
+`IDxcIntelliSense` API. The current proof of concept demonstrates:
 
 - Parsing an unsaved HLSL translation unit
 - Enabling HLSL 2021 with `-HV 2021`
@@ -15,25 +15,47 @@ It currently demonstrates:
 
 - Windows
 - Visual Studio 2026 with the MSVC C++ workload
+- LLVM with `clang-cl`, `clang-format`, and `clang-tidy`
 - CMake 3.28 or newer
-- A DXC build containing `dxc/dxcisense.h`, `dxcompiler.dll`, and `dxil.dll`
+- A DXC build containing `dxcisense.h`, `dxcompiler.dll`, and `dxil.dll`
 
-The checked-in preset defaults to the DXC copy bundled with a sibling
-`UnrealEngine` checkout. For another DXC build, configure `DXC_INCLUDE_DIR` and
-`DXC_RUNTIME_DIR`:
+Linux builds use Clang and require a DXC distribution containing
+`libdxcompiler.so`. The checked-in Windows presets default to the DXC copy
+bundled with a sibling `UnrealEngine` checkout. For another DXC build, configure
+`DXC_INCLUDE_DIR` and `DXC_RUNTIME_DIR`. `DXC_INCLUDE_DIR` is the directory that
+directly contains `dxcisense.h`.
 
 ```powershell
-cmake --preset vs2026 `
-  -DDXC_INCLUDE_DIR=C:\path\to\dxc\include `
+cmake --preset windows-msvc `
+  -DDXC_INCLUDE_DIR=C:\path\to\dxc\include\dxc `
   -DDXC_RUNTIME_DIR=C:\path\to\dxc\bin
 ```
 
-## Build and run
+## Build and test
 
 ```powershell
-cmake --preset vs2026
-cmake --build --preset debug
-ctest --preset debug
+cmake --preset windows-msvc
+cmake --build --preset windows-msvc-debug
+ctest --preset windows-msvc-debug
+
+cmake --preset windows-clangcl
+cmake --build --preset windows-clangcl-debug
+ctest --preset windows-clangcl-debug
 ```
 
-The target uses C++23, `/W4`, `/WX`, `/permissive-`, and `/Zc:__cplusplus`.
+All C++ tests use Catch2. First-party targets use C++23 and warnings as errors:
+`/W4 /WX` with MSVC-compatible frontends and
+`-Wall -Wextra -Wpedantic -Werror` with Linux Clang.
+
+## Code quality
+
+```powershell
+cmake --build out\build\windows-msvc --target format
+cmake --build out\build\windows-msvc --target format-check
+
+cmake --preset windows-clangcl -DHLSL_ENABLE_CLANG_TIDY=ON
+cmake --build --preset windows-clangcl-debug
+```
+
+Pushes and pull requests build and run the Catch2 suite with MSVC and clang-cl
+on Windows and Clang on Linux.

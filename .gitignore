@@ -1,3 +1,4 @@
 /out/
 /.vs/
 /CMakeUserPresets.json
+/.cache/

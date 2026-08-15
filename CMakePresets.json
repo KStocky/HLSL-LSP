@@ -7,32 +7,103 @@
   },
   "configurePresets": [
     {
-      "name": "vs2026",
-      "displayName": "Visual Studio 2026 x64",
-      "generator": "Visual Studio 18 2026",
-      "architecture": "x64",
-      "binaryDir": "${sourceDir}/out/build/vs2026",
+      "name": "windows-common",
+      "hidden": true,
       "cacheVariables": {
         "BUILD_TESTING": "ON"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
+    },
+    {
+      "name": "windows-msvc",
+      "displayName": "Windows MSVC x64",
+      "inherits": "windows-common",
+      "generator": "Visual Studio 18 2026",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/out/build/windows-msvc"
+    },
+    {
+      "name": "windows-clangcl",
+      "displayName": "Windows clang-cl x64",
+      "inherits": "windows-common",
+      "generator": "Ninja Multi-Config",
+      "binaryDir": "${sourceDir}/out/build/windows-clangcl",
+      "cacheVariables": {
+        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/cmake/toolchains/clang-cl.cmake"
+      }
+    },
+    {
+      "name": "linux-clang",
+      "displayName": "Linux Clang",
+      "generator": "Ninja Multi-Config",
+      "binaryDir": "${sourceDir}/out/build/linux-clang",
+      "cacheVariables": {
+        "BUILD_TESTING": "ON",
+        "CMAKE_CXX_COMPILER": "clang++"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
       }
     }
   ],
   "buildPresets": [
     {
-      "name": "debug",
-      "configurePreset": "vs2026",
+      "name": "windows-msvc-debug",
+      "configurePreset": "windows-msvc",
       "configuration": "Debug"
     },
     {
-      "name": "release",
-      "configurePreset": "vs2026",
+      "name": "windows-msvc-release",
+      "configurePreset": "windows-msvc",
+      "configuration": "Release"
+    },
+    {
+      "name": "windows-clangcl-debug",
+      "configurePreset": "windows-clangcl",
+      "configuration": "Debug"
+    },
+    {
+      "name": "windows-clangcl-release",
+      "configurePreset": "windows-clangcl",
+      "configuration": "Release"
+    },
+    {
+      "name": "linux-clang-debug",
+      "configurePreset": "linux-clang",
+      "configuration": "Debug"
+    },
+    {
+      "name": "linux-clang-release",
+      "configurePreset": "linux-clang",
       "configuration": "Release"
     }
   ],
   "testPresets": [
     {
-      "name": "debug",
-      "configurePreset": "vs2026",
+      "name": "windows-msvc-debug",
+      "configurePreset": "windows-msvc",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "windows-clangcl-debug",
+      "configurePreset": "windows-clangcl",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "linux-clang-debug",
+      "configurePreset": "linux-clang",
       "configuration": "Debug",
       "output": {
         "outputOnFailure": true

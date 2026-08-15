@@ -1,0 +1,124 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+
+env:
+  DXC_REF: v1.9.2607
+  DXC_WINDOWS_URL: https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.9.2607/dxc_2026_07_29.zip
+  DXC_LINUX_URL: https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.9.2607/linux_dxc_2026_07_29.x86_x64.tar.gz
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows MSVC
+            os: windows-latest
+            compiler: msvc
+          - name: Windows clang-cl
+            os: windows-latest
+            compiler: clang-cl
+          - name: Linux Clang
+            os: ubuntu-24.04
+            compiler: clang
+
+    steps:
+      - name: Check out HLSL-LSP
+        uses: actions/checkout@v4
+
+      - name: Check out matching DXC headers
+        uses: actions/checkout@v4
+        with:
+          repository: microsoft/DirectXShaderCompiler
+          ref: ${{ env.DXC_REF }}
+          path: .dxc-source
+          sparse-checkout: include/dxc
+
+      - name: Cache DXC runtime
+        id: cache-dxc
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/dxc-runtime
+          key: dxc-${{ runner.os }}-${{ env.DXC_REF }}
+
+      - name: Download DXC runtime on Windows
+        if: runner.os == 'Windows' && steps.cache-dxc.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP dxc.zip
+          Invoke-WebRequest $env:DXC_WINDOWS_URL -OutFile $archive
+          Expand-Archive $archive -DestinationPath "$env:RUNNER_TEMP\dxc-runtime"
+
+      - name: Download DXC runtime on Linux
+        if: runner.os == 'Linux' && steps.cache-dxc.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/dxc-runtime"
+          curl --fail --location "$DXC_LINUX_URL" |
+            tar --extract --gzip --directory "$RUNNER_TEMP/dxc-runtime"
+
+      - name: Locate DXC runtime on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $runtime = Get-ChildItem "$env:RUNNER_TEMP\dxc-runtime" -Recurse `
+            -Filter dxcompiler.dll |
+            Where-Object { $_.Directory.Name -eq 'x64' } |
+            Select-Object -First 1
+          if (-not $runtime) {
+            throw 'Unable to locate the x64 DXC runtime'
+          }
+          "DXC_RUNTIME_DIR=$($runtime.Directory.FullName)" |
+            Out-File $env:GITHUB_ENV -Append
+
+      - name: Locate DXC runtime on Linux
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          runtime="$(find "$RUNNER_TEMP/dxc-runtime" -name libdxcompiler.so -print -quit)"
+          test -n "$runtime"
+          echo "DXC_RUNTIME_DIR=$(dirname "$runtime")" >> "$GITHUB_ENV"
+
+      - name: Set up the MSVC developer environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $compiler = if ('${{ matrix.compiler }}' -eq 'msvc') {
+            'cl.exe'
+          } else {
+            'clang-cl.exe'
+          }
+          cmake -S . -B out/build/ci -G Ninja `
+            -DCMAKE_BUILD_TYPE=Debug `
+            -DCMAKE_CXX_COMPILER="$compiler" `
+            -DBUILD_TESTING=ON `
+            -DDXC_INCLUDE_DIR="$env:GITHUB_WORKSPACE\.dxc-source\include\dxc" `
+            -DDXC_RUNTIME_DIR="$env:DXC_RUNTIME_DIR"
+
+      - name: Configure on Linux
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          cmake -S . -B out/build/ci -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DBUILD_TESTING=ON \
+            -DDXC_INCLUDE_DIR="$GITHUB_WORKSPACE/.dxc-source/include/dxc" \
+            -DDXC_RUNTIME_DIR="$DXC_RUNTIME_DIR"
+
+      - name: Build
+        run: cmake --build out/build/ci --config Debug
+
+      - name: Run Catch2 tests
+        run: ctest --test-dir out/build/ci --build-config Debug --output-on-failure
