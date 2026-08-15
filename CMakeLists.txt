@@ -40,6 +40,24 @@ target_link_libraries(hlsl_json_rpc
         nlohmann_json::nlohmann_json)
 hlsl_enable_clang_tidy(hlsl_json_rpc)
 
+add_library(hlsl_workspace STATIC)
+target_sources(hlsl_workspace
+    PRIVATE
+        src/workspace/document_store.cpp
+        src/workspace/document_uri.cpp
+        src/workspace/text_position.cpp
+    PUBLIC
+        FILE_SET HEADERS
+        BASE_DIRS include
+        FILES
+            include/hlsl_intellisense/workspace/document_store.h
+            include/hlsl_intellisense/workspace/document_uri.h
+            include/hlsl_intellisense/workspace/error.h
+            include/hlsl_intellisense/workspace/text_position.h)
+target_link_libraries(hlsl_workspace
+    PUBLIC hlsl_project_options)
+hlsl_enable_clang_tidy(hlsl_workspace)
+
 if(WIN32)
     set(HLSL_INTELLISENSE_DEFAULT_DXC_INCLUDE
         "${CMAKE_CURRENT_SOURCE_DIR}/../UnrealEngine/Engine/Source/ThirdParty/ShaderConductor/ShaderConductor/External/DirectXShaderCompiler/include/dxc")
@@ -119,10 +137,21 @@ if(BUILD_TESTING)
         hlsl_project_options)
     hlsl_enable_clang_tidy(hlsl-json-rpc-tests)
 
+    add_executable(hlsl-workspace-tests
+        tests/workspace/document_store_tests.cpp
+        tests/workspace/document_uri_tests.cpp
+        tests/workspace/text_position_tests.cpp)
+    target_link_libraries(hlsl-workspace-tests PRIVATE
+        Catch2::Catch2WithMain
+        hlsl_workspace
+        hlsl_project_options)
+    hlsl_enable_clang_tidy(hlsl-workspace-tests)
+
     list(APPEND CMAKE_MODULE_PATH "${catch2_SOURCE_DIR}/extras")
     include(Catch)
     catch_discover_tests(hlsl-intellisense-tests)
     catch_discover_tests(hlsl-json-rpc-tests)
+    catch_discover_tests(hlsl-workspace-tests)
 endif()
 
 hlsl_add_format_targets()
