@@ -148,6 +148,8 @@ template <typename Interface>
 void verify_definition(
     IDxcTranslationUnit& translation_unit,
     const char* file_name,
+    unsigned line,
+    unsigned column,
     std::string_view expected)
 {
     ComPtr<IDxcFile> file;
@@ -155,7 +157,8 @@ void verify_definition(
 
     ComPtr<IDxcSourceLocation> location;
     check(
-        translation_unit.GetLocation(file.Get(), 2, 2, location.GetAddressOf()),
+        translation_unit.GetLocation(
+            file.Get(), line, column, location.GetAddressOf()),
         "GetLocation");
 
     ComPtr<IDxcCursor> cursor;
@@ -187,13 +190,48 @@ int main()
     try {
         constexpr char file_name[]{"prototype.hlsl"};
         constexpr std::string_view initial_source{
-            "struct PrototypeSymbol { float4 color; };\n"
-            "PrototypeSymbol value;\n"
+            "template<typename T>\n"
+            "T combine(T left, T right) {\n"
+            "    return left + right;\n"
+            "}\n"
+            "\n"
+            "struct Number {\n"
+            "    float value;\n"
+            "    Number operator +(Number right) {\n"
+            "        Number result = {value + right.value};\n"
+            "        return result;\n"
+            "    }\n"
+            "};\n"
+            "\n"
+            "float4 main() : SV_Target {\n"
+            "    Number left = {1.0};\n"
+            "    Number right = {2.0};\n"
+            "    Number sum = combine(left, right);\n"
+            "    return sum.value.xxxx;\n"
+            "}\n"
             "\n"};
         constexpr std::string_view updated_source{
-            "struct UpdatedSymbol { float4 color; };\n"
-            "UpdatedSymbol value;\n"
+            "template<typename T>\n"
+            "T combineUpdated(T left, T right) {\n"
+            "    return left + right;\n"
+            "}\n"
+            "\n"
+            "struct UpdatedNumber {\n"
+            "    float value;\n"
+            "    UpdatedNumber operator +(UpdatedNumber right) {\n"
+            "        UpdatedNumber result = {value + right.value};\n"
+            "        return result;\n"
+            "    }\n"
+            "};\n"
+            "\n"
+            "float4 main() : SV_Target {\n"
+            "    UpdatedNumber left = {1.0};\n"
+            "    UpdatedNumber right = {2.0};\n"
+            "    UpdatedNumber sum = combineUpdated(left, right);\n"
+            "    return sum.value.xxxx;\n"
+            "}\n"
             "\n"};
+        constexpr const char* command_line[]{"-HV", "2021"};
 
         const Module dxcompiler{L"dxcompiler.dll"};
         const auto create_instance =
@@ -211,7 +249,7 @@ int main()
         ComPtr<IDxcTranslationUnit> translation_unit;
         check(
             index->ParseTranslationUnit(
-                file_name, nullptr, 0, initial_files, 1,
+                file_name, command_line, 2, initial_files, 1,
                 DxcTranslationUnitFlags_UseCallerThread,
                 translation_unit.GetAddressOf()),
             "ParseTranslationUnit");
@@ -225,13 +263,14 @@ int main()
         }
 
         if (!completion_contains(
-                *translation_unit.Get(), file_name, 3, 1, initial_file.Get(),
-                "PrototypeSymbol")) {
+                *translation_unit.Get(), file_name, 20, 1, initial_file.Get(),
+                "Number")) {
             throw std::runtime_error{
-                "Completion did not contain PrototypeSymbol"};
+                "Completion did not contain the HLSL 2021 user-defined type"};
         }
 
-        verify_definition(*translation_unit.Get(), file_name, "PrototypeSymbol");
+        verify_definition(
+            *translation_unit.Get(), file_name, 17, 20, "combine");
 
         auto updated_file =
             make_unsaved_file(*intellisense.Get(), file_name, updated_source);
@@ -241,16 +280,17 @@ int main()
             "Reparse");
 
         if (!completion_contains(
-                *translation_unit.Get(), file_name, 3, 1, updated_file.Get(),
-                "UpdatedSymbol")) {
+                *translation_unit.Get(), file_name, 20, 1, updated_file.Get(),
+                "UpdatedNumber")) {
             throw std::runtime_error{"Reparsed completion was not updated"};
         }
 
         std::cout << "DXC IntelliSense proof of concept succeeded:\n"
-                  << "  parsed an unsaved HLSL translation unit\n"
+                  << "  parsed an unsaved HLSL 2021 translation unit\n"
+                  << "  accepted a function template and overloaded operator\n"
                   << "  produced zero diagnostics\n"
                   << "  completed a user-defined symbol\n"
-                  << "  resolved its definition\n"
+                  << "  resolved a template function definition\n"
                   << "  reparsed and returned updated completion results\n";
         return EXIT_SUCCESS;
     } catch (const std::exception& error) {

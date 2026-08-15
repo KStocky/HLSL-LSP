@@ -4,6 +4,8 @@ A proof of concept for driving DXC's `IDxcIntelliSense` API from modern C++.
 It currently demonstrates:
 
 - Parsing an unsaved HLSL translation unit
+- Enabling HLSL 2021 with `-HV 2021`
+- Analyzing function templates and overloaded operators
 - Reading diagnostics
 - Requesting code completion
 - Resolving a symbol definition
