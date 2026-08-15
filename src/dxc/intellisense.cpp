@@ -211,6 +211,7 @@ struct TranslationUnit::Impl final {
     std::shared_ptr<Intellisense::Impl> owner;
     std::string root_path;
     std::vector<SourceFile> sources;
+    std::vector<std::string> arguments;
     std::vector<ComPtr<IDxcUnsavedFile>> unsaved_files;
     ComPtr<IDxcTranslationUnit> translation_unit;
 
@@ -234,6 +235,21 @@ struct TranslationUnit::Impl final {
         std::ranges::transform(unsaved_files, std::back_inserter(pointers),
                                [](const auto& file) { return file.get(); });
         return pointers;
+    }
+
+    void parse_translation_unit() {
+        std::vector<const char*> argument_pointers;
+        argument_pointers.reserve(arguments.size());
+        std::ranges::transform(arguments, std::back_inserter(argument_pointers),
+                               [](const auto& argument) { return argument.c_str(); });
+        auto file_pointers = unsaved_file_pointers();
+
+        check(owner->index->ParseTranslationUnit(
+                  root_path.c_str(), argument_pointers.data(),
+                  static_cast<int>(argument_pointers.size()), file_pointers.data(),
+                  static_cast<unsigned>(file_pointers.size()),
+                  DxcTranslationUnitFlags_UseCallerThread, translation_unit.put()),
+              "ParseTranslationUnit");
     }
 };
 
@@ -384,10 +400,14 @@ auto TranslationUnit::definition_at(std::string_view path, std::uint32_t line,
 void TranslationUnit::reparse(std::vector<SourceFile> files) {
     implementation_->sources = std::move(files);
     implementation_->rebuild_unsaved_files();
+#ifdef _WIN32
     auto pointers = implementation_->unsaved_file_pointers();
     check(implementation_->translation_unit->Reparse(pointers.data(),
                                                      static_cast<unsigned>(pointers.size())),
           "Reparse");
+#else
+    implementation_->parse_translation_unit();
+#endif
 }
 
 Intellisense::Intellisense() : implementation_{std::make_shared<Impl>()} {}
@@ -412,19 +432,8 @@ auto Intellisense::parse(std::string root_path, std::vector<SourceFile> files,
     implementation->sources = std::move(files);
     implementation->rebuild_unsaved_files();
 
-    const auto arguments = options.arguments();
-    std::vector<const char*> argument_pointers;
-    argument_pointers.reserve(arguments.size());
-    std::ranges::transform(arguments, std::back_inserter(argument_pointers),
-                           [](const auto& argument) { return argument.c_str(); });
-    auto unsaved_file_pointers = implementation->unsaved_file_pointers();
-
-    check(implementation->owner->index->ParseTranslationUnit(
-              implementation->root_path.c_str(), argument_pointers.data(),
-              static_cast<int>(argument_pointers.size()), unsaved_file_pointers.data(),
-              static_cast<unsigned>(unsaved_file_pointers.size()),
-              DxcTranslationUnitFlags_UseCallerThread, implementation->translation_unit.put()),
-          "ParseTranslationUnit");
+    implementation->arguments = options.arguments();
+    implementation->parse_translation_unit();
 
     return TranslationUnit{std::move(implementation)};
 }
