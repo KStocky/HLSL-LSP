@@ -60,6 +60,12 @@ function(hlsl_enable_clang_tidy target)
 endfunction()
 
 function(hlsl_copy_dxc_runtime target)
+    if(UNIX)
+        set_target_properties("${target}" PROPERTIES
+            BUILD_RPATH "${DXC_RUNTIME_DIR}")
+        return()
+    endif()
+
     add_custom_command(TARGET "${target}" POST_BUILD
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different
             "${DXCOMPILER_RUNTIME}" "$<TARGET_FILE_DIR:${target}>"

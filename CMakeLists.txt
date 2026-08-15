@@ -21,6 +21,25 @@ FetchContent_Declare(
     URL_HASH SHA256=42f6e95cad6ec532fd372391373363b62a14af6d771056dbfc86160e6dfff7aa)
 FetchContent_MakeAvailable(Catch2 nlohmann_json)
 
+add_library(hlsl_json_rpc STATIC)
+target_sources(hlsl_json_rpc
+    PRIVATE
+        src/json_rpc/dispatcher.cpp
+        src/json_rpc/framing.cpp
+        src/json_rpc/message.cpp
+    PUBLIC
+        FILE_SET HEADERS
+        BASE_DIRS include
+        FILES
+            include/hlsl_intellisense/json_rpc/dispatcher.h
+            include/hlsl_intellisense/json_rpc/framing.h
+            include/hlsl_intellisense/json_rpc/message.h)
+target_link_libraries(hlsl_json_rpc
+    PUBLIC
+        hlsl_project_options
+        nlohmann_json::nlohmann_json)
+hlsl_enable_clang_tidy(hlsl_json_rpc)
+
 if(WIN32)
     set(HLSL_INTELLISENSE_DEFAULT_DXC_INCLUDE
         "${CMAKE_CURRENT_SOURCE_DIR}/../UnrealEngine/Engine/Source/ThirdParty/ShaderConductor/ShaderConductor/External/DirectXShaderCompiler/include/dxc")
@@ -55,11 +74,11 @@ find_file(DXIL_RUNTIME
 add_library(hlsl_dxc STATIC)
 target_sources(hlsl_dxc
     PRIVATE
-        src/dxc/proof_of_concept.cpp
+        src/dxc/intellisense.cpp
     PUBLIC
         FILE_SET HEADERS
         BASE_DIRS include
-        FILES include/hlsl_intellisense/dxc/proof_of_concept.h)
+        FILES include/hlsl_intellisense/dxc/intellisense.h)
 target_link_libraries(hlsl_dxc
     PUBLIC hlsl_project_options)
 target_include_directories(hlsl_dxc SYSTEM PRIVATE
@@ -82,7 +101,7 @@ hlsl_copy_dxc_runtime(hlsl-intellisense-poc)
 
 if(BUILD_TESTING)
     add_executable(hlsl-intellisense-tests
-        tests/dxc/proof_of_concept_tests.cpp)
+        tests/dxc/intellisense_tests.cpp)
     target_link_libraries(hlsl-intellisense-tests PRIVATE
         Catch2::Catch2WithMain
         hlsl_dxc
@@ -90,9 +109,20 @@ if(BUILD_TESTING)
     hlsl_enable_clang_tidy(hlsl-intellisense-tests)
     hlsl_copy_dxc_runtime(hlsl-intellisense-tests)
 
+    add_executable(hlsl-json-rpc-tests
+        tests/json_rpc/dispatcher_tests.cpp
+        tests/json_rpc/framing_tests.cpp
+        tests/json_rpc/message_tests.cpp)
+    target_link_libraries(hlsl-json-rpc-tests PRIVATE
+        Catch2::Catch2WithMain
+        hlsl_json_rpc
+        hlsl_project_options)
+    hlsl_enable_clang_tidy(hlsl-json-rpc-tests)
+
     list(APPEND CMAKE_MODULE_PATH "${catch2_SOURCE_DIR}/extras")
     include(Catch)
     catch_discover_tests(hlsl-intellisense-tests)
+    catch_discover_tests(hlsl-json-rpc-tests)
 endif()
 
 hlsl_add_format_targets()

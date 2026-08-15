@@ -1,4 +1,4 @@
-#include <hlsl_intellisense/dxc/proof_of_concept.h>
+#include <hlsl_intellisense/dxc/intellisense.h>
 
 #include <cstdlib>
 #include <exception>
@@ -6,15 +6,18 @@
 
 int main() {
     try {
-        const auto result = hlsl_intellisense::dxc::run_proof_of_concept();
-        if (!result.parsed_hlsl_2021 || !result.produced_no_diagnostics ||
-            !result.completed_user_symbol || !result.resolved_template_definition ||
-            !result.reparsed_updated_symbol) {
-            std::cerr << "error: DXC IntelliSense proof of concept was incomplete\n";
+        constexpr auto file_name = "prototype.hlsl";
+        constexpr auto source =
+            "float4 main() : SV_Target { return float4(1.0, 0.0, 0.0, 1.0); }\n";
+
+        hlsl_intellisense::dxc::Intellisense intellisense;
+        const auto translation_unit = intellisense.parse(file_name, {{file_name, source}});
+        if (!translation_unit.diagnostics().empty()) {
+            std::cerr << "error: valid HLSL produced diagnostics\n";
             return EXIT_FAILURE;
         }
 
-        std::cout << "DXC IntelliSense proof of concept succeeded\n";
+        std::cout << "HLSL-LSP DXC analysis succeeded\n";
         return EXIT_SUCCESS;
     } catch (const std::exception& error) {
         std::cerr << "error: " << error.what() << '\n';
