@@ -17,6 +17,7 @@ namespace {
 
 struct IncludeDirective {
     std::string path;
+    std::size_t path_offset{};
     bool quoted{};
 };
 
@@ -41,6 +42,7 @@ struct SourceNode {
 
 [[nodiscard]] ParsedIncludes parse_includes(std::string_view text) {
     ParsedIncludes result;
+    const auto* source_begin = text.data();
     while (!text.empty()) {
         const auto line_end = text.find_first_of("\r\n");
         auto line = trim_left(text.substr(0, line_end));
@@ -54,7 +56,9 @@ struct SourceNode {
                     const auto end = line.find(terminator, 1);
                     if (end != std::string_view::npos) {
                         result.directives.push_back(
-                            {std::string{line.substr(1, end - 1)}, line.front() == '"'});
+                            {std::string{line.substr(1, end - 1)},
+                             static_cast<std::size_t>(line.data() - source_begin + 1),
+                             line.front() == '"'});
                     }
                 } else if (!line.empty()) {
                     result.has_dynamic = true;
@@ -225,15 +229,33 @@ class Resolver final {
         if (!emitted_logical_paths_.insert(source.logical_path).second) {
             return;
         }
-        result.sources.push_back({source.logical_path, source.text});
         if (!root) {
             result.dependency_identities.insert(identity);
         }
-        if (!visited_physical_paths_.insert(identity).second) {
-            return;
-        }
+        const auto first_physical_visit = visited_physical_paths_.insert(identity).second;
 
         const auto parsed = parse_includes(source.text);
+        std::vector<SourceNode> included_sources;
+        included_sources.reserve(parsed.directives.size());
+        auto dxc_text = source.text;
+        for (auto directive = parsed.directives.rbegin(); directive != parsed.directives.rend();
+             ++directive) {
+            if (auto included = resolve_directive(source, *directive, result)) {
+                if (directive->path.starts_with('/') || directive->path.starts_with('\\')) {
+                    dxc_text.replace(directive->path_offset, directive->path.size(),
+                                     included->physical_path.generic_string());
+                }
+                included_sources.push_back(std::move(*included));
+            }
+        }
+        result.sources.push_back({source.logical_path, dxc_text});
+        if (source.virtual_path && first_physical_visit) {
+            result.sources.push_back(
+                {normalized_physical_path(source.physical_path).generic_string(), dxc_text});
+        }
+        if (!first_physical_visit) {
+            return;
+        }
         if (parsed.has_dynamic) {
             result.has_dynamic_includes = true;
             for (const auto& [open_identity, open_document] : open_documents_) {
@@ -245,10 +267,9 @@ class Resolver final {
                 }
             }
         }
-        for (const auto& directive : parsed.directives) {
-            if (auto included = resolve_directive(source, directive, result)) {
-                visit(*included, result, false);
-            }
+        for (auto included = included_sources.rbegin(); included != included_sources.rend();
+             ++included) {
+            visit(*included, result, false);
         }
     }
 

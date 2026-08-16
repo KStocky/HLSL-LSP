@@ -87,7 +87,7 @@ TEST_CASE("Include resolution uses open buffers and recursively tracks disk file
     CHECK(resolution.dependency_identities.size() == 3);
 }
 
-TEST_CASE("Virtual mappings preserve logical include names for DXC unsaved files",
+TEST_CASE("Virtual mappings provide logical and physical names for DXC unsaved files",
           "[workspace][includes][virtual]") {
     TestTree tree;
     tree.file("Engine/Common.hlsli", "#include \"Nested.hlsli\"\nfloat commonValue;\n");
@@ -101,9 +101,18 @@ TEST_CASE("Virtual mappings preserve logical include names for DXC unsaved files
 
     const auto resolution = workspace::resolve_includes(root, open_documents, configuration);
 
-    REQUIRE(resolution.sources.size() == 3);
+    REQUIRE(resolution.sources.size() == 5);
     CHECK(has_source(resolution, "/Engine/Common.hlsli"));
     CHECK(has_source(resolution, "/Engine/Nested.hlsli"));
+    CHECK(has_source(resolution, tree.path("Engine/Common.hlsli").generic_string()));
+    CHECK(has_source(resolution, tree.path("Engine/Nested.hlsli").generic_string()));
+    const auto root_source =
+        std::ranges::find(resolution.sources,
+                          std::filesystem::absolute(root_path).lexically_normal().generic_string(),
+                          &hlsl_intellisense::dxc::SourceFile::path);
+    REQUIRE(root_source != resolution.sources.end());
+    CHECK(root_source->text.find(tree.path("Engine/Common.hlsli").generic_string()) !=
+          std::string::npos);
     CHECK(resolution.dependency_identities.size() == 2);
 }
 
@@ -122,8 +131,9 @@ TEST_CASE("Virtual mappings normalize separators and preserve aliases",
 
     const auto resolution = workspace::resolve_includes(root, open_documents, configuration);
 
-    REQUIRE(resolution.sources.size() == 3);
+    REQUIRE(resolution.sources.size() == 4);
     CHECK(has_source(resolution, "/Engine/Common.hlsli"));
     CHECK(has_source(resolution, "/Other/Common.hlsli"));
+    CHECK(has_source(resolution, tree.path("Engine/Common.hlsli").generic_string()));
     CHECK(resolution.dependency_identities.size() == 1);
 }
