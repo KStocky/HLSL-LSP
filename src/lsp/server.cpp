@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <exception>
 #include <filesystem>
+#include <fstream>
 #include <iterator>
 #include <limits>
 #include <stdexcept>
@@ -146,6 +147,157 @@ using json_rpc::Json;
         return 14;
     }
     return 1;
+}
+
+enum class SemanticTokenType : std::uint8_t {
+    namespace_name,
+    type,
+    class_name,
+    enum_name,
+    parameter,
+    variable,
+    property,
+    enum_member,
+    function,
+    method,
+    macro,
+    keyword,
+    comment,
+    string,
+    number,
+    type_parameter
+};
+
+struct SemanticToken {
+    workspace::Position start;
+    std::uint32_t length{};
+    SemanticTokenType type{};
+};
+
+[[nodiscard]] SemanticTokenType identifier_token_type(std::uint32_t cursor_kind) {
+    if (cursor_kind == 22 || cursor_kind == 33 || cursor_kind == 46) {
+        return SemanticTokenType::namespace_name;
+    }
+    if (cursor_kind == 2 || cursor_kind == 3 || cursor_kind == 4 || cursor_kind == 31 ||
+        cursor_kind == 32) {
+        return SemanticTokenType::class_name;
+    }
+    if (cursor_kind == 5) {
+        return SemanticTokenType::enum_name;
+    }
+    if (cursor_kind == 6 || cursor_kind == 47 || cursor_kind == 102) {
+        return SemanticTokenType::property;
+    }
+    if (cursor_kind == 7) {
+        return SemanticTokenType::enum_member;
+    }
+    if (cursor_kind == 8 || cursor_kind == 30 || cursor_kind == 103) {
+        return SemanticTokenType::function;
+    }
+    if (cursor_kind == 21 || cursor_kind == 24 || cursor_kind == 25 || cursor_kind == 26) {
+        return SemanticTokenType::method;
+    }
+    if (cursor_kind == 10 || cursor_kind == 28) {
+        return SemanticTokenType::parameter;
+    }
+    if (cursor_kind == 20 || cursor_kind == 36 || cursor_kind == 43 || cursor_kind == 45) {
+        return SemanticTokenType::type;
+    }
+    if (cursor_kind == 27 || cursor_kind == 29) {
+        return SemanticTokenType::type_parameter;
+    }
+    if (cursor_kind == 501 || cursor_kind == 502) {
+        return SemanticTokenType::macro;
+    }
+    return SemanticTokenType::variable;
+}
+
+[[nodiscard]] SemanticTokenType semantic_token_type(const dxc::Token& token, std::string_view text,
+                                                    std::size_t offset) {
+    switch (token.kind) {
+    case dxc::TokenKind::keyword:
+        return SemanticTokenType::keyword;
+    case dxc::TokenKind::built_in_type:
+        return SemanticTokenType::type;
+    case dxc::TokenKind::comment:
+        return SemanticTokenType::comment;
+    case dxc::TokenKind::literal:
+        return offset < text.size() && (text[offset] == '"' || text[offset] == '\'')
+                   ? SemanticTokenType::string
+                   : SemanticTokenType::number;
+    case dxc::TokenKind::identifier:
+        return identifier_token_type(token.cursor_kind);
+    case dxc::TokenKind::punctuation:
+    case dxc::TokenKind::unknown:
+        return SemanticTokenType::variable;
+    }
+    return SemanticTokenType::variable;
+}
+
+[[nodiscard]] std::optional<std::size_t> dxc_offset_at(std::string_view text, std::uint32_t line,
+                                                       std::uint32_t column) {
+    if (line == 0 || column == 0) {
+        return std::nullopt;
+    }
+    std::size_t line_start = 0;
+    for (std::uint32_t current = 1; current < line; ++current) {
+        const auto newline = text.find('\n', line_start);
+        if (newline == std::string_view::npos) {
+            return std::nullopt;
+        }
+        line_start = newline + 1;
+    }
+    const auto offset = line_start + column - 1;
+    const auto line_end = text.find_first_of("\r\n", line_start);
+    if (offset > (line_end == std::string_view::npos ? text.size() : line_end)) {
+        return std::nullopt;
+    }
+    return offset;
+}
+
+void append_semantic_token(std::vector<SemanticToken>& result, std::string_view text,
+                           const dxc::Token& token) {
+    const auto token_offset = dxc_offset_at(text, token.line, token.column);
+    if (!token_offset.has_value() || *token_offset >= text.size() ||
+        token.kind == dxc::TokenKind::punctuation || token.kind == dxc::TokenKind::unknown) {
+        return;
+    }
+
+    auto token_end = std::min(text.size(), *token_offset + token.length);
+    if (token.kind == dxc::TokenKind::literal &&
+        (text[*token_offset] == '"' || text[*token_offset] == '\'')) {
+        const auto quote = text[*token_offset];
+        for (auto offset = *token_offset + 1; offset < text.size(); ++offset) {
+            if (text[offset] == '\\') {
+                ++offset;
+            } else if (text[offset] == quote) {
+                token_end = offset + 1;
+                break;
+            }
+        }
+    }
+    const auto type = semantic_token_type(token, text, *token_offset);
+    for (auto segment_start = *token_offset; segment_start < token_end;) {
+        const auto newline = text.find_first_of("\r\n", segment_start);
+        const auto segment_end =
+            newline == std::string_view::npos ? token_end : std::min(token_end, newline);
+        if (segment_end > segment_start) {
+            const auto start = workspace::lsp_position_at(text, segment_start);
+            const auto length =
+                workspace::utf16_length(text.substr(segment_start, segment_end - segment_start));
+            if (length <= std::numeric_limits<std::uint32_t>::max()) {
+                result.push_back(
+                    {.start = start, .length = static_cast<std::uint32_t>(length), .type = type});
+            }
+        }
+        if (segment_end == token_end) {
+            break;
+        }
+        segment_start = segment_end + 1;
+        if (text[segment_end] == '\r' && segment_start < token_end && text[segment_start] == '\n') {
+            ++segment_start;
+        }
+    }
 }
 
 [[nodiscard]] std::pair<std::uint32_t, std::uint32_t>
@@ -362,6 +514,11 @@ void Server::register_handlers() {
                                          [this](const auto& params) { return shutdown(params); });
     dispatcher_.register_request_handler("textDocument/completion",
                                          [this](const auto& params) { return completion(params); });
+    dispatcher_.register_request_handler("textDocument/definition",
+                                         [this](const auto& params) { return definition(params); });
+    dispatcher_.register_request_handler(
+        "textDocument/semanticTokens/full",
+        [this](const auto& params) { return semantic_tokens(params); });
     dispatcher_.register_notification_handler("initialized",
                                               [this](const auto& params) { initialized(params); });
     dispatcher_.register_notification_handler("textDocument/didOpen",
@@ -446,9 +603,19 @@ Json Server::initialize(const std::optional<Json>& params) {
               {"textDocumentSync",
                {{"openClose", true}, {"change", 2}, {"save", {{"includeText", true}}}}},
               {"completionProvider", {{"resolveProvider", false}}},
+              {"definitionProvider", true},
+              {"semanticTokensProvider",
+               {{"legend",
+                 {{"tokenTypes",
+                   Json::array({"namespace", "type", "class", "enum", "parameter", "variable",
+                                "property", "enumMember", "function", "method", "macro", "keyword",
+                                "comment", "string", "number", "typeParameter"})},
+                  {"tokenModifiers", Json::array()}}},
+                {"full", true},
+                {"range", false}}},
               {"workspace",
                {{"workspaceFolders", {{"supported", true}, {"changeNotifications", true}}}}}}},
-            {"serverInfo", {{"name", "HLSL-LSP"}, {"version", "0.1.0"}}}};
+            {"serverInfo", {{"name", "HLSL-LSP"}, {"version", "0.2.0"}}}};
 }
 
 Json Server::shutdown(const std::optional<Json>& params) {
@@ -497,6 +664,115 @@ Json Server::completion(const std::optional<Json>& params) {
                          {"kind", completion_kind(completion_item.cursor_kind)}});
     }
     return {{"isIncomplete", false}, {"items", std::move(items)}};
+}
+
+Json Server::definition(const std::optional<Json>& params) {
+    require_running();
+    const auto& value = object_params(params);
+    const auto uri = string_member(object_member(value, "textDocument"), "uri");
+    const auto request_position = position(object_member(value, "position"));
+
+    workspace::SourceSnapshot snapshot = [&] {
+        try {
+            const auto& state = documents_.document(uri);
+            if (!state.open) {
+                invalid_params("Definition document is not open");
+            }
+            return documents_.snapshot(uri);
+        } catch (const workspace::DocumentError& error) {
+            invalid_params(error.what());
+        }
+    }();
+    const auto analysis = analyses_.find(snapshot.document_uri().identity());
+    if (analysis == analyses_.end() || analysis->second.version != snapshot.version()) {
+        invalid_params("Definition analysis is stale");
+    }
+
+    const auto [line, column] = dxc_position(snapshot.text(), request_position);
+    const auto definition = analysis->second.translation_unit.definition_at(
+        analysis->second.dxc_root_path, line, column);
+    if (!definition.has_value()) {
+        return nullptr;
+    }
+
+    const auto target = workspace::DocumentUri::from_path(definition->location.path);
+    std::string target_text;
+    if (documents_.contains(target.uri())) {
+        target_text = documents_.snapshot(target.uri()).text();
+    } else {
+        std::ifstream stream{target.path(), std::ios::binary};
+        target_text = {std::istreambuf_iterator<char>{stream}, std::istreambuf_iterator<char>{}};
+    }
+
+    workspace::Position start{
+        .line = definition->location.line > 0 ? definition->location.line - 1 : 0,
+        .character = definition->location.column > 0 ? definition->location.column - 1 : 0};
+    if (!target_text.empty()) {
+        if (const auto offset = dxc_offset_at(target_text, definition->location.line,
+                                              definition->location.column)) {
+            start = workspace::lsp_position_at(target_text, *offset);
+        }
+    }
+    auto end = start;
+    const auto name_length = workspace::utf16_length(definition->name);
+    if (name_length <= std::numeric_limits<std::uint32_t>::max() - end.character) {
+        end.character += static_cast<std::uint32_t>(name_length);
+    }
+    return {{"uri", target.uri()}, {"range", lsp_range({.start = start, .end = end})}};
+}
+
+Json Server::semantic_tokens(const std::optional<Json>& params) {
+    require_running();
+    const auto& value = object_params(params);
+    const auto uri = string_member(object_member(value, "textDocument"), "uri");
+
+    workspace::SourceSnapshot snapshot = [&] {
+        try {
+            const auto& state = documents_.document(uri);
+            if (!state.open) {
+                invalid_params("Semantic token document is not open");
+            }
+            return documents_.snapshot(uri);
+        } catch (const workspace::DocumentError& error) {
+            invalid_params(error.what());
+        }
+    }();
+    const auto analysis = analyses_.find(snapshot.document_uri().identity());
+    if (analysis == analyses_.end() || analysis->second.version != snapshot.version()) {
+        invalid_params("Semantic token analysis is stale");
+    }
+    if (snapshot.text().size() > std::numeric_limits<std::uint32_t>::max()) {
+        invalid_params("Semantic token document is too large");
+    }
+
+    const auto dxc_tokens =
+        analysis->second.translation_unit.tokens(analysis->second.dxc_root_path);
+    std::vector<SemanticToken> tokens;
+    tokens.reserve(dxc_tokens.size());
+    for (const auto& token : dxc_tokens) {
+        append_semantic_token(tokens, snapshot.text(), token);
+    }
+    std::ranges::sort(tokens, [](const auto& left, const auto& right) {
+        return std::pair{left.start.line, left.start.character} <
+               std::pair{right.start.line, right.start.character};
+    });
+
+    Json data = Json::array();
+    std::uint32_t previous_line{};
+    std::uint32_t previous_character{};
+    for (const auto& token : tokens) {
+        const auto delta_line = token.start.line - previous_line;
+        const auto delta_character =
+            delta_line == 0 ? token.start.character - previous_character : token.start.character;
+        data.push_back(delta_line);
+        data.push_back(delta_character);
+        data.push_back(token.length);
+        data.push_back(static_cast<std::uint32_t>(token.type));
+        data.push_back(0);
+        previous_line = token.start.line;
+        previous_character = token.start.character;
+    }
+    return {{"data", std::move(data)}};
 }
 
 void Server::initialized(const std::optional<Json>& params) {

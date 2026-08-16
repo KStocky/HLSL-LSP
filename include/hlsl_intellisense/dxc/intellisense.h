@@ -51,6 +51,24 @@ struct Definition {
     SourceLocation location;
 };
 
+enum class TokenKind : std::uint8_t {
+    punctuation,
+    keyword,
+    identifier,
+    literal,
+    comment,
+    unknown,
+    built_in_type
+};
+
+struct Token {
+    std::uint32_t line{};
+    std::uint32_t column{};
+    std::uint32_t length{};
+    TokenKind kind{TokenKind::unknown};
+    std::uint32_t cursor_kind{};
+};
+
 class TranslationUnit final {
   public:
     TranslationUnit(TranslationUnit&&) noexcept;
@@ -64,6 +82,7 @@ class TranslationUnit final {
                                                    std::uint32_t column) const;
     [[nodiscard]] std::optional<Definition> definition_at(std::string_view path, std::uint32_t line,
                                                           std::uint32_t column) const;
+    [[nodiscard]] std::vector<Token> tokens(std::string_view path) const;
 
     void reparse(std::vector<SourceFile> files);
 

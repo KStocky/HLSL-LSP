@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <iterator>
+#include <limits>
 #include <regex>
 #include <stdexcept>
 #include <string>
@@ -158,6 +159,29 @@ class TaskString final {
     char* value_{};
 };
 
+class TaskTokens final {
+  public:
+    TaskTokens(IDxcToken** tokens, unsigned count) : tokens_{tokens}, count_{count} {}
+
+    TaskTokens(const TaskTokens&) = delete;
+    auto operator=(const TaskTokens&) -> TaskTokens& = delete;
+
+    ~TaskTokens() {
+        for (unsigned index = 0; index < count_; ++index) {
+            if (tokens_[index] != nullptr) {
+                tokens_[index]->Release();
+            }
+        }
+        ::CoTaskMemFree(reinterpret_cast<void*>(tokens_));
+    }
+
+    [[nodiscard]] IDxcToken* operator[](unsigned index) const noexcept { return tokens_[index]; }
+
+  private:
+    IDxcToken** tokens_{};
+    unsigned count_{};
+};
+
 [[nodiscard]] auto make_source_location(IDxcSourceLocation& location) -> SourceLocation {
     ComPtr<IDxcFile> file;
     unsigned line{};
@@ -191,6 +215,46 @@ class TaskString final {
         return DiagnosticSeverity::fatal;
     }
     throw std::runtime_error{"DXC returned an unknown diagnostic severity"};
+}
+
+[[nodiscard]] auto map_token_kind(DxcTokenKind kind) -> TokenKind {
+    switch (kind) {
+    case DxcTokenKind_Punctuation:
+        return TokenKind::punctuation;
+    case DxcTokenKind_Keyword:
+        return TokenKind::keyword;
+    case DxcTokenKind_Identifier:
+        return TokenKind::identifier;
+    case DxcTokenKind_Literal:
+        return TokenKind::literal;
+    case DxcTokenKind_Comment:
+        return TokenKind::comment;
+    case DxcTokenKind_BuiltInType:
+        return TokenKind::built_in_type;
+    case DxcTokenKind_Unknown:
+        return TokenKind::unknown;
+    }
+    return TokenKind::unknown;
+}
+
+[[nodiscard]] auto cursor_kind_at(IDxcTranslationUnit& translation_unit,
+                                  IDxcSourceLocation& location) -> std::uint32_t {
+    ComPtr<IDxcCursor> cursor;
+    check(translation_unit.GetCursorForLocation(&location, cursor.put()), "GetCursorForLocation");
+
+    ComPtr<IDxcCursor> referenced;
+    check(cursor->GetReferencedCursor(referenced.put()), "GetReferencedCursor");
+    if (referenced.get() != nullptr) {
+        BOOL is_null{};
+        check(referenced->IsNull(&is_null), "IsNull");
+        if (is_null == FALSE) {
+            cursor = std::move(referenced);
+        }
+    }
+
+    DxcCursorKind kind{DxcCursor_UnexposedDecl};
+    check(cursor->GetKind(&kind), "GetKind");
+    return static_cast<std::uint32_t>(kind);
 }
 
 [[nodiscard]] auto safe_diagnostic_location(IDxcDiagnostic& diagnostic,
@@ -422,6 +486,69 @@ auto TranslationUnit::definition_at(std::string_view path, std::uint32_t line,
 
     return Definition{.name = std::string{owned_spelling.view()},
                       .location = make_source_location(*definition_location.get())};
+}
+
+auto TranslationUnit::tokens(std::string_view path) const -> std::vector<Token> {
+    const std::string owned_path{path};
+    const auto source = std::ranges::find(implementation_->sources, owned_path, &SourceFile::path);
+    if (source == implementation_->sources.end()) {
+        throw std::invalid_argument{"The token source file is missing"};
+    }
+    // NOLINTNEXTLINE(readability-redundant-parentheses)
+    if (source->text.size() > (std::numeric_limits<std::uint32_t>::max)()) {
+        throw std::invalid_argument{"The token source file is too large"};
+    }
+    const auto text_length = static_cast<std::uint32_t>(source->text.size());
+    ComPtr<IDxcFile> file;
+    check(implementation_->translation_unit->GetFile(owned_path.c_str(), file.put()), "GetFile");
+
+    ComPtr<IDxcSourceLocation> start;
+    check(implementation_->translation_unit->GetLocationForOffset(file.get(), 0, start.put()),
+          "GetLocationForOffset");
+    ComPtr<IDxcSourceLocation> end;
+    check(
+        implementation_->translation_unit->GetLocationForOffset(file.get(), text_length, end.put()),
+        "GetLocationForOffset");
+    ComPtr<IDxcSourceRange> range;
+    check(implementation_->owner->intellisense->GetRange(start.get(), end.get(), range.put()),
+          "GetRange");
+
+    IDxcToken** raw_tokens{};
+    unsigned token_count{};
+    check(implementation_->translation_unit->Tokenize(range.get(), &raw_tokens, &token_count),
+          "Tokenize");
+    TaskTokens owned_tokens{raw_tokens, token_count};
+
+    std::vector<Token> result;
+    result.reserve(token_count);
+    for (unsigned index = 0; index < token_count; ++index) {
+        auto* token = owned_tokens[index];
+        DxcTokenKind kind{DxcTokenKind_Unknown};
+        check(token->GetKind(&kind), "GetKind");
+
+        ComPtr<IDxcSourceRange> extent;
+        check(token->GetExtent(extent.put()), "GetExtent");
+        unsigned token_start{};
+        unsigned token_end{};
+        check(extent->GetOffsets(&token_start, &token_end), "GetOffsets");
+        if (token_end <= token_start) {
+            continue;
+        }
+
+        ComPtr<IDxcSourceLocation> location;
+        check(token->GetLocation(location.put()), "GetLocation");
+        const auto source_location = make_source_location(*location.get());
+        std::uint32_t cursor_kind{};
+        if (kind == DxcTokenKind_Identifier) {
+            cursor_kind = cursor_kind_at(*implementation_->translation_unit.get(), *location.get());
+        }
+        result.push_back({.line = source_location.line,
+                          .column = source_location.column,
+                          .length = token_end - token_start,
+                          .kind = map_token_kind(kind),
+                          .cursor_kind = cursor_kind});
+    }
+    return result;
 }
 
 void TranslationUnit::reparse(std::vector<SourceFile> files) {

@@ -85,6 +85,18 @@ TEST_CASE("DXC IntelliSense analyzes HLSL 2021", "[dxc][integration]") {
         CHECK(definition->name == "combine");
         CHECK(definition->location.line == 2);
     }
+
+    const auto tokens = translation_unit.tokens(shader_path);
+    CHECK(std::ranges::any_of(tokens, [](const auto& token) {
+        return token.kind == hlsl_intellisense::dxc::TokenKind::keyword;
+    }));
+    CHECK(std::ranges::any_of(tokens, [](const auto& token) {
+        return token.kind == hlsl_intellisense::dxc::TokenKind::built_in_type;
+    }));
+    CHECK(std::ranges::any_of(tokens, [](const auto& token) {
+        return token.kind == hlsl_intellisense::dxc::TokenKind::identifier &&
+               token.cursor_kind != 0;
+    }));
 }
 
 TEST_CASE("DXC IntelliSense reports diagnostics", "[dxc][integration]") {

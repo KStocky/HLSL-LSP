@@ -154,6 +154,62 @@ TEST_CASE("LSP handler enforces lifecycle and invalid parameters", "[lsp][handle
     CHECK(server.exit_code() == 1);
 }
 
+TEST_CASE("Server provides semantic tokens and definitions", "[lsp][navigation][integration]") {
+    const auto uri = shader_uri();
+    const auto source = valid_hlsl();
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    hlsl_intellisense::lsp::Server server{
+        [&notifications](const auto& value) { notifications.push_back(value); }};
+
+    const auto initialized = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()});
+    REQUIRE(initialized.has_value());
+    const auto* initialize_response =
+        std::get_if<hlsl_intellisense::json_rpc::Response>(&*initialized);
+    REQUIRE(initialize_response != nullptr);
+    CHECK(initialize_response->result["capabilities"]["definitionProvider"] == true);
+    const auto& provider = initialize_response->result["capabilities"]["semanticTokensProvider"];
+    CHECK(provider["full"] == true);
+    CHECK(provider["legend"]["tokenTypes"][11] == "keyword");
+
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params =
+            Json{{"textDocument",
+                  {{"uri", uri}, {"languageId", "hlsl"}, {"version", 1}, {"text", source}}}}}));
+
+    const auto semantic = server.handle(
+        hlsl_intellisense::json_rpc::Request{.id = std::int64_t{2},
+                                             .method = "textDocument/semanticTokens/full",
+                                             .params = Json{{"textDocument", {{"uri", uri}}}}});
+    REQUIRE(semantic.has_value());
+    const auto* semantic_response = std::get_if<hlsl_intellisense::json_rpc::Response>(&*semantic);
+    REQUIRE(semantic_response != nullptr);
+    const auto& data = semantic_response->result["data"];
+    REQUIRE(!data.empty());
+    CHECK(data.size() % 5 == 0);
+    bool has_keyword{};
+    for (std::size_t index = 3; index < data.size(); index += 5) {
+        has_keyword = has_keyword || data[index] == 11;
+    }
+    CHECK(has_keyword);
+
+    const auto definition = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{3},
+        .method = "textDocument/definition",
+        .params = Json{{"textDocument", {{"uri", uri}}},
+                       {"position", {{"line", 16}, {"character", 20}}}}});
+    REQUIRE(definition.has_value());
+    const auto* definition_response =
+        std::get_if<hlsl_intellisense::json_rpc::Response>(&*definition);
+    REQUIRE(definition_response != nullptr);
+    CHECK(definition_response->result["uri"] == uri);
+    CHECK(definition_response->result["range"]["start"]["line"] == 1);
+    CHECK(definition_response->result["range"]["start"]["character"] == 2);
+}
+
 TEST_CASE("Framed LSP session publishes diagnostics and completes HLSL 2021",
           "[lsp][protocol][integration]") {
     const auto uri = shader_uri();
@@ -301,6 +357,20 @@ TEST_CASE("Server resolves virtual include mappings for DXC",
 
     REQUIRE(notifications.size() == 1);
     CHECK((*notifications.front().params)["diagnostics"].empty());
+
+    const auto definition = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{2},
+        .method = "textDocument/definition",
+        .params = Json{{"textDocument", {{"uri", document.uri()}}},
+                       {"position", {{"line", 1}, {"character", 38}}}}});
+    REQUIRE(definition.has_value());
+    const auto* response = std::get_if<hlsl_intellisense::json_rpc::Response>(&*definition);
+    REQUIRE(response != nullptr);
+    const auto include_uri = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "Engine" / "Common.hlsli").string());
+    CHECK(response->result["uri"] == include_uri.uri());
+    CHECK(response->result["range"]["start"]["line"] == 0);
+    CHECK(response->result["range"]["start"]["character"] == 20);
 }
 
 TEST_CASE("Editing an open include reanalyzes dependent root shaders",

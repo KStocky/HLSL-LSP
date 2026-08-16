@@ -3,6 +3,7 @@
 This VSIX extends Visual Studio's built-in `HLSL` content type with remote-code
 support, starts the bundled `hlsl-lsp.exe` over standard input/output, forwards
 the `hlsl` configuration section, and watches shader and configuration files.
+Semantic colouring and go-to-definition are provided by the server through LSP.
 
 ## Build
 
