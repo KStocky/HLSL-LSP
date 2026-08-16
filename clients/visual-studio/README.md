@@ -3,9 +3,11 @@
 This VSIX extends Visual Studio's built-in `HLSL` content type with remote-code
 support, starts the bundled `hlsl-lsp.exe` over standard input/output, forwards
 the `hlsl` configuration section, and watches shader and configuration files.
-Go-to-definition is provided by the server through LSP. Semantic tokens are
-temporarily disabled in Visual Studio because its LSP client can hang the editor
-while applying them; the language server still provides them to other clients.
+Go-to-definition is provided by the server through LSP. The VSIX provides safe
+native lexical colouring for HLSL keywords, preprocessor directives, comments,
+strings, and numbers. LSP semantic tokens are disabled only in Visual Studio
+because its LSP client can hang the editor while applying them; the language
+server still provides richer semantic tokens to other clients.
 
 ## Build
 
