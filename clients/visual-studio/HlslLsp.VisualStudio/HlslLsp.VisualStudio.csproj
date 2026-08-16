@@ -1,0 +1,65 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net472</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>HlslLsp.VisualStudio</RootNamespace>
+    <AssemblyName>HlslLsp.VisualStudio</AssemblyName>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <NoWarn>VSTHRD100</NoWarn>
+    <VSSDKBuildToolsAutoSetup>true</VSSDKBuildToolsAutoSetup>
+
+    <GeneratePkgDefFile>false</GeneratePkgDefFile>
+    <IncludeAssemblyInVSIXContainer>true</IncludeAssemblyInVSIXContainer>
+    <IncludeDebugSymbolsInVSIXContainer>true</IncludeDebugSymbolsInVSIXContainer>
+    <IncludeDebugSymbolsInLocalVSIXDeployment>true</IncludeDebugSymbolsInLocalVSIXDeployment>
+    <CopyBuildOutputToOutputDirectory>true</CopyBuildOutputToOutputDirectory>
+    <CopyOutputSymbolsToOutputDirectory>true</CopyOutputSymbolsToOutputDirectory>
+    <DeployExtension Condition="'$(BuildingInsideVisualStudio)' == 'true' and '$(Configuration)' == 'Debug'">true</DeployExtension>
+    <UseCodebase>true</UseCodebase>
+
+    <StartAction>Program</StartAction>
+    <StartProgram>$(DevEnvDir)devenv.exe</StartProgram>
+    <StartArguments>/rootSuffix Exp</StartArguments>
+
+    <HlslLspServerDir Condition="'$(HlslLspServerDir)' == ''">$(MSBuildThisFileDirectory)..\..\..\out\build\windows-msvc\Debug</HlslLspServerDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectCapability Include="CreateVsixContainer" />
+    <Reference Include="System.ComponentModel.Composition" />
+    <PackageReference Include="Microsoft.VisualStudio.LanguageServer.Client"
+                      Version="17.14.60"
+                      ExcludeAssets="runtime" />
+    <PackageReference Include="Microsoft.VisualStudio.SDK"
+                      Version="17.14.40265"
+                      ExcludeAssets="runtime" />
+    <PackageReference Include="Microsoft.VSSDK.BuildTools"
+                      Version="18.5.40034"
+                      PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="source.extension.vsixmanifest">
+      <IncludeInVSIX>true</IncludeInVSIX>
+    </Content>
+  </ItemGroup>
+
+  <Target Name="IncludeHlslLspServer" BeforeTargets="GetVsixSourceItems">
+    <Error Condition="!Exists('$(HlslLspServerDir)\hlsl-lsp.exe')"
+           Text="Build hlsl-lsp first or set HlslLspServerDir. Missing: $(HlslLspServerDir)\hlsl-lsp.exe" />
+    <Error Condition="!Exists('$(HlslLspServerDir)\dxcompiler.dll')"
+           Text="DXC runtime is missing: $(HlslLspServerDir)\dxcompiler.dll" />
+    <Error Condition="!Exists('$(HlslLspServerDir)\dxil.dll')"
+           Text="DXIL runtime is missing: $(HlslLspServerDir)\dxil.dll" />
+    <ItemGroup>
+      <Content Include="$(HlslLspServerDir)\hlsl-lsp.exe;
+                        $(HlslLspServerDir)\dxcompiler.dll;
+                        $(HlslLspServerDir)\dxil.dll"
+               Visible="false">
+        <IncludeInVSIX>true</IncludeInVSIX>
+        <VsixSubPath>Server</VsixSubPath>
+      </Content>
+    </ItemGroup>
+  </Target>
+</Project>

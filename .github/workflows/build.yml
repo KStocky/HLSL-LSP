@@ -128,3 +128,26 @@ jobs:
       - name: Run Catch2 tests
         if: runner.os == 'Linux'
         run: ctest --test-dir out/build/ci --build-config Debug --output-on-failure
+
+      - name: Build Visual Studio VSIX
+        if: matrix.compiler == 'msvc'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $msbuild = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild `
+            -find MSBuild\**\Bin\MSBuild.exe |
+            Select-Object -First 1
+          & $msbuild `
+            clients\visual-studio\HlslLsp.VisualStudio\HlslLsp.VisualStudio.csproj `
+            /restore /p:Configuration=Release `
+            /p:HlslLspServerDir="$env:GITHUB_WORKSPACE\out\build\ci"
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Upload Visual Studio VSIX
+        if: matrix.compiler == 'msvc'
+        uses: actions/upload-artifact@v6
+        with:
+          name: HLSL-LSP-Visual-Studio
+          path: clients/visual-studio/HlslLsp.VisualStudio/bin/Release/net472/HlslLsp.VisualStudio.vsix

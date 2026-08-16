@@ -9,6 +9,7 @@ with:
 - DXC-backed code completion
 - Hierarchical `shadertoolsconfig.json` compiler configuration
 - Transitive, virtual, open-buffer, and dependency-aware include handling
+- A Visual Studio 2026 VSIX prototype under `clients/visual-studio`
 - HLSL 2021 enabled by default
 
 ## Requirements

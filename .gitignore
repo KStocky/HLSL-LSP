@@ -2,3 +2,5 @@
 /.vs/
 /CMakeUserPresets.json
 /.cache/
+**/bin/
+**/obj/
