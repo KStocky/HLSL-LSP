@@ -210,6 +210,21 @@ TEST_CASE("Server provides semantic tokens and definitions", "[lsp][navigation][
     CHECK(definition_response->result["range"]["start"]["character"] == 2);
 }
 
+TEST_CASE("Server can disable semantic tokens for incompatible clients", "[lsp][navigation]") {
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    hlsl_intellisense::lsp::Server server{
+        [&notifications](const auto& value) { notifications.push_back(value); }, {},
+        {.semantic_tokens = false}};
+
+    const auto initialized = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()});
+    REQUIRE(initialized.has_value());
+    const auto* response = std::get_if<hlsl_intellisense::json_rpc::Response>(&*initialized);
+    REQUIRE(response != nullptr);
+    CHECK_FALSE(response->result["capabilities"].contains("semanticTokensProvider"));
+    CHECK(response->result["capabilities"]["definitionProvider"] == true);
+}
+
 TEST_CASE("Framed LSP session publishes diagnostics and completes HLSL 2021",
           "[lsp][protocol][integration]") {
     const auto uri = shader_uri();

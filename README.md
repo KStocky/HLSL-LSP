@@ -11,6 +11,11 @@ with:
 - Hierarchical `shadertoolsconfig.json` compiler configuration
 - Transitive, virtual, open-buffer, and dependency-aware include handling
 - A Visual Studio 2026 VSIX prototype under `clients/visual-studio`
+
+The Visual Studio client currently disables semantic tokens because Visual
+Studio can hang while applying them. Completion, diagnostics, and
+go-to-definition remain enabled; semantic tokens remain available to other LSP
+clients.
 - HLSL 2021 enabled by default
 
 ## Requirements

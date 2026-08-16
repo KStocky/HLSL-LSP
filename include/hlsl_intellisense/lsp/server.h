@@ -19,12 +19,16 @@
 
 namespace hlsl_intellisense::lsp {
 
+struct ServerOptions {
+    bool semantic_tokens{true};
+};
+
 class Server final {
   public:
     using NotificationSender = std::function<void(const json_rpc::Notification&)>;
     using Logger = std::function<void(std::string_view)>;
 
-    explicit Server(NotificationSender sender, Logger logger = {});
+    explicit Server(NotificationSender sender, Logger logger = {}, ServerOptions options = {});
 
     [[nodiscard]] std::optional<json_rpc::DispatchResponse>
     handle(const json_rpc::Message& message);
@@ -79,11 +83,13 @@ class Server final {
     workspace::ConfigurationOverrides editor_settings_;
     NotificationSender sender_;
     Logger logger_;
+    ServerOptions options_;
     State state_{State::uninitialized};
     bool exit_requested_{};
     bool clean_shutdown_{};
 };
 
-[[nodiscard]] int run(std::istream& input, std::ostream& output, std::ostream& errors);
+[[nodiscard]] int run(std::istream& input, std::ostream& output, std::ostream& errors,
+                      ServerOptions options = {});
 
 } // namespace hlsl_intellisense::lsp

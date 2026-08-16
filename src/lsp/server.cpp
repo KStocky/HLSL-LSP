@@ -499,8 +499,8 @@ optional_string_setting(const Json& settings, const Json* hlsl, std::string_view
 
 } // namespace
 
-Server::Server(NotificationSender sender, Logger logger)
-    : sender_{std::move(sender)}, logger_{std::move(logger)} {
+Server::Server(NotificationSender sender, Logger logger, ServerOptions options)
+    : sender_{std::move(sender)}, logger_{std::move(logger)}, options_{options} {
     if (!sender_) {
         throw std::invalid_argument{"The LSP server requires a notification sender"};
     }
@@ -516,9 +516,11 @@ void Server::register_handlers() {
                                          [this](const auto& params) { return completion(params); });
     dispatcher_.register_request_handler("textDocument/definition",
                                          [this](const auto& params) { return definition(params); });
-    dispatcher_.register_request_handler(
-        "textDocument/semanticTokens/full",
-        [this](const auto& params) { return semantic_tokens(params); });
+    if (options_.semantic_tokens) {
+        dispatcher_.register_request_handler(
+            "textDocument/semanticTokens/full",
+            [this](const auto& params) { return semantic_tokens(params); });
+    }
     dispatcher_.register_notification_handler("initialized",
                                               [this](const auto& params) { initialized(params); });
     dispatcher_.register_notification_handler("textDocument/didOpen",
@@ -598,24 +600,27 @@ Json Server::initialize(const std::optional<Json>& params) {
     }
     workspace_folders_ = std::move(workspace_folders);
     state_ = State::awaiting_initialized;
-    return {{"capabilities",
-             {{"positionEncoding", "utf-16"},
-              {"textDocumentSync",
-               {{"openClose", true}, {"change", 2}, {"save", {{"includeText", true}}}}},
-              {"completionProvider", {{"resolveProvider", false}}},
-              {"definitionProvider", true},
-              {"semanticTokensProvider",
-               {{"legend",
-                 {{"tokenTypes",
-                   Json::array({"namespace", "type", "class", "enum", "parameter", "variable",
-                                "property", "enumMember", "function", "method", "macro", "keyword",
-                                "comment", "string", "number", "typeParameter"})},
-                  {"tokenModifiers", Json::array()}}},
-                {"full", true},
-                {"range", false}}},
-              {"workspace",
-               {{"workspaceFolders", {{"supported", true}, {"changeNotifications", true}}}}}}},
-            {"serverInfo", {{"name", "HLSL-LSP"}, {"version", "0.2.0"}}}};
+    Json capabilities = {
+        {"positionEncoding", "utf-16"},
+        {"textDocumentSync",
+         {{"openClose", true}, {"change", 2}, {"save", {{"includeText", true}}}}},
+        {"completionProvider", {{"resolveProvider", false}}},
+        {"definitionProvider", true},
+        {"workspace",
+         {{"workspaceFolders", {{"supported", true}, {"changeNotifications", true}}}}}};
+    if (options_.semantic_tokens) {
+        capabilities["semanticTokensProvider"] = {
+            {"legend",
+             {{"tokenTypes",
+               Json::array({"namespace", "type", "class", "enum", "parameter", "variable",
+                            "property", "enumMember", "function", "method", "macro", "keyword",
+                            "comment", "string", "number", "typeParameter"})},
+              {"tokenModifiers", Json::array()}}},
+            {"full", true},
+            {"range", false}};
+    }
+    return {{"capabilities", std::move(capabilities)},
+            {"serverInfo", {{"name", "HLSL-LSP"}, {"version", "0.2.1"}}}};
 }
 
 Json Server::shutdown(const std::optional<Json>& params) {
@@ -1104,14 +1109,15 @@ void Server::log(std::string_view message) const {
 }
 
 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
-int run(std::istream& input, std::ostream& output, std::ostream& errors) {
+int run(std::istream& input, std::ostream& output, std::ostream& errors, ServerOptions options) {
     try {
         json_rpc::FrameWriter writer{output};
         Server server{
             [&writer](const json_rpc::Notification& notification) {
                 writer.write(json_rpc::serialize(json_rpc::Message{notification}));
             },
-            [&errors](std::string_view message) { errors << "HLSL-LSP: " << message << '\n'; }};
+            [&errors](std::string_view message) { errors << "HLSL-LSP: " << message << '\n'; },
+            options};
         json_rpc::FrameReader reader{input};
 
         while (!server.exit_requested()) {

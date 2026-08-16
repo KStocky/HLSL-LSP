@@ -60,6 +60,7 @@ public sealed class HlslLanguageClient : ILanguageClient
         var startInfo = new ProcessStartInfo
         {
             FileName = serverPath,
+            Arguments = "--disable-semantic-tokens",
             WorkingDirectory = serverDirectory,
             UseShellExecute = false,
             CreateNoWindow = true,
