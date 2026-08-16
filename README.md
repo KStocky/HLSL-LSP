@@ -47,6 +47,26 @@ All C++ tests use Catch2. First-party targets use C++23 and warnings as errors:
 `/W4 /WX` with MSVC-compatible frontends and
 `-Wall -Wextra -Wpedantic -Werror` with Linux Clang.
 
+## Configuration
+
+HLSL-LSP discovers `shadertoolsconfig.json` beside a shader and in its parent
+directories, stopping at `"root": true`. It supports:
+
+- `hlsl.preprocessorDefinitions`
+- `hlsl.additionalIncludeDirectories`
+- `hlsl.virtualDirectoryMappings`
+- `hlsl.languageVersion`
+- `hlsl.targetProfile`
+- `hlsl.entryPoint`
+- `hlsl.additionalArguments`
+
+The same properties can be sent as typed members of the `hlsl` object in
+`workspace/didChangeConfiguration`. Editor properties replace the corresponding
+file property, including empty arrays or objects; omitted properties retain the
+file value. Relative editor paths resolve from the containing workspace folder.
+Precedence is built-in defaults, outer-to-nearest configuration files, then
+editor settings.
+
 ## Code quality
 
 ```powershell

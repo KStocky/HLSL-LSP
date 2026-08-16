@@ -50,10 +50,26 @@ struct WorkspaceConfiguration {
     [[nodiscard]] dxc::CompilerOptions compiler_options() const;
 };
 
+struct ConfigurationOverrides {
+    std::optional<std::map<std::string, std::string, std::less<>>> preprocessor_definitions;
+    std::optional<std::vector<std::filesystem::path>> additional_include_directories;
+    std::optional<std::map<std::string, std::filesystem::path, std::less<>>>
+        virtual_directory_mappings;
+    std::optional<std::optional<std::string>> language_version;
+    std::optional<std::optional<std::string>> target_profile;
+    std::optional<std::optional<std::string>> entry_point;
+    std::optional<std::vector<std::string>> additional_arguments;
+};
+
 [[nodiscard]] std::vector<std::filesystem::path>
 discover_configuration_files(const std::filesystem::path& shader_directory);
 
 [[nodiscard]] WorkspaceConfiguration
 load_workspace_configuration(const std::filesystem::path& shader_directory);
+
+[[nodiscard]] WorkspaceConfiguration
+apply_configuration_overrides(WorkspaceConfiguration configuration,
+                              const ConfigurationOverrides& overrides,
+                              const std::filesystem::path& base_directory);
 
 } // namespace hlsl_intellisense::workspace

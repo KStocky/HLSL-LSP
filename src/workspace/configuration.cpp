@@ -316,4 +316,52 @@ auto load_workspace_configuration(const std::filesystem::path& shader_directory)
     return result;
 }
 
+auto apply_configuration_overrides(WorkspaceConfiguration configuration,
+                                   const ConfigurationOverrides& overrides,
+                                   const std::filesystem::path& base_directory)
+    -> WorkspaceConfiguration {
+    const auto settings_path = base_directory / "<editor-settings>";
+    if (overrides.preprocessor_definitions) {
+        configuration.preprocessor_definitions = *overrides.preprocessor_definitions;
+    }
+    if (overrides.additional_include_directories) {
+        configuration.additional_include_directories.clear();
+        configuration.additional_include_directories.reserve(
+            overrides.additional_include_directories->size());
+        for (const auto& directory : *overrides.additional_include_directories) {
+            configuration.additional_include_directories.push_back(resolve_directory(
+                settings_path, "hlsl.additionalIncludeDirectories", directory.string()));
+        }
+    }
+    if (overrides.virtual_directory_mappings) {
+        configuration.virtual_directory_mappings.clear();
+        for (const auto& [virtual_directory, real_directory] :
+             *overrides.virtual_directory_mappings) {
+            if (virtual_directory.empty() ||
+                (virtual_directory.front() != '/' && virtual_directory.front() != '\\')) {
+                throw ConfigurationError{ConfigurationErrorCode::invalid_virtual_directory,
+                                         settings_path, "hlsl.virtualDirectoryMappings",
+                                         "Virtual directory '" + virtual_directory +
+                                             "' must start with a forward slash or backslash"};
+            }
+            configuration.virtual_directory_mappings.emplace(
+                virtual_directory, resolve_directory(settings_path, "hlsl.virtualDirectoryMappings",
+                                                     real_directory.string()));
+        }
+    }
+    if (overrides.language_version) {
+        configuration.language_version = *overrides.language_version;
+    }
+    if (overrides.target_profile) {
+        configuration.target_profile = *overrides.target_profile;
+    }
+    if (overrides.entry_point) {
+        configuration.entry_point = *overrides.entry_point;
+    }
+    if (overrides.additional_arguments) {
+        configuration.additional_arguments = *overrides.additional_arguments;
+    }
+    return configuration;
+}
+
 } // namespace hlsl_intellisense::workspace

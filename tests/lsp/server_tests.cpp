@@ -406,6 +406,112 @@ TEST_CASE("Configuration change notifications reload open shaders",
     CHECK((*notifications.back().params)["diagnostics"].empty());
 }
 
+TEST_CASE("Typed editor settings override files and resolve from the workspace",
+          "[lsp][configuration][integration]") {
+    TestDirectory directory;
+    std::filesystem::create_directories(directory.path() / "shaders");
+    std::filesystem::create_directories(directory.path() / "includes");
+    {
+        std::ofstream config{directory.path() / "shadertoolsconfig.json"};
+        REQUIRE(config);
+        config << R"({"root":true,"hlsl.preprocessorDefinitions":{"FILE_SETTING":1}})";
+        REQUIRE(config);
+    }
+    {
+        std::ofstream include{directory.path() / "includes" / "Editor.hlsli"};
+        REQUIRE(include);
+        include << "static const float4 editorValue = 1.0.xxxx;\n";
+        REQUIRE(include);
+    }
+
+    const auto workspace =
+        hlsl_intellisense::workspace::DocumentUri::from_path(directory.path().string());
+    const auto document = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "shaders" / "configured.hlsl").string());
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    std::vector<std::string> logs;
+    hlsl_intellisense::lsp::Server server{
+        [&notifications](const auto& value) { notifications.push_back(value); },
+        [&logs](std::string_view message) { logs.emplace_back(message); }};
+
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1},
+        .method = "initialize",
+        .params = Json{{"workspaceFolders",
+                        Json::array({Json{{"uri", workspace.uri()}, {"name", "workspace"}}})}}}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params = Json{{"textDocument",
+                        {{"uri", document.uri()},
+                         {"languageId", "hlsl"},
+                         {"version", 1},
+                         {"text", "#include <Editor.hlsli>\n"
+                                  "#ifndef EDITOR_SETTING\n#error missing editor setting\n#endif\n"
+                                  "float4 main() : SV_Target { return editorValue; }\n"}}}}}));
+    REQUIRE(notifications.size() == 1);
+    CHECK(!(*notifications.back().params)["diagnostics"].empty());
+
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "workspace/didChangeConfiguration",
+        .params = Json{{"settings",
+                        {{"hlsl",
+                          {{"preprocessorDefinitions", {{"EDITOR_SETTING", 1}}},
+                           {"additionalIncludeDirectories", Json::array({"includes"})},
+                           {"languageVersion", "2021"}}}}}}}));
+    REQUIRE(notifications.size() == 2);
+    CHECK((*notifications.back().params)["diagnostics"].empty());
+
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "workspace/didChangeConfiguration",
+        .params = Json{{"settings", {{"hlsl", {{"preprocessorDefinitions", Json::array()}}}}}}}));
+    CHECK(notifications.size() == 2);
+    REQUIRE(logs.size() == 1);
+    CHECK(logs.back().find("preprocessorDefinitions") != std::string::npos);
+
+    static_cast<void>(server.handle(
+        hlsl_intellisense::json_rpc::Notification{.method = "workspace/didChangeConfiguration",
+                                                  .params = Json{{"settings", Json::object()}}}));
+    REQUIRE(notifications.size() == 3);
+    CHECK(!(*notifications.back().params)["diagnostics"].empty());
+}
+
+TEST_CASE("Invalid workspace folder changes are atomic", "[lsp][workspace]") {
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    std::vector<std::string> logs;
+    hlsl_intellisense::lsp::Server server{
+        [&notifications](const auto& value) { notifications.push_back(value); },
+        [&logs](std::string_view message) { logs.emplace_back(message); }};
+
+    const auto failed_initialize = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1},
+        .method = "initialize",
+        .params = Json{{"workspaceFolders",
+                        Json::array({Json{{"uri", workspace_uri()}, {"name", "valid"}},
+                                     Json{{"uri", "https://invalid"}, {"name", "invalid"}}})}}});
+    REQUIRE(failed_initialize.has_value());
+    CHECK(std::get_if<hlsl_intellisense::json_rpc::ErrorResponse>(&*failed_initialize) != nullptr);
+
+    const auto successful_initialize = server.handle(
+        hlsl_intellisense::json_rpc::Request{.id = std::int64_t{2},
+                                             .method = "initialize",
+                                             .params = Json{{"workspaceFolders", Json::array()}}});
+    REQUIRE(successful_initialize.has_value());
+    CHECK(std::get_if<hlsl_intellisense::json_rpc::Response>(&*successful_initialize) != nullptr);
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "workspace/didChangeWorkspaceFolders",
+        .params = Json{
+            {"event",
+             {{"removed", Json::array({Json{{"uri", workspace_uri()}, {"name", "not-present"}}})},
+              {"added", Json::array({Json{{"uri", "https://invalid"}, {"name", "invalid"}}})}}}}}));
+    REQUIRE(logs.size() == 1);
+    CHECK(logs.back().find("file URI") != std::string::npos);
+}
+
 TEST_CASE("Opening a previously missing include invalidates dependent roots",
           "[lsp][includes][integration]") {
     TestDirectory directory;

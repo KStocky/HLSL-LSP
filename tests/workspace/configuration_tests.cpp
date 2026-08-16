@@ -236,3 +236,52 @@ TEST_CASE("Invalid configuration is reported without fallback", "[workspace][con
               workspace::ConfigurationErrorCode::path_not_directory);
     }
 }
+
+TEST_CASE("Editor settings replace file properties and resolve from the workspace",
+          "[workspace][configuration]") {
+    TestTree tree;
+    tree.directory("workspace/editor-includes");
+    tree.directory("workspace/editor-virtual");
+    tree.directory("workspace/shaders");
+    tree.file("workspace/shadertoolsconfig.json", R"(
+        {
+          "root": true,
+          "hlsl.preprocessorDefinitions": {"FILE": 1},
+          "hlsl.additionalIncludeDirectories": ["shaders"],
+          "hlsl.virtualDirectoryMappings": {"/File": "shaders"},
+          "hlsl.languageVersion": "2018",
+          "hlsl.targetProfile": "ps_6_0",
+          "hlsl.entryPoint": "FileMain",
+          "hlsl.additionalArguments": ["-Zi"]
+        })");
+
+    workspace::ConfigurationOverrides overrides;
+    overrides.preprocessor_definitions =
+        std::map<std::string, std::string, std::less<>>{{"EDITOR", "2"}};
+    overrides.additional_include_directories =
+        std::vector<std::filesystem::path>{"editor-includes"};
+    overrides.virtual_directory_mappings =
+        std::map<std::string, std::filesystem::path, std::less<>>{{"/Editor", "editor-virtual"}};
+    overrides.language_version = std::optional<std::string>{};
+    overrides.target_profile = std::optional<std::string>{"cs_6_8"};
+    overrides.entry_point = std::optional<std::string>{};
+    overrides.additional_arguments = std::vector<std::string>{};
+
+    const auto configuration = workspace::apply_configuration_overrides(
+        workspace::load_workspace_configuration(tree.path("workspace/shaders")), overrides,
+        tree.path("workspace"));
+
+    CHECK(configuration.preprocessor_definitions ==
+          std::map<std::string, std::string, std::less<>>{{"EDITOR", "2"}});
+    CHECK(configuration.additional_include_directories ==
+          std::vector<std::filesystem::path>{
+              std::filesystem::weakly_canonical(tree.path("workspace/editor-includes"))});
+    CHECK(
+        configuration.virtual_directory_mappings ==
+        std::map<std::string, std::filesystem::path, std::less<>>{
+            {"/Editor", std::filesystem::weakly_canonical(tree.path("workspace/editor-virtual"))}});
+    CHECK(!configuration.language_version.has_value());
+    CHECK(configuration.target_profile == "cs_6_8");
+    CHECK(!configuration.entry_point.has_value());
+    CHECK(configuration.additional_arguments.empty());
+}

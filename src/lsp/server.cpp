@@ -217,6 +217,134 @@ dxc_position(std::string_view text, workspace::Position request_position) {
     }
 }
 
+[[nodiscard]] std::pair<std::string, std::filesystem::path> workspace_folder(const Json& folder) {
+    try {
+        auto uri = workspace::DocumentUri::from_uri(string_member(folder, "uri"));
+        return {uri.identity(), std::filesystem::path{uri.path()}};
+    } catch (const workspace::DocumentError& error) {
+        invalid_params(error.what());
+    }
+}
+
+[[nodiscard]] const Json* setting(const Json& settings, const Json* hlsl, std::string_view name) {
+    if (hlsl != nullptr) {
+        const auto nested = hlsl->find(name);
+        if (nested != hlsl->end()) {
+            return &*nested;
+        }
+    }
+    const auto dotted = settings.find("hlsl." + std::string{name});
+    return dotted == settings.end() ? nullptr : &*dotted;
+}
+
+[[nodiscard]] std::string setting_value(std::string_view name, const Json& value) {
+    if (value.is_string()) {
+        return value.get<std::string>();
+    }
+    if (value.is_number() || value.is_boolean()) {
+        return value.dump();
+    }
+    invalid_params("hlsl." + std::string{name} + " values must be strings, numbers, or booleans");
+}
+
+[[nodiscard]] std::optional<std::optional<std::string>>
+optional_string_setting(const Json& settings, const Json* hlsl, std::string_view name) {
+    const auto* value = setting(settings, hlsl, name);
+    if (value == nullptr) {
+        return std::nullopt;
+    }
+    if (value->is_null()) {
+        return std::optional<std::optional<std::string>>{std::in_place, std::nullopt};
+    }
+    if (!value->is_string()) {
+        invalid_params("hlsl." + std::string{name} + " must be a string or null");
+    }
+    return std::optional<std::optional<std::string>>{std::in_place, value->get<std::string>()};
+}
+
+[[nodiscard]] workspace::ConfigurationOverrides configuration_overrides(const Json& settings) {
+    if (!settings.is_object()) {
+        invalid_params("settings must be an object");
+    }
+    const Json* hlsl = nullptr;
+    if (const auto nested = settings.find("hlsl"); nested != settings.end()) {
+        if (!nested->is_object()) {
+            invalid_params("hlsl settings must be an object");
+        }
+        hlsl = &*nested;
+    }
+
+    workspace::ConfigurationOverrides result;
+    if (const auto* definitions = setting(settings, hlsl, "preprocessorDefinitions")) {
+        if (!definitions->is_object()) {
+            invalid_params("hlsl.preprocessorDefinitions must be an object");
+        }
+        std::map<std::string, std::string, std::less<>> values;
+        for (const auto& [name, value] : definitions->items()) {
+            if (name.empty()) {
+                invalid_params("Preprocessor definition names must not be empty");
+            }
+            values.emplace(name, setting_value("preprocessorDefinitions", value));
+        }
+        result.preprocessor_definitions = std::move(values);
+    }
+
+    const auto path_array =
+        [&](std::string_view name) -> std::optional<std::vector<std::filesystem::path>> {
+        const auto* value = setting(settings, hlsl, name);
+        if (value == nullptr) {
+            return std::nullopt;
+        }
+        if (!value->is_array()) {
+            invalid_params("hlsl." + std::string{name} + " must be an array of strings");
+        }
+        std::vector<std::filesystem::path> paths;
+        paths.reserve(value->size());
+        for (const auto& path : *value) {
+            if (!path.is_string()) {
+                invalid_params("hlsl." + std::string{name} + " must be an array of strings");
+            }
+            paths.emplace_back(path.get_ref<const std::string&>());
+        }
+        return paths;
+    };
+    result.additional_include_directories = path_array("additionalIncludeDirectories");
+
+    if (const auto* mappings = setting(settings, hlsl, "virtualDirectoryMappings")) {
+        if (!mappings->is_object()) {
+            invalid_params("hlsl.virtualDirectoryMappings must be an object of string paths");
+        }
+        std::map<std::string, std::filesystem::path, std::less<>> values;
+        for (const auto& [virtual_directory, real_directory] : mappings->items()) {
+            if (!real_directory.is_string()) {
+                invalid_params("hlsl.virtualDirectoryMappings must be an object of string paths");
+            }
+            values.emplace(virtual_directory, real_directory.get_ref<const std::string&>());
+        }
+        result.virtual_directory_mappings = std::move(values);
+    }
+
+    result.language_version = optional_string_setting(settings, hlsl, "languageVersion");
+    result.target_profile = optional_string_setting(settings, hlsl, "targetProfile");
+    result.entry_point = optional_string_setting(settings, hlsl, "entryPoint");
+
+    if (const auto* arguments = setting(settings, hlsl, "additionalArguments")) {
+        if (!arguments->is_array()) {
+            invalid_params("hlsl.additionalArguments must be an array of strings");
+        }
+        std::vector<std::string> values;
+        values.reserve(arguments->size());
+        for (const auto& argument : *arguments) {
+            if (!argument.is_string()) {
+                invalid_params("hlsl.additionalArguments must be an array of strings");
+            }
+            values.push_back(argument.get<std::string>());
+        }
+        result.additional_arguments = std::move(values);
+    }
+    return result;
+}
+
 } // namespace
 
 Server::Server(NotificationSender sender, Logger logger)
@@ -289,13 +417,15 @@ Json Server::initialize(const std::optional<Json>& params) {
         throw HandlerError{json_rpc::invalid_request_code, "Initialize may only be requested once"};
     }
     const auto& value = object_params(params);
+    std::unordered_map<std::string, std::filesystem::path> workspace_folders;
     if (const auto folders = value.find("workspaceFolders");
         folders != value.end() && !folders->is_null()) {
         if (!folders->is_array()) {
             invalid_params("workspaceFolders must be an array or null");
         }
         for (const auto& folder : *folders) {
-            workspace_folders_.insert(workspace_folder_identity(folder));
+            const auto [identity, path] = workspace_folder(folder);
+            workspace_folders.insert_or_assign(identity, path);
         }
     } else if (const auto root_uri = value.find("rootUri");
                root_uri != value.end() && !root_uri->is_null()) {
@@ -303,13 +433,13 @@ Json Server::initialize(const std::optional<Json>& params) {
             invalid_params("rootUri must be a string or null");
         }
         try {
-            workspace_folders_.insert(
-                workspace::DocumentUri::from_uri(root_uri->get_ref<const std::string&>())
-                    .identity());
+            auto uri = workspace::DocumentUri::from_uri(root_uri->get_ref<const std::string&>());
+            workspace_folders.insert_or_assign(uri.identity(), std::filesystem::path{uri.path()});
         } catch (const workspace::DocumentError& error) {
             invalid_params(error.what());
         }
     }
+    workspace_folders_ = std::move(workspace_folders);
     state_ = State::awaiting_initialized;
     return {{"capabilities",
              {{"positionEncoding", "utf-16"},
@@ -484,7 +614,12 @@ void Server::did_close(const std::optional<Json>& params) {
 void Server::did_change_configuration(const std::optional<Json>& params) {
     try {
         require_running();
-        static_cast<void>(object_params(params));
+        const auto candidate =
+            configuration_overrides(object_member(object_params(params), "settings"));
+        for (const auto& document : documents_.open_snapshots()) {
+            static_cast<void>(configuration_for(document, candidate));
+        }
+        editor_settings_ = candidate;
         reanalyze_all();
     } catch (const std::exception& error) {
         log(error.what());
@@ -500,12 +635,15 @@ void Server::did_change_workspace_folders(const std::optional<Json>& params) {
         if (!removed.is_array() || !added.is_array()) {
             invalid_params("Workspace folder changes must contain added and removed arrays");
         }
+        auto workspace_folders = workspace_folders_;
         for (const auto& folder : removed) {
-            workspace_folders_.erase(workspace_folder_identity(folder));
+            workspace_folders.erase(workspace_folder_identity(folder));
         }
         for (const auto& folder : added) {
-            workspace_folders_.insert(workspace_folder_identity(folder));
+            const auto [identity, path] = workspace_folder(folder);
+            workspace_folders.insert_or_assign(identity, path);
         }
+        workspace_folders_ = std::move(workspace_folders);
         reanalyze_all();
     } catch (const std::exception& error) {
         log(error.what());
@@ -578,15 +716,7 @@ void Server::analyze_and_publish(std::string_view uri) {
     const auto identity = snapshot.document_uri().identity();
     auto analysis = analyses_.find(identity);
     const auto open_documents = documents_.open_snapshots();
-    workspace::WorkspaceConfiguration configuration;
-    const auto shader_directory = std::filesystem::path{snapshot.path()}.parent_path();
-    std::error_code error;
-    if (std::filesystem::is_directory(shader_directory, error)) {
-        configuration = workspace::load_workspace_configuration(shader_directory);
-    } else if (error && error != std::errc::no_such_file_or_directory) {
-        throw std::filesystem::filesystem_error{"Unable to inspect shader directory",
-                                                shader_directory, error};
-    }
+    auto configuration = configuration_for(snapshot, editor_settings_);
     auto resolved = workspace::resolve_includes(snapshot, open_documents, configuration);
     const auto dxc_root_path = resolved.sources.front().path;
     if (analysis == analyses_.end()) {
@@ -617,6 +747,45 @@ void Server::analyze_and_publish(std::string_view uri) {
     if (latest.version() == analysis->second.version) {
         publish_diagnostics(latest, analysis->second.translation_unit.diagnostics());
     }
+}
+
+workspace::WorkspaceConfiguration
+Server::configuration_for(const workspace::SourceSnapshot& snapshot,
+                          const workspace::ConfigurationOverrides& overrides) const {
+    workspace::WorkspaceConfiguration configuration;
+    const auto shader_directory = std::filesystem::path{snapshot.path()}.parent_path();
+    std::error_code error;
+    if (std::filesystem::is_directory(shader_directory, error)) {
+        configuration = workspace::load_workspace_configuration(shader_directory);
+    } else if (error && error != std::errc::no_such_file_or_directory) {
+        throw std::filesystem::filesystem_error{"Unable to inspect shader directory",
+                                                shader_directory, error};
+    }
+    return workspace::apply_configuration_overrides(std::move(configuration), overrides,
+                                                    configuration_base_directory(snapshot.path()));
+}
+
+std::filesystem::path Server::configuration_base_directory(std::string_view shader_path) const {
+    auto directory = std::filesystem::absolute(std::filesystem::path{shader_path}.parent_path())
+                         .lexically_normal();
+    auto candidate = directory;
+    while (!candidate.empty()) {
+        try {
+            const auto identity = workspace::DocumentUri::from_path(candidate.string()).identity();
+            if (const auto folder = workspace_folders_.find(identity);
+                folder != workspace_folders_.end()) {
+                return folder->second;
+            }
+        } catch (const workspace::DocumentError&) {
+            break;
+        }
+        const auto parent = candidate.parent_path();
+        if (parent == candidate) {
+            break;
+        }
+        candidate = parent;
+    }
+    return directory;
 }
 
 void Server::reanalyze_all() {

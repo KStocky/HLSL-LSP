@@ -2,8 +2,10 @@
 
 #include <hlsl_intellisense/dxc/intellisense.h>
 #include <hlsl_intellisense/json_rpc/dispatcher.h>
+#include <hlsl_intellisense/workspace/configuration.h>
 #include <hlsl_intellisense/workspace/document_store.h>
 
+#include <filesystem>
 #include <functional>
 #include <istream>
 #include <memory>
@@ -57,6 +59,11 @@ class Server final {
     void analyze_affected(std::string_view uri);
     void analyze_and_publish(std::string_view uri);
     void reanalyze_all();
+    [[nodiscard]] workspace::WorkspaceConfiguration
+    configuration_for(const workspace::SourceSnapshot& snapshot,
+                      const workspace::ConfigurationOverrides& overrides) const;
+    [[nodiscard]] std::filesystem::path
+    configuration_base_directory(std::string_view shader_path) const;
     void publish_diagnostics(const workspace::SourceSnapshot& snapshot,
                              const std::vector<dxc::Diagnostic>& diagnostics);
     void require_running() const;
@@ -66,7 +73,8 @@ class Server final {
     workspace::DocumentStore documents_;
     dxc::Intellisense intellisense_;
     std::unordered_map<std::string, Analysis> analyses_;
-    std::unordered_set<std::string> workspace_folders_;
+    std::unordered_map<std::string, std::filesystem::path> workspace_folders_;
+    workspace::ConfigurationOverrides editor_settings_;
     NotificationSender sender_;
     Logger logger_;
     State state_{State::uninitialized};
