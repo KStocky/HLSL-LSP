@@ -237,6 +237,30 @@ class TaskTokens final {
     return TokenKind::unknown;
 }
 
+[[nodiscard]] bool supports_descriptor_heaps(std::string_view target_profile) {
+    static const std::regex profile_pattern{R"(^[A-Za-z]+_([0-9]+)_([0-9]+|x)$)"};
+    std::cmatch match;
+    const std::string profile{target_profile};
+    if (!std::regex_match(profile.c_str(), match, profile_pattern)) {
+        return false;
+    }
+
+    try {
+        const auto major = std::stoul(match[1].str());
+        if (major > 6 || match[2].str() == "x") {
+            return true;
+        }
+        return major == 6 && std::stoul(match[2].str()) >= 6;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
+[[nodiscard]] bool is_missing_descriptor_heap_diagnostic(std::string_view message) {
+    return message == "use of undeclared identifier 'ResourceDescriptorHeap'" ||
+           message == "use of undeclared identifier 'SamplerDescriptorHeap'";
+}
+
 [[nodiscard]] auto cursor_kind_at(IDxcTranslationUnit& translation_unit,
                                   IDxcSourceLocation& location) -> std::uint32_t {
     ComPtr<IDxcCursor> cursor;
@@ -303,6 +327,7 @@ struct TranslationUnit::Impl final {
     std::string root_path;
     std::vector<SourceFile> sources;
     std::vector<std::string> arguments;
+    bool descriptor_heaps_supported{};
     std::vector<ComPtr<IDxcUnsavedFile>> unsaved_files;
     ComPtr<IDxcTranslationUnit> translation_unit;
 
@@ -394,6 +419,10 @@ auto TranslationUnit::diagnostics() const -> std::vector<Diagnostic> {
         char* spelling{};
         check(diagnostic->GetSpelling(&spelling), "GetSpelling");
         TaskString owned_spelling{spelling};
+        if (implementation_->descriptor_heaps_supported &&
+            is_missing_descriptor_heap_diagnostic(owned_spelling.view())) {
+            continue;
+        }
 
         result.push_back(Diagnostic{
             .severity = map_severity(severity),
@@ -584,6 +613,8 @@ auto Intellisense::parse(std::string root_path, std::vector<SourceFile> files,
     implementation->owner = implementation_;
     implementation->root_path = std::move(root_path);
     implementation->sources = std::move(files);
+    implementation->descriptor_heaps_supported =
+        supports_descriptor_heaps(options.target_profile);
     implementation->rebuild_unsaved_files();
 
     implementation->arguments = options.arguments();

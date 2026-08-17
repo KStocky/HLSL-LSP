@@ -99,6 +99,48 @@ TEST_CASE("DXC IntelliSense analyzes HLSL 2021", "[dxc][integration]") {
     }));
 }
 
+TEST_CASE("DXC IntelliSense recognizes Shader Model 6.6 descriptor heaps",
+          "[dxc][integration]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.target_profile = "lib_6_6";
+    auto translation_unit = intellisense.parse(
+        shader_path,
+        {{shader_path,
+          "RWByteAddressBuffer GetBuffer(uint index) {\n"
+          "    return ResourceDescriptorHeap[index];\n"
+          "}\n"
+          "SamplerState GetSampler(uint index) {\n"
+          "    return SamplerDescriptorHeap[index];\n"
+          "}\n"}},
+        options);
+
+    const auto diagnostics = translation_unit.diagnostics();
+    std::string messages;
+    for (const auto& diagnostic : diagnostics) {
+        messages += diagnostic.message;
+        messages += '\n';
+    }
+    INFO(messages);
+    CHECK(diagnostics.empty());
+}
+
+TEST_CASE("DXC IntelliSense reports descriptor heaps below Shader Model 6.6",
+          "[dxc][integration]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.target_profile = "lib_6_5";
+    auto translation_unit = intellisense.parse(
+        shader_path,
+        {{shader_path,
+          "RWByteAddressBuffer GetBuffer(uint index) {\n"
+          "    return ResourceDescriptorHeap[index];\n"
+          "}\n"}},
+        options);
+
+    CHECK_FALSE(translation_unit.diagnostics().empty());
+}
+
 TEST_CASE("DXC IntelliSense reports diagnostics", "[dxc][integration]") {
     hlsl_intellisense::dxc::Intellisense intellisense;
     auto translation_unit = intellisense.parse(

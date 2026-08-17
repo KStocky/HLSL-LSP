@@ -67,6 +67,9 @@ directories, stopping at `"root": true`. It supports:
 - `hlsl.entryPoint`
 - `hlsl.additionalArguments`
 
+Set `hlsl.targetProfile` to `lib_6_6` or another Shader Model 6.6+ profile when
+using `ResourceDescriptorHeap` or `SamplerDescriptorHeap`.
+
 The same properties can be sent as typed members of the `hlsl` object in
 `workspace/didChangeConfiguration`. Editor properties replace the corresponding
 file property, including empty arrays or objects; omitted properties retain the

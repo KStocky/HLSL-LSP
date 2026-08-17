@@ -7,8 +7,9 @@ Visual Studio's HLSL Tools extension claims the same file extensions and is not
 currently compatible with HLSL-LSP. Disable or uninstall HLSL Tools before
 installing this VSIX.
 Go-to-definition is provided by the server through LSP. The VSIX provides safe
-native lexical colouring for HLSL keywords, functions, preprocessor directives,
-comments, strings, and numbers. LSP semantic tokens are disabled only in Visual Studio
+native lexical colouring for HLSL keywords, built-in and declared types,
+functions, preprocessor directives, comments, strings, and numbers. LSP semantic
+tokens are disabled only in Visual Studio
 because its LSP client can hang the editor while applying them; the language
 server still provides richer semantic tokens to other clients.
 

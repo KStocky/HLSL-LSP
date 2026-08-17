@@ -13,6 +13,7 @@ internal static class HlslClassificationNames
     internal const string Keyword = "HLSL-LSP keyword";
     internal const string Preprocessor = "HLSL-LSP preprocessor";
     internal const string Function = "HLSL-LSP function";
+    internal const string Type = "HLSL-LSP type";
 
 #pragma warning disable CS0649
     [Export(typeof(ClassificationTypeDefinition))]
@@ -29,6 +30,11 @@ internal static class HlslClassificationNames
     [Name(Function)]
     [BaseDefinition(PredefinedClassificationTypeNames.Method)]
     internal static ClassificationTypeDefinition FunctionDefinition;
+
+    [Export(typeof(ClassificationTypeDefinition))]
+    [Name(Type)]
+    [BaseDefinition(PredefinedClassificationTypeNames.Type)]
+    internal static ClassificationTypeDefinition TypeDefinition;
 #pragma warning restore CS0649
 }
 
@@ -61,6 +67,12 @@ internal sealed class HlslClassifier : IClassifier
             "inline", "inout", "namespace", "nointerpolation", "out", "precise", "register",
             "return", "row_major", "static", "struct", "switch", "template", "true",
             "typedef", "typename", "uniform", "using", "volatile", "while",
+        },
+        StringComparer.Ordinal);
+
+    private static readonly HashSet<string> BuiltInTypes = new HashSet<string>(
+        new[]
+        {
             "bool", "bool2", "bool3", "bool4", "double", "double2", "double3", "double4",
             "float", "float2", "float3", "float4", "float2x2", "float3x3", "float4x4",
             "half", "half2", "half3", "half4", "int", "int2", "int3", "int4",
@@ -77,6 +89,7 @@ internal sealed class HlslClassifier : IClassifier
     private readonly IClassificationType keyword;
     private readonly IClassificationType preprocessor;
     private readonly IClassificationType function;
+    private readonly IClassificationType type;
     private readonly IClassificationType comment;
     private readonly IClassificationType text;
     private readonly IClassificationType number;
@@ -89,6 +102,7 @@ internal sealed class HlslClassifier : IClassifier
         keyword = registry.GetClassificationType(HlslClassificationNames.Keyword);
         preprocessor = registry.GetClassificationType(HlslClassificationNames.Preprocessor);
         function = registry.GetClassificationType(HlslClassificationNames.Function);
+        type = registry.GetClassificationType(HlslClassificationNames.Type);
         comment = registry.GetClassificationType(PredefinedClassificationTypeNames.Comment);
         text = registry.GetClassificationType(PredefinedClassificationTypeNames.String);
         number = registry.GetClassificationType(PredefinedClassificationTypeNames.Number);
@@ -136,8 +150,10 @@ internal sealed class HlslClassifier : IClassifier
     private IReadOnlyList<TokenSpan> Tokenize(string source)
     {
         var result = new List<TokenSpan>();
+        var userTypes = new HashSet<string>(StringComparer.Ordinal);
         var offset = 0;
         var firstNonWhitespaceOnLine = true;
+        var expectTypeName = false;
         while (offset < source.Length)
         {
             var current = source[offset];
@@ -215,9 +231,26 @@ internal sealed class HlslClassifier : IClassifier
                 {
                     end++;
                 }
-                if (Keywords.Contains(source.Substring(offset, end - offset)))
+                var identifier = source.Substring(offset, end - offset);
+                if (expectTypeName && Keywords.Contains(identifier))
                 {
                     result.Add(new TokenSpan(offset, end - offset, keyword));
+                }
+                else if (expectTypeName)
+                {
+                    userTypes.Add(identifier);
+                    result.Add(new TokenSpan(offset, end - offset, type));
+                    expectTypeName = false;
+                }
+                else if (BuiltInTypes.Contains(identifier) || userTypes.Contains(identifier))
+                {
+                    result.Add(new TokenSpan(offset, end - offset, type));
+                }
+                else if (Keywords.Contains(identifier))
+                {
+                    result.Add(new TokenSpan(offset, end - offset, keyword));
+                    expectTypeName = identifier == "struct" || identifier == "class" ||
+                                     identifier == "enum" || identifier == "typename";
                 }
                 else
                 {
