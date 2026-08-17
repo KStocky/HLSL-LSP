@@ -12,6 +12,7 @@ internal static class HlslClassificationNames
 {
     internal const string Keyword = "HLSL-LSP keyword";
     internal const string Preprocessor = "HLSL-LSP preprocessor";
+    internal const string Function = "HLSL-LSP function";
 
 #pragma warning disable CS0649
     [Export(typeof(ClassificationTypeDefinition))]
@@ -23,6 +24,11 @@ internal static class HlslClassificationNames
     [Name(Preprocessor)]
     [BaseDefinition(PredefinedClassificationTypeNames.Keyword)]
     internal static ClassificationTypeDefinition PreprocessorDefinition;
+
+    [Export(typeof(ClassificationTypeDefinition))]
+    [Name(Function)]
+    [BaseDefinition(PredefinedClassificationTypeNames.Method)]
+    internal static ClassificationTypeDefinition FunctionDefinition;
 #pragma warning restore CS0649
 }
 
@@ -41,7 +47,7 @@ internal sealed class HlslClassifierProvider : IClassifierProvider
         }
 
         return textBuffer.Properties.GetOrCreateSingletonProperty(
-            () => new HlslClassifier(textBuffer, ClassificationRegistry));
+            () => new HlslClassifier(ClassificationRegistry));
     }
 }
 
@@ -70,6 +76,7 @@ internal sealed class HlslClassifier : IClassifier
 
     private readonly IClassificationType keyword;
     private readonly IClassificationType preprocessor;
+    private readonly IClassificationType function;
     private readonly IClassificationType comment;
     private readonly IClassificationType text;
     private readonly IClassificationType number;
@@ -77,17 +84,21 @@ internal sealed class HlslClassifier : IClassifier
     private ITextSnapshot cachedSnapshot;
     private IReadOnlyList<TokenSpan> cachedTokens = Array.Empty<TokenSpan>();
 
-    internal HlslClassifier(ITextBuffer textBuffer, IClassificationTypeRegistryService registry)
+    internal HlslClassifier(IClassificationTypeRegistryService registry)
     {
         keyword = registry.GetClassificationType(HlslClassificationNames.Keyword);
         preprocessor = registry.GetClassificationType(HlslClassificationNames.Preprocessor);
+        function = registry.GetClassificationType(HlslClassificationNames.Function);
         comment = registry.GetClassificationType(PredefinedClassificationTypeNames.Comment);
         text = registry.GetClassificationType(PredefinedClassificationTypeNames.String);
         number = registry.GetClassificationType(PredefinedClassificationTypeNames.Number);
-        textBuffer.Changed += OnBufferChanged;
     }
 
-    public event EventHandler<ClassificationChangedEventArgs> ClassificationChanged;
+    public event EventHandler<ClassificationChangedEventArgs> ClassificationChanged
+    {
+        add { }
+        remove { }
+    }
 
     public IList<ClassificationSpan> GetClassificationSpans(SnapshotSpan span)
     {
@@ -120,20 +131,6 @@ internal sealed class HlslClassifier : IClassifier
 
             return cachedTokens;
         }
-    }
-
-    private void OnBufferChanged(object sender, TextContentChangedEventArgs eventArgs)
-    {
-        lock (cacheLock)
-        {
-            cachedSnapshot = null;
-            cachedTokens = Array.Empty<TokenSpan>();
-        }
-
-        ClassificationChanged?.Invoke(
-            this,
-            new ClassificationChangedEventArgs(
-                new SnapshotSpan(eventArgs.After, 0, eventArgs.After.Length)));
     }
 
     private IReadOnlyList<TokenSpan> Tokenize(string source)
@@ -221,6 +218,18 @@ internal sealed class HlslClassifier : IClassifier
                 if (Keywords.Contains(source.Substring(offset, end - offset)))
                 {
                     result.Add(new TokenSpan(offset, end - offset, keyword));
+                }
+                else
+                {
+                    var next = end;
+                    while (next < source.Length && char.IsWhiteSpace(source[next]))
+                    {
+                        next++;
+                    }
+                    if (next < source.Length && source[next] == '(')
+                    {
+                        result.Add(new TokenSpan(offset, end - offset, function));
+                    }
                 }
                 offset = end;
                 firstNonWhitespaceOnLine = false;
