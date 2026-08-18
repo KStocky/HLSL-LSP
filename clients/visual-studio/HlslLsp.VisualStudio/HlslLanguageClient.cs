@@ -7,6 +7,7 @@ using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.VisualStudio.LanguageServer.Client;
+using Microsoft.VisualStudio.Shell;
 using Microsoft.VisualStudio.Threading;
 using Microsoft.VisualStudio.Utilities;
 
@@ -37,12 +38,26 @@ public sealed class HlslLanguageClient : ILanguageClient
 
     public event AsyncEventHandler<EventArgs> StopAsync;
 
-    public async Task OnLoadedAsync()
+    public Task OnLoadedAsync()
     {
-        if (StartAsync != null)
+        var start = StartAsync;
+        if (start != null)
         {
-            await StartAsync.InvokeAsync(this, EventArgs.Empty);
+#pragma warning disable VSSDK007
+            _ = ThreadHelper.JoinableTaskFactory.RunAsync(async () =>
+            {
+                try
+                {
+                    await start.InvokeAsync(this, EventArgs.Empty);
+                }
+                catch (Exception error)
+                {
+                    Debug.WriteLine($"HLSL-LSP: Language-client startup failed: {error}");
+                }
+            });
+#pragma warning restore VSSDK007
         }
+        return Task.CompletedTask;
     }
 
     public Task<Connection> ActivateAsync(CancellationToken token)
@@ -108,7 +123,7 @@ public sealed class HlslLanguageClient : ILanguageClient
     {
         if (StopAsync != null)
         {
-            await StopAsync.InvokeAsync(this, EventArgs.Empty);
+            ObserveFault(StopAsync.InvokeAsync(this, EventArgs.Empty));
         }
 
         var process = Interlocked.Exchange(ref serverProcess, null);
@@ -119,12 +134,22 @@ public sealed class HlslLanguageClient : ILanguageClient
 
         await Task.Run(() =>
         {
-            if (!process.HasExited && !process.WaitForExit(2000))
+            if (!process.HasExited && !process.WaitForExit(500))
             {
                 process.Kill();
                 process.WaitForExit();
             }
             process.Dispose();
-        });
+        }).ConfigureAwait(false);
+    }
+
+    private static void ObserveFault(Task task)
+    {
+        _ = task.ContinueWith(
+            completed => Debug.WriteLine(
+                $"HLSL-LSP: Background language-client operation failed: {completed.Exception}"),
+            CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted,
+            TaskScheduler.Default);
     }
 }

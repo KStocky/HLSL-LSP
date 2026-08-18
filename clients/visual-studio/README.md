@@ -13,6 +13,10 @@ tokens are disabled only in Visual Studio
 because its LSP client can hang the editor while applying them; the language
 server still provides richer semantic tokens to other clients.
 
+Language-client startup is joinable but does not block extension loading, and
+shutdown never waits for a failed LSP broker operation. Native classification
+returns cached results synchronously and performs tokenization in the background.
+
 ## Build
 
 Build the native server first:

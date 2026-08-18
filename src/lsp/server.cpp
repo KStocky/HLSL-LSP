@@ -620,7 +620,7 @@ Json Server::initialize(const std::optional<Json>& params) {
             {"range", false}};
     }
     return {{"capabilities", std::move(capabilities)},
-            {"serverInfo", {{"name", "HLSL-LSP"}, {"version", "0.2.6"}}}};
+            {"serverInfo", {{"name", "HLSL-LSP"}, {"version", "0.3.0"}}}};
 }
 
 Json Server::shutdown(const std::optional<Json>& params) {

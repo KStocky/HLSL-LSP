@@ -1,6 +1,10 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel.Composition;
+using System.Diagnostics;
+using System.Threading;
+using System.Threading.Tasks;
+using Microsoft.VisualStudio.Shell;
 using Microsoft.VisualStudio.Language.StandardClassification;
 using Microsoft.VisualStudio.Text;
 using Microsoft.VisualStudio.Text.Classification;
@@ -53,7 +57,7 @@ internal sealed class HlslClassifierProvider : IClassifierProvider
         }
 
         return textBuffer.Properties.GetOrCreateSingletonProperty(
-            () => new HlslClassifier(ClassificationRegistry));
+            () => new HlslClassifier(textBuffer, ClassificationRegistry));
     }
 }
 
@@ -93,12 +97,18 @@ internal sealed class HlslClassifier : IClassifier
     private readonly IClassificationType comment;
     private readonly IClassificationType text;
     private readonly IClassificationType number;
-    private readonly object cacheLock = new object();
-    private ITextSnapshot cachedSnapshot;
-    private IReadOnlyList<TokenSpan> cachedTokens = Array.Empty<TokenSpan>();
+    private readonly ITextBuffer textBuffer;
+    private readonly object scheduleLock = new object();
+    private ClassificationCache cache;
+    private ITextSnapshot scheduledSnapshot;
+    private CancellationTokenSource tokenizationCancellation;
+    private Task tokenizationTask;
 
-    internal HlslClassifier(IClassificationTypeRegistryService registry)
+    internal HlslClassifier(
+        ITextBuffer textBuffer,
+        IClassificationTypeRegistryService registry)
     {
+        this.textBuffer = textBuffer ?? throw new ArgumentNullException(nameof(textBuffer));
         keyword = registry.GetClassificationType(HlslClassificationNames.Keyword);
         preprocessor = registry.GetClassificationType(HlslClassificationNames.Preprocessor);
         function = registry.GetClassificationType(HlslClassificationNames.Function);
@@ -106,23 +116,32 @@ internal sealed class HlslClassifier : IClassifier
         comment = registry.GetClassificationType(PredefinedClassificationTypeNames.Comment);
         text = registry.GetClassificationType(PredefinedClassificationTypeNames.String);
         number = registry.GetClassificationType(PredefinedClassificationTypeNames.Number);
+        textBuffer.Changed += OnTextBufferChanged;
+        ScheduleTokenization(textBuffer.CurrentSnapshot);
     }
 
-    public event EventHandler<ClassificationChangedEventArgs> ClassificationChanged
-    {
-        add { }
-        remove { }
-    }
+    public event EventHandler<ClassificationChangedEventArgs> ClassificationChanged;
 
     public IList<ClassificationSpan> GetClassificationSpans(SnapshotSpan span)
     {
-        var tokens = TokensFor(span.Snapshot);
-        var result = new List<ClassificationSpan>();
-        foreach (var token in tokens)
+        var currentCache = Volatile.Read(ref cache);
+        if (span.IsEmpty || currentCache == null ||
+            !ReferenceEquals(currentCache.Snapshot, span.Snapshot))
         {
-            if (token.End <= span.Start.Position || token.Start >= span.End.Position)
+            ScheduleTokenization(span.Snapshot);
+            return Array.Empty<ClassificationSpan>();
+        }
+
+        var result = new List<ClassificationSpan>();
+        var tokens = currentCache.Tokens;
+        for (var index = FirstTokenEndingAfter(tokens, span.Start.Position);
+             index < tokens.Count;
+             index++)
+        {
+            var token = tokens[index];
+            if (token.Start >= span.End.Position)
             {
-                continue;
+                break;
             }
 
             result.Add(new ClassificationSpan(
@@ -133,21 +152,90 @@ internal sealed class HlslClassifier : IClassifier
         return result;
     }
 
-    private IReadOnlyList<TokenSpan> TokensFor(ITextSnapshot snapshot)
+    private void OnTextBufferChanged(object sender, TextContentChangedEventArgs eventArgs)
     {
-        lock (cacheLock)
-        {
-            if (!ReferenceEquals(snapshot, cachedSnapshot))
-            {
-                cachedTokens = Tokenize(snapshot.GetText());
-                cachedSnapshot = snapshot;
-            }
-
-            return cachedTokens;
-        }
+        ScheduleTokenization(eventArgs.After);
     }
 
-    private IReadOnlyList<TokenSpan> Tokenize(string source)
+    private void ScheduleTokenization(ITextSnapshot snapshot)
+    {
+        CancellationToken cancellationToken;
+        lock (scheduleLock)
+        {
+            var currentCache = Volatile.Read(ref cache);
+            if ((currentCache != null && ReferenceEquals(currentCache.Snapshot, snapshot)) ||
+                ReferenceEquals(scheduledSnapshot, snapshot))
+            {
+                return;
+            }
+
+            if (tokenizationTask != null && !tokenizationTask.IsCompleted)
+            {
+                tokenizationCancellation?.Cancel();
+            }
+            tokenizationCancellation?.Dispose();
+            tokenizationCancellation = new CancellationTokenSource();
+            cancellationToken = tokenizationCancellation.Token;
+            scheduledSnapshot = snapshot;
+        }
+
+        tokenizationTask = Task.Run(async () =>
+        {
+            try
+            {
+                var tokens = Tokenize(snapshot.GetText(), 0);
+                cancellationToken.ThrowIfCancellationRequested();
+                await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+                if (cancellationToken.IsCancellationRequested ||
+                    !ReferenceEquals(textBuffer.CurrentSnapshot, snapshot))
+                {
+                    return;
+                }
+
+                Volatile.Write(ref cache, new ClassificationCache(snapshot, tokens));
+                lock (scheduleLock)
+                {
+                    if (ReferenceEquals(scheduledSnapshot, snapshot))
+                    {
+                        scheduledSnapshot = null;
+                    }
+                }
+
+                ClassificationChanged?.Invoke(
+                    this,
+                    new ClassificationChangedEventArgs(
+                        new SnapshotSpan(snapshot, 0, snapshot.Length)));
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            catch (Exception error)
+            {
+                Debug.WriteLine($"HLSL-LSP: Background classification failed: {error}");
+            }
+        }, cancellationToken);
+    }
+
+    private static int FirstTokenEndingAfter(IReadOnlyList<TokenSpan> tokens, int position)
+    {
+        var lower = 0;
+        var upper = tokens.Count;
+        while (lower < upper)
+        {
+            var middle = lower + ((upper - lower) / 2);
+            if (tokens[middle].End <= position)
+            {
+                lower = middle + 1;
+            }
+            else
+            {
+                upper = middle;
+            }
+        }
+        return lower;
+    }
+
+    private IReadOnlyList<TokenSpan> Tokenize(string source, int sourceOffset)
     {
         var result = new List<TokenSpan>();
         var userTypes = new HashSet<string>(StringComparer.Ordinal);
@@ -173,7 +261,7 @@ internal sealed class HlslClassifier : IClassifier
             {
                 var end = source.IndexOfAny(new[] { '\r', '\n' }, offset + 2);
                 end = end < 0 ? source.Length : end;
-                result.Add(new TokenSpan(offset, end - offset, comment));
+                result.Add(new TokenSpan(sourceOffset + offset, end - offset, comment));
                 offset = end;
                 firstNonWhitespaceOnLine = false;
                 continue;
@@ -182,7 +270,7 @@ internal sealed class HlslClassifier : IClassifier
             {
                 var end = source.IndexOf("*/", offset + 2, StringComparison.Ordinal);
                 end = end < 0 ? source.Length : end + 2;
-                result.Add(new TokenSpan(offset, end - offset, comment));
+                result.Add(new TokenSpan(sourceOffset + offset, end - offset, comment));
                 offset = end;
                 firstNonWhitespaceOnLine = false;
                 continue;
@@ -202,7 +290,7 @@ internal sealed class HlslClassifier : IClassifier
                         break;
                     }
                 }
-                result.Add(new TokenSpan(offset, end - offset, text));
+                result.Add(new TokenSpan(sourceOffset + offset, end - offset, text));
                 offset = end;
                 firstNonWhitespaceOnLine = false;
                 continue;
@@ -219,7 +307,7 @@ internal sealed class HlslClassifier : IClassifier
                 {
                     end++;
                 }
-                result.Add(new TokenSpan(offset, end - offset, preprocessor));
+                result.Add(new TokenSpan(sourceOffset + offset, end - offset, preprocessor));
                 offset = end;
                 firstNonWhitespaceOnLine = false;
                 continue;
@@ -234,21 +322,21 @@ internal sealed class HlslClassifier : IClassifier
                 var identifier = source.Substring(offset, end - offset);
                 if (expectTypeName && Keywords.Contains(identifier))
                 {
-                    result.Add(new TokenSpan(offset, end - offset, keyword));
+                    result.Add(new TokenSpan(sourceOffset + offset, end - offset, keyword));
                 }
                 else if (expectTypeName)
                 {
                     userTypes.Add(identifier);
-                    result.Add(new TokenSpan(offset, end - offset, type));
+                    result.Add(new TokenSpan(sourceOffset + offset, end - offset, type));
                     expectTypeName = false;
                 }
                 else if (BuiltInTypes.Contains(identifier) || userTypes.Contains(identifier))
                 {
-                    result.Add(new TokenSpan(offset, end - offset, type));
+                    result.Add(new TokenSpan(sourceOffset + offset, end - offset, type));
                 }
                 else if (Keywords.Contains(identifier))
                 {
-                    result.Add(new TokenSpan(offset, end - offset, keyword));
+                    result.Add(new TokenSpan(sourceOffset + offset, end - offset, keyword));
                     expectTypeName = identifier == "struct" || identifier == "class" ||
                                      identifier == "enum" || identifier == "typename";
                 }
@@ -261,7 +349,7 @@ internal sealed class HlslClassifier : IClassifier
                     }
                     if (next < source.Length && source[next] == '(')
                     {
-                        result.Add(new TokenSpan(offset, end - offset, function));
+                        result.Add(new TokenSpan(sourceOffset + offset, end - offset, function));
                     }
                 }
                 offset = end;
@@ -278,7 +366,7 @@ internal sealed class HlslClassifier : IClassifier
                 {
                     end++;
                 }
-                result.Add(new TokenSpan(offset, end - offset, number));
+                result.Add(new TokenSpan(sourceOffset + offset, end - offset, number));
                 offset = end;
                 firstNonWhitespaceOnLine = false;
                 continue;
@@ -310,5 +398,19 @@ internal sealed class HlslClassifier : IClassifier
         internal int Length { get; }
         internal int End => Start + Length;
         internal IClassificationType Classification { get; }
+    }
+
+    private sealed class ClassificationCache
+    {
+        internal ClassificationCache(
+            ITextSnapshot snapshot,
+            IReadOnlyList<TokenSpan> tokens)
+        {
+            Snapshot = snapshot;
+            Tokens = tokens;
+        }
+
+        internal ITextSnapshot Snapshot { get; }
+        internal IReadOnlyList<TokenSpan> Tokens { get; }
     }
 }
