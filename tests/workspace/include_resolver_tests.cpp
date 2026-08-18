@@ -137,3 +137,39 @@ TEST_CASE("Virtual mappings normalize separators and preserve aliases",
     CHECK(has_source(resolution, tree.path("Engine/Common.hlsli").generic_string()));
     CHECK(resolution.dependency_identities.size() == 1);
 }
+
+TEST_CASE("Include navigation resolves quoted, search-path, and virtual includes",
+          "[workspace][includes][navigation]") {
+    TestTree tree;
+    tree.file("shaders/local.hlsli", "float localValue;\n");
+    tree.file("includes/shared.hlsli", "float sharedValue;\n");
+    tree.file("Engine/Common.hlsli", "float engineValue;\n");
+
+    const auto root_path = tree.path("shaders/root.hlsl");
+    const auto text = std::string{"#include \"local.hlsli\"\n"
+                                  "#include <shared.hlsli>\n"
+                                  "#include \"/Engine/Common.hlsli\"\n"};
+    const auto root = snapshot(root_path, text);
+    const std::vector open_documents{root};
+    workspace::WorkspaceConfiguration configuration;
+    configuration.additional_include_directories.push_back(tree.path("includes"));
+    configuration.virtual_directory_mappings.emplace("/Engine", tree.path("Engine"));
+
+    const auto local = workspace::resolve_include_at(
+        root, open_documents, configuration, text.find("local.hlsli") + 2);
+    const auto shared = workspace::resolve_include_at(
+        root, open_documents, configuration, text.find("shared.hlsli") + 2);
+    const auto virtual_include = workspace::resolve_include_at(
+        root, open_documents, configuration, text.find("/Engine/Common.hlsli") + 2);
+
+    REQUIRE(local.has_value());
+    CHECK(*local == std::filesystem::absolute(tree.path("shaders/local.hlsli")).lexically_normal());
+    REQUIRE(shared.has_value());
+    CHECK(*shared ==
+          std::filesystem::absolute(tree.path("includes/shared.hlsli")).lexically_normal());
+    REQUIRE(virtual_include.has_value());
+    CHECK(*virtual_include ==
+          std::filesystem::absolute(tree.path("Engine/Common.hlsli")).lexically_normal());
+    CHECK_FALSE(workspace::resolve_include_at(root, open_documents, configuration,
+                                              text.find("#include")));
+}

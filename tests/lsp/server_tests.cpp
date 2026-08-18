@@ -388,6 +388,70 @@ TEST_CASE("Server resolves virtual include mappings for DXC",
     CHECK(response->result["range"]["start"]["character"] == 20);
 }
 
+TEST_CASE("F12 on include paths opens quoted and search-path headers",
+          "[lsp][navigation][includes][integration]") {
+    TestDirectory directory;
+    std::filesystem::create_directories(directory.path() / "includes");
+    const auto local_path = directory.path() / "local.hlsli";
+    const auto shared_path = directory.path() / "includes" / "shared.hlsli";
+    {
+        std::ofstream config{directory.path() / "shadertoolsconfig.json"};
+        REQUIRE(config);
+        config << R"({"root":true,"hlsl.additionalIncludeDirectories":["includes"]})";
+        REQUIRE(config);
+    }
+    for (const auto& path : {local_path, shared_path}) {
+        std::ofstream include{path};
+        REQUIRE(include);
+        include << "float includeValue;\n";
+        REQUIRE(include);
+    }
+
+    const auto document = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "root.hlsl").string());
+    const auto source = std::string{"#include \"local.hlsli\"\n"
+                                    "#include <shared.hlsli>\n"
+                                    "float4 main() : SV_Target { return 1.0.xxxx; }\n"};
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    hlsl_intellisense::lsp::Server server{
+        [&notifications](const auto& value) { notifications.push_back(value); }};
+
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params = Json{{"textDocument",
+                        {{"uri", document.uri()},
+                         {"languageId", "hlsl"},
+                         {"version", 1},
+                         {"text", source}}}}}));
+
+    const auto definition_at = [&server, &document](std::int64_t id, std::uint32_t line,
+                                                    std::uint32_t character) {
+        const auto result = server.handle(hlsl_intellisense::json_rpc::Request{
+            .id = id,
+            .method = "textDocument/definition",
+            .params = Json{{"textDocument", {{"uri", document.uri()}}},
+                           {"position", {{"line", line}, {"character", character}}}}});
+        REQUIRE(result.has_value());
+        const auto* response =
+            std::get_if<hlsl_intellisense::json_rpc::Response>(&*result);
+        REQUIRE(response != nullptr);
+        return response->result;
+    };
+
+    const auto local = definition_at(2, 0, 12);
+    CHECK(local["uri"] ==
+          hlsl_intellisense::workspace::DocumentUri::from_path(local_path.string()).uri());
+    CHECK(local["range"]["start"] == Json{{"line", 0}, {"character", 0}});
+    const auto shared = definition_at(3, 1, 13);
+    CHECK(shared["uri"] ==
+          hlsl_intellisense::workspace::DocumentUri::from_path(shared_path.string()).uri());
+    CHECK(shared["range"]["start"] == Json{{"line", 0}, {"character", 0}});
+}
+
 TEST_CASE("Editing an open include reanalyzes dependent root shaders",
           "[lsp][includes][integration]") {
     TestDirectory directory;

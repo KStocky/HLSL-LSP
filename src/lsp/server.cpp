@@ -620,7 +620,7 @@ Json Server::initialize(const std::optional<Json>& params) {
             {"range", false}};
     }
     return {{"capabilities", std::move(capabilities)},
-            {"serverInfo", {{"name", "HLSL-LSP"}, {"version", "0.2.1"}}}};
+            {"serverInfo", {{"name", "HLSL-LSP"}, {"version", "0.2.6"}}}};
 }
 
 Json Server::shutdown(const std::optional<Json>& params) {
@@ -688,6 +688,22 @@ Json Server::definition(const std::optional<Json>& params) {
             invalid_params(error.what());
         }
     }();
+    const auto utf8_offset = [&] {
+        try {
+            return workspace::utf8_offset_at(snapshot.text(), request_position);
+        } catch (const workspace::DocumentError& error) {
+            invalid_params(error.what());
+        }
+    }();
+    const auto configuration = configuration_for(snapshot, editor_settings_);
+    const auto include_target = workspace::resolve_include_at(
+        snapshot, documents_.open_snapshots(), configuration, utf8_offset);
+    if (include_target) {
+        const auto target = workspace::DocumentUri::from_path(include_target->string());
+        const workspace::Position start{};
+        return {{"uri", target.uri()}, {"range", lsp_range({.start = start, .end = start})}};
+    }
+
     const auto analysis = analyses_.find(snapshot.document_uri().identity());
     if (analysis == analyses_.end() || analysis->second.version != snapshot.version()) {
         invalid_params("Definition analysis is stale");

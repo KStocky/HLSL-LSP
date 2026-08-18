@@ -7,7 +7,7 @@ with:
 - UTF-16 incremental document synchronization
 - DXC diagnostics for open HLSL documents
 - DXC-backed code completion
-- DXC-backed semantic colouring and go-to-definition
+- DXC-backed semantic colouring and go-to-definition for symbols and include paths
 - Hierarchical `shadertoolsconfig.json` compiler configuration
 - Transitive, virtual, open-buffer, and dependency-aware include handling
 - A Visual Studio 2026 VSIX prototype under `clients/visual-studio`

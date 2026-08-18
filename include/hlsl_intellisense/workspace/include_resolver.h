@@ -4,6 +4,9 @@
 #include <hlsl_intellisense/workspace/configuration.h>
 #include <hlsl_intellisense/workspace/document_store.h>
 
+#include <cstddef>
+#include <filesystem>
+#include <optional>
 #include <span>
 #include <string>
 #include <unordered_set>
@@ -20,5 +23,9 @@ struct IncludeResolution {
 [[nodiscard]] IncludeResolution resolve_includes(const SourceSnapshot& root,
                                                  std::span<const SourceSnapshot> open_documents,
                                                  const WorkspaceConfiguration& configuration);
+
+[[nodiscard]] std::optional<std::filesystem::path>
+resolve_include_at(const SourceSnapshot& root, std::span<const SourceSnapshot> open_documents,
+                   const WorkspaceConfiguration& configuration, std::size_t utf8_offset);
 
 } // namespace hlsl_intellisense::workspace

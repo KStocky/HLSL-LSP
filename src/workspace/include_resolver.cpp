@@ -127,6 +127,31 @@ class Resolver final {
         return result;
     }
 
+    [[nodiscard]] std::optional<std::filesystem::path> resolve_at(const SourceSnapshot& root,
+                                                                  std::size_t utf8_offset) const {
+        SourceNode root_node{.physical_path = normalized_physical_path(root.path()),
+                             .logical_path = normalized_physical_path(root.path()).generic_string(),
+                             .text = root.text(),
+                             .virtual_path = false};
+        const auto parsed = parse_includes(root_node.text);
+        const auto directive =
+            std::ranges::find_if(parsed.directives, [utf8_offset](const auto& item) {
+                const auto delimiter_offset = item.path_offset - 1;
+                const auto terminator_offset = item.path_offset + item.path.size();
+                return utf8_offset >= delimiter_offset && utf8_offset <= terminator_offset;
+            });
+        if (directive == parsed.directives.end()) {
+            return std::nullopt;
+        }
+
+        IncludeResolution resolution;
+        const auto source = resolve_directive(root_node, *directive, resolution);
+        if (!source) {
+            return std::nullopt;
+        }
+        return source->physical_path;
+    }
+
   private:
     [[nodiscard]] std::optional<std::string>
     source_text(const std::filesystem::path& physical_path) const {
@@ -285,6 +310,12 @@ IncludeResolution resolve_includes(const SourceSnapshot& root,
                                    std::span<const SourceSnapshot> open_documents,
                                    const WorkspaceConfiguration& configuration) {
     return Resolver{open_documents, configuration}.resolve(root);
+}
+
+std::optional<std::filesystem::path>
+resolve_include_at(const SourceSnapshot& root, std::span<const SourceSnapshot> open_documents,
+                   const WorkspaceConfiguration& configuration, std::size_t utf8_offset) {
+    return Resolver{open_documents, configuration}.resolve_at(root, utf8_offset);
 }
 
 } // namespace hlsl_intellisense::workspace

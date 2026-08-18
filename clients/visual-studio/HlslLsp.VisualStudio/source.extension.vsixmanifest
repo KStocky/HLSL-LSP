@@ -4,7 +4,7 @@
                  xmlns:d="http://schemas.microsoft.com/developer/vsx-schema-design/2011">
   <Metadata>
     <Identity Id="KStocky.HlslLsp.VisualStudio"
-              Version="0.2.5"
+              Version="0.2.6"
               Language="en-US"
               Publisher="KStocky" />
     <DisplayName>HLSL-LSP</DisplayName>
