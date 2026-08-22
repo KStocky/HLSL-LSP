@@ -4,7 +4,7 @@
                  xmlns:d="http://schemas.microsoft.com/developer/vsx-schema-design/2011">
   <Metadata>
     <Identity Id="KStocky.HlslLsp.VisualStudio"
-              Version="0.3.0"
+              Version="0.5.16"
               Language="en-US"
               Publisher="KStocky" />
     <DisplayName>HLSL-LSP</DisplayName>
@@ -34,9 +34,13 @@
                   DisplayName="Visual Studio core editor" />
   </Prerequisites>
   <Assets>
-    <Asset Type="Microsoft.VisualStudio.MefComponent"
+    <Asset Type="Microsoft.VisualStudio.VsPackage"
            d:Source="Project"
            d:ProjectName="%CurrentProject%"
-           Path="|%CurrentProject%|" />
+           Path="|%CurrentProject%;PkgdefProjectOutputGroup|" />
+    <Asset Type="Microsoft.VisualStudio.MefComponent"
+           d:Source="Project"
+           d:ProjectName="HlslLsp.VisualStudio.Classification"
+           Path="|HlslLsp.VisualStudio.Classification|" />
   </Assets>
 </PackageManifest>

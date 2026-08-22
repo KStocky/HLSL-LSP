@@ -1,24 +1,26 @@
 using System;
 using System.Collections.Generic;
-using System.ComponentModel.Composition;
 using System.Diagnostics;
 using System.IO;
 using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.VisualStudio.LanguageServer.Client;
-using Microsoft.VisualStudio.Shell;
 using Microsoft.VisualStudio.Threading;
-using Microsoft.VisualStudio.Utilities;
+using StreamJsonRpc;
 
 namespace HlslLsp.VisualStudio;
 
-[Export(typeof(ILanguageClient))]
-[ContentType(HlslContentDefinition.ContentTypeName)]
-[RunOnContext(RunningContext.RunOnHost)]
-public sealed class HlslLanguageClient : ILanguageClient
+internal sealed class HlslLanguageClient : ILanguageClient, ILanguageClientCustomMessage2
 {
     private Process serverProcess;
+    private string languageVersion;
+    private JsonRpc rpc;
+
+    internal HlslLanguageClient(string languageVersion)
+    {
+        this.languageVersion = languageVersion;
+    }
 
     public string Name => "HLSL-LSP";
 
@@ -27,10 +29,16 @@ public sealed class HlslLanguageClient : ILanguageClient
         get { yield return "hlsl"; }
     }
 
-    public object InitializationOptions => null;
+    public object InitializationOptions =>
+        new
+        {
+            hlsl = new
+            {
+                languageVersion = Volatile.Read(ref languageVersion),
+            },
+        };
 
-    public IEnumerable<string> FilesToWatch { get; } =
-        new[] { "**/*.hlsl", "**/*.hlsli", "**/shadertoolsconfig.json" };
+    public IEnumerable<string> FilesToWatch { get; } = Array.Empty<string>();
 
     public bool ShowNotificationOnInitializeFailed => true;
 
@@ -38,26 +46,39 @@ public sealed class HlslLanguageClient : ILanguageClient
 
     public event AsyncEventHandler<EventArgs> StopAsync;
 
-    public Task OnLoadedAsync()
+    public object MiddleLayer => null;
+
+    public object CustomMessageTarget => null;
+
+    public Task AttachForCustomMessageAsync(JsonRpc jsonRpc)
     {
-        var start = StartAsync;
-        if (start != null)
-        {
-#pragma warning disable VSSDK007
-            _ = ThreadHelper.JoinableTaskFactory.RunAsync(async () =>
-            {
-                try
-                {
-                    await start.InvokeAsync(this, EventArgs.Empty);
-                }
-                catch (Exception error)
-                {
-                    Debug.WriteLine($"HLSL-LSP: Language-client startup failed: {error}");
-                }
-            });
-#pragma warning restore VSSDK007
-        }
+        rpc = jsonRpc ?? throw new ArgumentNullException(nameof(jsonRpc));
         return Task.CompletedTask;
+    }
+
+    internal Task UpdateLanguageVersionAsync(string value)
+    {
+        Volatile.Write(ref languageVersion, value);
+        var currentRpc = rpc;
+        return currentRpc == null
+            ? Task.CompletedTask
+            : currentRpc.NotifyAsync(
+                "hlsl/didChangeClientDefaults",
+                new
+                {
+                    hlsl = new
+                    {
+                        languageVersion = value,
+                    },
+                });
+    }
+
+    public async Task OnLoadedAsync()
+    {
+        if (StartAsync != null)
+        {
+            await StartAsync.InvokeAsync(this, EventArgs.Empty);
+        }
     }
 
     public Task<Connection> ActivateAsync(CancellationToken token)
@@ -121,35 +142,28 @@ public sealed class HlslLanguageClient : ILanguageClient
 
     public async Task StopServerAsync()
     {
+        var process = Interlocked.Exchange(ref serverProcess, null);
+        if (process != null)
+        {
+            await Task.Run(() =>
+            {
+                if (!process.HasExited)
+                {
+                    process.Kill();
+                    process.WaitForExit();
+                }
+                process.Dispose();
+            }).ConfigureAwait(false);
+        }
+
         if (StopAsync != null)
         {
-            ObserveFault(StopAsync.InvokeAsync(this, EventArgs.Empty));
-        }
-
-        var process = Interlocked.Exchange(ref serverProcess, null);
-        if (process == null)
-        {
-            return;
-        }
-
-        await Task.Run(() =>
-        {
-            if (!process.HasExited && !process.WaitForExit(500))
+            var stop = StopAsync.InvokeAsync(this, EventArgs.Empty);
+            var completed = await Task.WhenAny(stop, Task.Delay(500)).ConfigureAwait(false);
+            if (completed == stop)
             {
-                process.Kill();
-                process.WaitForExit();
+                await stop.ConfigureAwait(false);
             }
-            process.Dispose();
-        }).ConfigureAwait(false);
-    }
-
-    private static void ObserveFault(Task task)
-    {
-        _ = task.ContinueWith(
-            completed => Debug.WriteLine(
-                $"HLSL-LSP: Background language-client operation failed: {completed.Exception}"),
-            CancellationToken.None,
-            TaskContinuationOptions.OnlyOnFaulted,
-            TaskScheduler.Default);
+        }
     }
 }

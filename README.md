@@ -12,10 +12,12 @@ with:
 - Transitive, virtual, open-buffer, and dependency-aware include handling
 - A Visual Studio 2026 VSIX prototype under `clients/visual-studio`
 
-The Visual Studio client uses a native lexical classifier for safe syntax
-colouring and disables LSP semantic tokens because Visual Studio can hang while
-applying them. Completion, diagnostics, and go-to-definition remain enabled;
-richer semantic tokens remain available to other LSP clients.
+The Visual Studio client disables LSP semantic tokens and uses a native lexical
+classifier for configurable HLSL-specific colours. It automatically defers the
+language client until CMake workspace loading has completed, keeping LSP broker
+composition out of restored-document initialization. Completion, diagnostics,
+and go-to-definition remain enabled; richer semantic tokens remain available to
+other LSP clients.
 - HLSL 2021 enabled by default
 
 ## Requirements
@@ -74,8 +76,9 @@ The same properties can be sent as typed members of the `hlsl` object in
 `workspace/didChangeConfiguration`. Editor properties replace the corresponding
 file property, including empty arrays or objects; omitted properties retain the
 file value. Relative editor paths resolve from the containing workspace folder.
-Precedence is built-in defaults, outer-to-nearest configuration files, then
-editor settings.
+Precedence is built-in defaults, client defaults, outer-to-nearest
+configuration files, then editor settings. This lets a Visual Studio default
+language version be overridden by `shadertoolsconfig.json`.
 
 ## Code quality
 

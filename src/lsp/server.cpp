@@ -535,6 +535,9 @@ void Server::register_handlers() {
         "workspace/didChangeConfiguration",
         [this](const auto& params) { did_change_configuration(params); });
     dispatcher_.register_notification_handler(
+        "hlsl/didChangeClientDefaults",
+        [this](const auto& params) { did_change_client_defaults(params); });
+    dispatcher_.register_notification_handler(
         "workspace/didChangeWorkspaceFolders",
         [this](const auto& params) { did_change_workspace_folders(params); });
     dispatcher_.register_notification_handler(
@@ -576,6 +579,14 @@ Json Server::initialize(const std::optional<Json>& params) {
         throw HandlerError{json_rpc::invalid_request_code, "Initialize may only be requested once"};
     }
     const auto& value = object_params(params);
+    std::optional<std::string> client_default_language_version;
+    if (const auto initialization_options = value.find("initializationOptions");
+        initialization_options != value.end() && !initialization_options->is_null()) {
+        const auto defaults = configuration_overrides(*initialization_options);
+        if (defaults.language_version) {
+            client_default_language_version = *defaults.language_version;
+        }
+    }
     std::unordered_map<std::string, std::filesystem::path> workspace_folders;
     if (const auto folders = value.find("workspaceFolders");
         folders != value.end() && !folders->is_null()) {
@@ -599,6 +610,7 @@ Json Server::initialize(const std::optional<Json>& params) {
         }
     }
     workspace_folders_ = std::move(workspace_folders);
+    client_default_language_version_ = std::move(client_default_language_version);
     state_ = State::awaiting_initialized;
     Json capabilities = {
         {"positionEncoding", "utf-16"},
@@ -620,7 +632,7 @@ Json Server::initialize(const std::optional<Json>& params) {
             {"range", false}};
     }
     return {{"capabilities", std::move(capabilities)},
-            {"serverInfo", {{"name", "HLSL-LSP"}, {"version", "0.3.0"}}}};
+            {"serverInfo", {{"name", "HLSL-LSP"}, {"version", "0.4.0"}}}};
 }
 
 Json Server::shutdown(const std::optional<Json>& params) {
@@ -696,8 +708,8 @@ Json Server::definition(const std::optional<Json>& params) {
         }
     }();
     const auto configuration = configuration_for(snapshot, editor_settings_);
-    const auto include_target = workspace::resolve_include_at(
-        snapshot, documents_.open_snapshots(), configuration, utf8_offset);
+    const auto include_target = workspace::resolve_include_at(snapshot, documents_.open_snapshots(),
+                                                              configuration, utf8_offset);
     if (include_target) {
         const auto target = workspace::DocumentUri::from_path(include_target->string());
         const workspace::Position start{};
@@ -923,6 +935,20 @@ void Server::did_change_configuration(const std::optional<Json>& params) {
     }
 }
 
+void Server::did_change_client_defaults(const std::optional<Json>& params) {
+    try {
+        require_running();
+        const auto defaults = configuration_overrides(object_params(params));
+        if (!defaults.language_version) {
+            invalid_params("hlsl.languageVersion must be provided");
+        }
+        client_default_language_version_ = *defaults.language_version;
+        reanalyze_all();
+    } catch (const std::exception& error) {
+        log(error.what());
+    }
+}
+
 void Server::did_change_workspace_folders(const std::optional<Json>& params) {
     try {
         require_running();
@@ -1057,6 +1083,9 @@ Server::configuration_for(const workspace::SourceSnapshot& snapshot,
     } else if (error && error != std::errc::no_such_file_or_directory) {
         throw std::filesystem::filesystem_error{"Unable to inspect shader directory",
                                                 shader_directory, error};
+    }
+    if (!configuration.language_version && client_default_language_version_) {
+        configuration.language_version = client_default_language_version_;
     }
     return workspace::apply_configuration_overrides(std::move(configuration), overrides,
                                                     configuration_base_directory(snapshot.path()));

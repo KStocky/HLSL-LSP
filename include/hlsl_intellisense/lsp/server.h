@@ -59,6 +59,7 @@ class Server final {
     void did_save(const std::optional<json_rpc::Json>& params);
     void did_close(const std::optional<json_rpc::Json>& params);
     void did_change_configuration(const std::optional<json_rpc::Json>& params);
+    void did_change_client_defaults(const std::optional<json_rpc::Json>& params);
     void did_change_workspace_folders(const std::optional<json_rpc::Json>& params);
     void did_change_watched_files(const std::optional<json_rpc::Json>& params);
     void exit(const std::optional<json_rpc::Json>& params);
@@ -81,6 +82,7 @@ class Server final {
     std::unordered_map<std::string, Analysis> analyses_;
     std::unordered_map<std::string, std::filesystem::path> workspace_folders_;
     workspace::ConfigurationOverrides editor_settings_;
+    std::optional<std::string> client_default_language_version_;
     NotificationSender sender_;
     Logger logger_;
     ServerOptions options_;

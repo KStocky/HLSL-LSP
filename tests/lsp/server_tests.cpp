@@ -213,7 +213,8 @@ TEST_CASE("Server provides semantic tokens and definitions", "[lsp][navigation][
 TEST_CASE("Server can disable semantic tokens for incompatible clients", "[lsp][navigation]") {
     std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
     hlsl_intellisense::lsp::Server server{
-        [&notifications](const auto& value) { notifications.push_back(value); }, {},
+        [&notifications](const auto& value) { notifications.push_back(value); },
+        {},
         {.semantic_tokens = false}};
 
     const auto initialized = server.handle(hlsl_intellisense::json_rpc::Request{
@@ -420,13 +421,13 @@ TEST_CASE("F12 on include paths opens quoted and search-path headers",
         .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
     static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
         .method = "initialized", .params = Json::object()}));
-    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
-        .method = "textDocument/didOpen",
-        .params = Json{{"textDocument",
-                        {{"uri", document.uri()},
-                         {"languageId", "hlsl"},
-                         {"version", 1},
-                         {"text", source}}}}}));
+    static_cast<void>(server.handle(
+        hlsl_intellisense::json_rpc::Notification{.method = "textDocument/didOpen",
+                                                  .params = Json{{"textDocument",
+                                                                  {{"uri", document.uri()},
+                                                                   {"languageId", "hlsl"},
+                                                                   {"version", 1},
+                                                                   {"text", source}}}}}));
 
     const auto definition_at = [&server, &document](std::int64_t id, std::uint32_t line,
                                                     std::uint32_t character) {
@@ -436,8 +437,7 @@ TEST_CASE("F12 on include paths opens quoted and search-path headers",
             .params = Json{{"textDocument", {{"uri", document.uri()}}},
                            {"position", {{"line", line}, {"character", character}}}}});
         REQUIRE(result.has_value());
-        const auto* response =
-            std::get_if<hlsl_intellisense::json_rpc::Response>(&*result);
+        const auto* response = std::get_if<hlsl_intellisense::json_rpc::Response>(&*result);
         REQUIRE(response != nullptr);
         return response->result;
     };
@@ -659,6 +659,59 @@ TEST_CASE("Invalid workspace folder changes are atomic", "[lsp][workspace]") {
               {"added", Json::array({Json{{"uri", "https://invalid"}, {"name", "invalid"}}})}}}}}));
     REQUIRE(logs.size() == 1);
     CHECK(logs.back().find("file URI") != std::string::npos);
+}
+
+TEST_CASE("Client language defaults remain below shader-tools configuration",
+          "[lsp][configuration][integration]") {
+    TestDirectory directory;
+    const auto configured_directory = directory.path() / "configured";
+    std::filesystem::create_directories(configured_directory);
+    {
+        std::ofstream config{configured_directory / "shadertoolsconfig.json"};
+        REQUIRE(config);
+        config << R"({"root":true,"hlsl.languageVersion":"2021"})";
+        REQUIRE(config);
+    }
+
+    const auto default_document = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "default.hlsl").string());
+    const auto configured_document = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (configured_directory / "configured.hlsl").string());
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    hlsl_intellisense::lsp::Server server{
+        [&notifications](const auto& value) { notifications.push_back(value); }};
+
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1},
+        .method = "initialize",
+        .params = Json{{"initializationOptions", {{"hlsl", {{"languageVersion", "2018"}}}}}}}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+
+    const auto open_document = [&server](const auto& uri) {
+        static_cast<void>(server.handle(
+            hlsl_intellisense::json_rpc::Notification{.method = "textDocument/didOpen",
+                                                      .params = Json{{"textDocument",
+                                                                      {{"uri", uri.uri()},
+                                                                       {"languageId", "hlsl"},
+                                                                       {"version", 1},
+                                                                       {"text", valid_hlsl()}}}}}));
+    };
+
+    open_document(default_document);
+    REQUIRE(notifications.size() == 1);
+    CHECK(!(*notifications.back().params)["diagnostics"].empty());
+
+    open_document(configured_document);
+    REQUIRE(notifications.size() == 2);
+    CHECK((*notifications.back().params)["diagnostics"].empty());
+
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "hlsl/didChangeClientDefaults",
+        .params = Json{{"hlsl", {{"languageVersion", "2021"}}}}}));
+    REQUIRE(notifications.size() == 4);
+    CHECK((*notifications[2].params)["diagnostics"].empty());
+    CHECK((*notifications[3].params)["diagnostics"].empty());
 }
 
 TEST_CASE("Opening a previously missing include invalidates dependent roots",
