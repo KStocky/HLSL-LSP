@@ -21,6 +21,12 @@ DXC's IntelliSense API so it can understand modern HLSL language and shader
 model features, including HLSL 2021 and Shader Model 6.6 resource descriptor
 heap types.
 
+> [!WARNING]
+> **HLSL Tools compatibility:** HLSL Tools and HLSL-LSP integrate with the
+> same Visual Studio HLSL file extensions and content-type pipeline. Enabling
+> both extensions can prevent language features from activating reliably.
+> Disable or uninstall HLSL Tools before installing HLSL-LSP.
+
 ## Features
 
 ### Code completion
@@ -70,10 +76,6 @@ The easiest way to install HLSL-LSP is to download
 Close Visual Studio, run the downloaded VSIX, and follow the installer prompts.
 Restart Visual Studio and open an `.hlsl` or `.hlsli` file; the bundled language
 server starts automatically.
-
-HLSL Tools claims the same Visual Studio file types and cannot currently run
-alongside HLSL-LSP. Disable or uninstall HLSL Tools before installing this
-extension.
 
 > [!NOTE]
 > Release artifacts are not yet code-signed. Windows Smart App Control may
