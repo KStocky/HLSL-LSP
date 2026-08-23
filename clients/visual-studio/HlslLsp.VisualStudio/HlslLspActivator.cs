@@ -111,9 +111,15 @@ public sealed class HlslLspActivator :
         nativeShaderContentType = contentTypes.GetContentType("HLSL")
             ?? throw new InvalidOperationException(
                 "Visual Studio's HLSL content type is unavailable.");
+        nativeHeaderContentType = contentTypes.GetContentType("HLSLHeader")
+            ?? throw new InvalidOperationException(
+                "Visual Studio's HLSL header content type is unavailable.");
         remoteShaderContentType = GetOrCreateRemoteContentType(
             "HLSL-LSP-Colored",
             "HLSL");
+        remoteHeaderContentType = GetOrCreateRemoteContentType(
+            "HLSLHeader-LSP-Colored",
+            "HLSLHeader");
         textDocuments.TextDocumentCreated += OnTextDocumentCreated;
         servicesReady = true;
         await ApplyOpenDocumentMappingsAsync(cancellationToken);

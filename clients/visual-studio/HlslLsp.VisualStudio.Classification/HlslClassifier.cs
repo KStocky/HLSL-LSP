@@ -403,6 +403,11 @@ internal sealed class HlslClassifier : IClassifier
                 }
 
                 var identifier = source.Substring(offset, end - offset);
+                var next = end;
+                while (next < source.Length && char.IsWhiteSpace(source[next]))
+                {
+                    next++;
+                }
                 if (expectTypeName && Keywords.Contains(identifier))
                 {
                     result.Add(new TokenSpan(offset, end - offset, keyword));
@@ -423,16 +428,18 @@ internal sealed class HlslClassifier : IClassifier
                     expectTypeName =
                         identifier == "struct" ||
                         identifier == "class" ||
-                        identifier == "enum" ||
-                        identifier == "typename";
+                        identifier == "enum";
+                }
+                else if (next < source.Length &&
+                         (source[next] == '<' ||
+                          (source[next] == ':' &&
+                           next + 1 < source.Length &&
+                           source[next + 1] == ':')))
+                {
+                    result.Add(new TokenSpan(offset, end - offset, type));
                 }
                 else
                 {
-                    var next = end;
-                    while (next < source.Length && char.IsWhiteSpace(source[next]))
-                    {
-                        next++;
-                    }
                     if (next < source.Length && source[next] == '(')
                     {
                         result.Add(new TokenSpan(offset, end - offset, function));
