@@ -160,3 +160,7 @@ DXC-oriented settings. See the
 [`shadertoolsconfig.json` reference](docs/shadertoolsconfig.md) for discovery,
 merging, every supported property, path handling, examples, and editor-setting
 precedence.
+
+## License
+
+HLSL-LSP is released under the permissive [MIT license](LICENSE).
