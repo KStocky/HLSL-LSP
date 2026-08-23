@@ -10,6 +10,7 @@ with:
 - DXC diagnostics for open HLSL documents
 - DXC-backed code completion
 - DXC-backed semantic colouring and go-to-definition for symbols and include paths
+- Workspace symbol support for Visual Studio's All-In-One Search
 - Hierarchical `shadertoolsconfig.json` compiler configuration
 - Transitive, virtual, open-buffer, and dependency-aware include handling
 - A Visual Studio 2026 VSIX client under `clients/visual-studio`
@@ -51,6 +52,13 @@ The native Visual Studio navigation bar tracks namespaces, types, functions,
 and the current symbol in HLSL documents.
 
 ![Visual Studio navigation bar for HLSL](art/navigation-bar.png)
+
+### All-In-One Search
+
+Press `Ctrl+T` to find HLSL types and members across the workspace through
+Visual Studio's All-In-One Search.
+
+![HLSL symbols in Visual Studio All-In-One Search](art/all-in-one-search.png)
 
 ## Install the Visual Studio extension
 

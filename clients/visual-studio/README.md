@@ -7,9 +7,11 @@ Visual Studio's HLSL Tools extension claims the same file extensions and is not
 currently compatible with HLSL-LSP. Disable or uninstall HLSL Tools before
 installing this VSIX.
 Go-to-definition for symbols and `#include` paths is provided by the server
-through LSP. LSP semantic tokens are disabled in Visual Studio because its
-classification pipeline can hang the editor while applying them; the language
-server still provides richer semantic tokens to other clients. A separate MEF-only assembly provides immediate lexical classification for HLSL keywords,
+through LSP. Workspace symbols also integrate with Visual Studio's All-In-One
+Search (`Ctrl+T`). LSP semantic tokens are disabled in Visual Studio because
+its classification pipeline can hang the editor while applying them; the
+language server still provides richer semantic tokens to other clients. A
+separate MEF-only assembly provides immediate lexical classification for HLSL keywords,
 preprocessor directives, types, functions, comments, strings, and numbers.
 Each category appears as an `HLSL ...` item under **Environment > Fonts and
 Colors**, using the same Visual Studio colour picker as HLSL Tools.
