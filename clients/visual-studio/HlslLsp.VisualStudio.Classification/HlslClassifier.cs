@@ -17,6 +17,7 @@ internal static class HlslClassificationNames
 {
     internal const string Keyword = "HLSL-LSP keyword";
     internal const string Preprocessor = "HLSL-LSP preprocessor";
+    internal const string Macro = "HLSL-LSP macro";
     internal const string Function = "HLSL-LSP function";
     internal const string Type = "HLSL-LSP type";
     internal const string Comment = "HLSL-LSP comment";
@@ -33,6 +34,11 @@ internal static class HlslClassificationNames
     [Name(Preprocessor)]
     [BaseDefinition(PredefinedClassificationTypeNames.Keyword)]
     internal static ClassificationTypeDefinition PreprocessorDefinition;
+
+    [Export(typeof(ClassificationTypeDefinition))]
+    [Name(Macro)]
+    [BaseDefinition(PredefinedClassificationTypeNames.FormalLanguage)]
+    internal static ClassificationTypeDefinition MacroDefinition;
 
     [Export(typeof(ClassificationTypeDefinition))]
     [Name(Function)]
@@ -133,6 +139,7 @@ internal sealed class HlslClassifier : IClassifier
 
     private readonly IClassificationType keyword;
     private readonly IClassificationType preprocessor;
+    private readonly IClassificationType macro;
     private readonly IClassificationType function;
     private readonly IClassificationType type;
     private readonly IClassificationType comment;
@@ -153,6 +160,7 @@ internal sealed class HlslClassifier : IClassifier
         this.textBuffer = textBuffer ?? throw new ArgumentNullException(nameof(textBuffer));
         keyword = registry.GetClassificationType(HlslClassificationNames.Keyword);
         preprocessor = registry.GetClassificationType(HlslClassificationNames.Preprocessor);
+        macro = registry.GetClassificationType(HlslClassificationNames.Macro);
         function = registry.GetClassificationType(HlslClassificationNames.Function);
         type = registry.GetClassificationType(HlslClassificationNames.Type);
         comment = registry.GetClassificationType(HlslClassificationNames.Comment);
@@ -378,7 +386,7 @@ internal sealed class HlslClassifier : IClassifier
                     if (macroEnd > macroStart)
                     {
                         result.Add(
-                            new TokenSpan(macroStart, macroEnd - macroStart, preprocessor));
+                            new TokenSpan(macroStart, macroEnd - macroStart, macro));
                         end = macroEnd;
                     }
                 }

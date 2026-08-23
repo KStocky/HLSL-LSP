@@ -1,4 +1,5 @@
 using System.ComponentModel.Composition;
+using System.Windows.Media;
 using Microsoft.VisualStudio.Text.Classification;
 using Microsoft.VisualStudio.Utilities;
 
@@ -20,6 +21,19 @@ internal sealed class HlslKeywordFormat : ClassificationFormatDefinition
 internal sealed class HlslPreprocessorFormat : ClassificationFormatDefinition
 {
     public HlslPreprocessorFormat() => DisplayName = "HLSL Preprocessor Directive";
+}
+
+[Export(typeof(EditorFormatDefinition))]
+[ClassificationType(ClassificationTypeNames = HlslClassificationNames.Macro)]
+[Name(HlslClassificationNames.Macro + " format")]
+[UserVisible(true)]
+internal sealed class HlslMacroFormat : ClassificationFormatDefinition
+{
+    public HlslMacroFormat()
+    {
+        DisplayName = "HLSL Macro Identifier";
+        ForegroundColor = Color.FromRgb(111, 0, 138);
+    }
 }
 
 [Export(typeof(EditorFormatDefinition))]
