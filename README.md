@@ -20,14 +20,6 @@ DXC's IntelliSense API so it can understand modern HLSL language and shader
 model features, including HLSL 2021 and Shader Model 6.6 resource descriptor
 heap types.
 
-The Visual Studio client disables LSP semantic tokens and uses a native lexical
-classifier for configurable HLSL-specific colours. Its startup-safe listener has
-no LSP dependency and loads the isolated language client only after CMake package
-loading has completed, keeping LSP broker composition out of restored-document
-initialization. Completion, diagnostics, and go-to-definition remain enabled;
-richer semantic tokens remain available to other LSP clients.
-- HLSL 2021 enabled by default
-
 ## Requirements
 
 - Windows
