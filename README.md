@@ -34,13 +34,15 @@ richer semantic tokens remain available to other LSP clients.
 - Visual Studio 2026 with the MSVC C++ workload
 - LLVM with `clang-cl`, `clang-format`, and `clang-tidy`
 - CMake 3.28 or newer
-- A DXC build containing `dxcisense.h`, `dxcompiler.dll`, and `dxil.dll`
+- Internet access for CMake's first configuration
 
-Linux builds use Clang and require a DXC distribution containing
-`libdxcompiler.so`. The checked-in Windows presets default to the DXC copy
-bundled with a sibling `UnrealEngine` checkout. For another DXC build, configure
-`DXC_INCLUDE_DIR` and `DXC_RUNTIME_DIR`. `DXC_INCLUDE_DIR` is the directory that
-directly contains `dxcisense.h`.
+CMake downloads the pinned official Microsoft DXC `1.9.2607.13` package,
+including matching headers and runtime binaries. Downloads are checksum
+verified and cached in the build directory. HLSL-LSP does not depend on an
+Unreal Engine checkout.
+
+To use a custom DXC build instead, set both `DXC_INCLUDE_DIR` and
+`DXC_RUNTIME_DIR`. `DXC_INCLUDE_DIR` must directly contain `dxcisense.h`.
 
 ```powershell
 cmake --preset windows-msvc `

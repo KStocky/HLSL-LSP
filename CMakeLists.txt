@@ -20,6 +20,7 @@ FetchContent_Declare(
     URL https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz
     URL_HASH SHA256=42f6e95cad6ec532fd372391373363b62a14af6d771056dbfc86160e6dfff7aa)
 FetchContent_MakeAvailable(Catch2 nlohmann_json)
+include(Dxc)
 
 add_library(hlsl_json_rpc STATIC)
 target_sources(hlsl_json_rpc
@@ -65,37 +66,6 @@ target_link_libraries(hlsl_workspace
     PRIVATE
         nlohmann_json::nlohmann_json)
 hlsl_enable_clang_tidy(hlsl_workspace)
-
-if(WIN32)
-    set(HLSL_INTELLISENSE_DEFAULT_DXC_INCLUDE
-        "${CMAKE_CURRENT_SOURCE_DIR}/../UnrealEngine/Engine/Source/ThirdParty/ShaderConductor/ShaderConductor/External/DirectXShaderCompiler/include/dxc")
-    set(HLSL_INTELLISENSE_DEFAULT_DXC_RUNTIME
-        "${CMAKE_CURRENT_SOURCE_DIR}/../UnrealEngine/Engine/Binaries/ThirdParty/ShaderConductor/Win64")
-else()
-    set(HLSL_INTELLISENSE_DEFAULT_DXC_INCLUDE "")
-    set(HLSL_INTELLISENSE_DEFAULT_DXC_RUNTIME "")
-endif()
-
-set(DXC_INCLUDE_DIR "${HLSL_INTELLISENSE_DEFAULT_DXC_INCLUDE}" CACHE PATH
-    "Directory containing the dxc headers")
-set(DXC_RUNTIME_DIR "${HLSL_INTELLISENSE_DEFAULT_DXC_RUNTIME}" CACHE PATH
-    "Directory containing the DXC runtime")
-
-if(NOT EXISTS "${DXC_INCLUDE_DIR}/dxcisense.h")
-    message(FATAL_ERROR
-        "dxcisense.h was not found under DXC_INCLUDE_DIR='${DXC_INCLUDE_DIR}'")
-endif()
-
-find_file(DXCOMPILER_RUNTIME
-    NAMES dxcompiler.dll libdxcompiler.so
-    HINTS "${DXC_RUNTIME_DIR}"
-    NO_DEFAULT_PATH
-    REQUIRED)
-
-find_file(DXIL_RUNTIME
-    NAMES dxil.dll libdxil.so
-    HINTS "${DXC_RUNTIME_DIR}"
-    NO_DEFAULT_PATH)
 
 add_library(hlsl_dxc STATIC)
 target_sources(hlsl_dxc
