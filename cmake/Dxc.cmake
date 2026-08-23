@@ -38,6 +38,17 @@ if(NOT DXC_INCLUDE_DIR)
         FetchContent_MakeAvailable(hlsl_dxc_package)
         set(DXC_INCLUDE_DIR "${hlsl_dxc_package_SOURCE_DIR}/include")
         set(DXC_RUNTIME_DIR "${hlsl_dxc_package_SOURCE_DIR}/lib")
+
+        # Microsoft's Linux release archive omits this non-Windows compatibility
+        # header even though dxcapi.h includes it.
+        if(NOT EXISTS "${DXC_INCLUDE_DIR}/WinAdapter.h")
+            file(DOWNLOAD
+                "https://raw.githubusercontent.com/microsoft/DirectXShaderCompiler/v1.9.2607/include/dxc/WinAdapter.h"
+                "${DXC_INCLUDE_DIR}/WinAdapter.h"
+                EXPECTED_HASH
+                    SHA256=f5688a1408a8de8c0c35176bc900f21d7679d492215da94da4ab643cb66867f4
+                TLS_VERIFY ON)
+        endif()
     else()
         message(FATAL_ERROR
             "Automatic DXC acquisition supports Windows x64 and Linux x64. "
