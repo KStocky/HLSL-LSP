@@ -182,6 +182,29 @@ class TaskTokens final {
     unsigned count_{};
 };
 
+class TaskCursors final {
+  public:
+    TaskCursors(IDxcCursor** cursors, unsigned count) : cursors_{cursors}, count_{count} {}
+
+    TaskCursors(const TaskCursors&) = delete;
+    auto operator=(const TaskCursors&) -> TaskCursors& = delete;
+
+    ~TaskCursors() {
+        for (unsigned index = 0; index < count_; ++index) {
+            if (cursors_[index] != nullptr) {
+                cursors_[index]->Release();
+            }
+        }
+        ::CoTaskMemFree(reinterpret_cast<void*>(cursors_));
+    }
+
+    [[nodiscard]] IDxcCursor* operator[](unsigned index) const noexcept { return cursors_[index]; }
+
+  private:
+    IDxcCursor** cursors_{};
+    unsigned count_{};
+};
+
 [[nodiscard]] auto make_source_location(IDxcSourceLocation& location) -> SourceLocation {
     ComPtr<IDxcFile> file;
     unsigned line{};
@@ -305,6 +328,81 @@ class TaskTokens final {
     } catch (const std::exception&) {
         return {.path = std::string{fallback_path}};
     }
+}
+
+[[nodiscard]] bool symbol_container(DxcCursorKind kind) {
+    return kind == DxcCursor_StructDecl || kind == DxcCursor_UnionDecl ||
+           kind == DxcCursor_ClassDecl || kind == DxcCursor_EnumDecl ||
+           kind == DxcCursor_Namespace || kind == DxcCursor_ClassTemplate ||
+           kind == DxcCursor_ClassTemplatePartialSpecialization;
+}
+
+[[nodiscard]] auto cursor_symbols(IDxcCursor& cursor, std::uint32_t depth) -> std::vector<Symbol> {
+    if (depth >= 64) {
+        return {};
+    }
+
+    constexpr unsigned page_size = 256;
+    std::vector<Symbol> result;
+    for (unsigned skip = 0;; skip += page_size) {
+        unsigned child_count{};
+        IDxcCursor** raw_children{};
+        check(cursor.GetChildren(skip, page_size, &child_count, &raw_children), "GetChildren");
+        TaskCursors children{raw_children, child_count};
+        for (unsigned index = 0; index < child_count; ++index) {
+            auto* child = children[index];
+            if (child == nullptr) {
+                continue;
+            }
+
+            DxcCursorKind kind{DxcCursor_UnexposedDecl};
+            check(child->GetKind(&kind), "GetKind");
+            DxcCursorKindFlags flags{DxcCursorKind_None};
+            check(child->GetKindFlags(&flags), "GetKindFlags");
+            const auto is_symbol =
+                (flags & DxcCursorKind_Declaration) != 0 || kind == DxcCursor_MacroDefinition;
+            const auto is_container = symbol_container(kind);
+            if (!is_symbol) {
+                continue;
+            }
+
+            char* spelling{};
+            check(child->GetSpelling(&spelling), "GetSpelling");
+            TaskString owned_spelling{spelling};
+            auto nested = is_container ? cursor_symbols(*child, depth + 1) : std::vector<Symbol>{};
+            if (owned_spelling.view().empty()) {
+                result.insert(result.end(), std::make_move_iterator(nested.begin()),
+                              std::make_move_iterator(nested.end()));
+                continue;
+            }
+
+            ComPtr<IDxcSourceLocation> location;
+            check(child->GetLocation(location.put()), "GetLocation");
+            BOOL location_is_null{};
+            check(location->IsNull(&location_is_null), "IsNull");
+            if (location_is_null != FALSE) {
+                continue;
+            }
+
+            ComPtr<IDxcSourceRange> extent;
+            check(child->GetExtent(extent.put()), "GetExtent");
+            unsigned start_offset{};
+            unsigned end_offset{};
+            check(extent->GetOffsets(&start_offset, &end_offset), "GetOffsets");
+            result.push_back(Symbol{
+                .name = std::string{owned_spelling.view()},
+                .cursor_kind = static_cast<std::uint32_t>(kind),
+                .location = make_source_location(*location.get()),
+                .start_offset = start_offset,
+                .end_offset = end_offset,
+                .children = std::move(nested),
+            });
+        }
+        if (child_count < page_size) {
+            break;
+        }
+    }
+    return result;
 }
 
 } // namespace
@@ -580,6 +678,12 @@ auto TranslationUnit::tokens(std::string_view path) const -> std::vector<Token> 
     return result;
 }
 
+auto TranslationUnit::symbols() const -> std::vector<Symbol> {
+    ComPtr<IDxcCursor> root;
+    check(implementation_->translation_unit->GetCursor(root.put()), "GetCursor");
+    return cursor_symbols(*root.get(), 0);
+}
+
 void TranslationUnit::reparse(std::vector<SourceFile> files) {
     implementation_->sources = std::move(files);
     implementation_->rebuild_unsaved_files();
@@ -613,8 +717,7 @@ auto Intellisense::parse(std::string root_path, std::vector<SourceFile> files,
     implementation->owner = implementation_;
     implementation->root_path = std::move(root_path);
     implementation->sources = std::move(files);
-    implementation->descriptor_heaps_supported =
-        supports_descriptor_heaps(options.target_profile);
+    implementation->descriptor_heaps_supported = supports_descriptor_heaps(options.target_profile);
     implementation->rebuild_unsaved_files();
 
     implementation->arguments = options.arguments();

@@ -99,21 +99,19 @@ TEST_CASE("DXC IntelliSense analyzes HLSL 2021", "[dxc][integration]") {
     }));
 }
 
-TEST_CASE("DXC IntelliSense recognizes Shader Model 6.6 descriptor heaps",
-          "[dxc][integration]") {
+TEST_CASE("DXC IntelliSense recognizes Shader Model 6.6 descriptor heaps", "[dxc][integration]") {
     hlsl_intellisense::dxc::Intellisense intellisense;
     hlsl_intellisense::dxc::CompilerOptions options;
     options.target_profile = "lib_6_6";
-    auto translation_unit = intellisense.parse(
-        shader_path,
-        {{shader_path,
-          "RWByteAddressBuffer GetBuffer(uint index) {\n"
-          "    return ResourceDescriptorHeap[index];\n"
-          "}\n"
-          "SamplerState GetSampler(uint index) {\n"
-          "    return SamplerDescriptorHeap[index];\n"
-          "}\n"}},
-        options);
+    auto translation_unit =
+        intellisense.parse(shader_path,
+                           {{shader_path, "RWByteAddressBuffer GetBuffer(uint index) {\n"
+                                          "    return ResourceDescriptorHeap[index];\n"
+                                          "}\n"
+                                          "SamplerState GetSampler(uint index) {\n"
+                                          "    return SamplerDescriptorHeap[index];\n"
+                                          "}\n"}},
+                           options);
 
     const auto diagnostics = translation_unit.diagnostics();
     std::string messages;
@@ -125,18 +123,54 @@ TEST_CASE("DXC IntelliSense recognizes Shader Model 6.6 descriptor heaps",
     CHECK(diagnostics.empty());
 }
 
+TEST_CASE("DXC IntelliSense extracts hierarchical declaration symbols",
+          "[dxc][symbols][integration]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    const std::string source = "enum Mode { ModeA, ModeB };\n"
+                               "struct Material {\n"
+                               "    float roughness;\n"
+                               "    float Shade(float value) { return value * roughness; }\n"
+                               "};\n"
+                               "float4 main() : SV_Target { return 1.0.xxxx; }\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}});
+
+    const auto symbols = translation_unit.symbols();
+    const auto find_symbol = [](const auto& self, const auto& candidates,
+                                std::string_view name) -> const hlsl_intellisense::dxc::Symbol* {
+        for (const auto& symbol : candidates) {
+            if (symbol.name == name) {
+                return &symbol;
+            }
+            if (const auto* nested = self(self, symbol.children, name)) {
+                return nested;
+            }
+        }
+        return nullptr;
+    };
+
+    const auto* material = find_symbol(find_symbol, symbols, "Material");
+    REQUIRE(material != nullptr);
+    CHECK(material->cursor_kind == 2);
+    CHECK(find_symbol(find_symbol, material->children, "roughness") != nullptr);
+    CHECK(find_symbol(find_symbol, material->children, "Shade") != nullptr);
+    CHECK(find_symbol(find_symbol, symbols, "Mode") != nullptr);
+    CHECK(find_symbol(find_symbol, symbols, "ModeA") != nullptr);
+    CHECK(find_symbol(find_symbol, symbols, "main") != nullptr);
+    CHECK(material->end_offset > material->start_offset);
+    CHECK(material->location.path == shader_path);
+}
+
 TEST_CASE("DXC IntelliSense reports descriptor heaps below Shader Model 6.6",
           "[dxc][integration]") {
     hlsl_intellisense::dxc::Intellisense intellisense;
     hlsl_intellisense::dxc::CompilerOptions options;
     options.target_profile = "lib_6_5";
-    auto translation_unit = intellisense.parse(
-        shader_path,
-        {{shader_path,
-          "RWByteAddressBuffer GetBuffer(uint index) {\n"
-          "    return ResourceDescriptorHeap[index];\n"
-          "}\n"}},
-        options);
+    auto translation_unit =
+        intellisense.parse(shader_path,
+                           {{shader_path, "RWByteAddressBuffer GetBuffer(uint index) {\n"
+                                          "    return ResourceDescriptorHeap[index];\n"
+                                          "}\n"}},
+                           options);
 
     CHECK_FALSE(translation_unit.diagnostics().empty());
 }

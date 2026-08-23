@@ -138,6 +138,7 @@ internal sealed class HlslClassifier : IClassifier
     private readonly IClassificationType comment;
     private readonly IClassificationType text;
     private readonly IClassificationType number;
+    private readonly IClassificationType excludedCode;
     private readonly ITextBuffer textBuffer;
     private readonly object scheduleLock = new();
     private ClassificationCache cache;
@@ -157,6 +158,8 @@ internal sealed class HlslClassifier : IClassifier
         comment = registry.GetClassificationType(HlslClassificationNames.Comment);
         text = registry.GetClassificationType(HlslClassificationNames.String);
         number = registry.GetClassificationType(HlslClassificationNames.Number);
+        excludedCode = registry.GetClassificationType(
+            PredefinedClassificationTypeNames.ExcludedCode);
         textBuffer.Changed += OnTextBufferChanged;
         ScheduleTokenization(textBuffer.CurrentSnapshot);
     }
@@ -266,12 +269,24 @@ internal sealed class HlslClassifier : IClassifier
     private IReadOnlyList<TokenSpan> Tokenize(string source)
     {
         var result = new List<TokenSpan>();
+        var excludedRanges = FindExcludedRanges(source);
+        var excludedRangeIndex = 0;
         var userTypes = new HashSet<string>(StringComparer.Ordinal);
         var offset = 0;
         var firstNonWhitespaceOnLine = true;
         var expectTypeName = false;
         while (offset < source.Length)
         {
+            if (excludedRangeIndex < excludedRanges.Count &&
+                offset == excludedRanges[excludedRangeIndex].Start)
+            {
+                var range = excludedRanges[excludedRangeIndex++];
+                result.Add(new TokenSpan(range.Start, range.Length, excludedCode));
+                offset = range.End;
+                firstNonWhitespaceOnLine = false;
+                continue;
+            }
+
             var current = source[offset];
             if (current == '\r' || current == '\n')
             {
@@ -337,11 +352,36 @@ internal sealed class HlslClassifier : IClassifier
                 {
                     end++;
                 }
+                var directiveStart = end;
                 while (end < source.Length && IsIdentifierPart(source[end]))
                 {
                     end++;
                 }
                 result.Add(new TokenSpan(offset, end - offset, preprocessor));
+                var directive = source.Substring(directiveStart, end - directiveStart);
+                if (directive == "define" ||
+                    directive == "ifdef" ||
+                    directive == "ifndef" ||
+                    directive == "undef")
+                {
+                    var macroStart = end;
+                    while (macroStart < source.Length &&
+                           (source[macroStart] == ' ' || source[macroStart] == '\t'))
+                    {
+                        macroStart++;
+                    }
+                    var macroEnd = macroStart;
+                    while (macroEnd < source.Length && IsIdentifierPart(source[macroEnd]))
+                    {
+                        macroEnd++;
+                    }
+                    if (macroEnd > macroStart)
+                    {
+                        result.Add(
+                            new TokenSpan(macroStart, macroEnd - macroStart, preprocessor));
+                        end = macroEnd;
+                    }
+                }
                 offset = end;
                 firstNonWhitespaceOnLine = false;
                 continue;
@@ -421,6 +461,184 @@ internal sealed class HlslClassifier : IClassifier
         return result;
     }
 
+    private static IReadOnlyList<TextRange> FindExcludedRanges(string source)
+    {
+        var ranges = new List<TextRange>();
+        var conditionals = new Stack<ConditionalState>();
+        var inBlockComment = false;
+        var lineStart = 0;
+        while (lineStart < source.Length)
+        {
+            var lineEnd = source.IndexOfAny(new[] { '\r', '\n' }, lineStart);
+            lineEnd = lineEnd < 0 ? source.Length : lineEnd;
+            var directiveStart = FindDirectiveStart(
+                source,
+                lineStart,
+                lineEnd,
+                ref inBlockComment);
+            var isDirective = directiveStart >= 0;
+            if (!isDirective && !CurrentBranchIsActive(conditionals) && lineEnd > lineStart)
+            {
+                ranges.Add(new TextRange(lineStart, lineEnd - lineStart));
+            }
+            else if (isDirective)
+            {
+                UpdateConditionalState(
+                    source.Substring(directiveStart + 1, lineEnd - directiveStart - 1),
+                    conditionals);
+            }
+
+            lineStart = lineEnd;
+            if (lineStart < source.Length && source[lineStart] == '\r')
+            {
+                lineStart++;
+            }
+            if (lineStart < source.Length && source[lineStart] == '\n')
+            {
+                lineStart++;
+            }
+        }
+        return ranges;
+    }
+
+    private static int FindDirectiveStart(
+        string source,
+        int lineStart,
+        int lineEnd,
+        ref bool inBlockComment)
+    {
+        var directiveStart = -1;
+        var sawNonTrivia = false;
+        var quote = '\0';
+        for (var index = lineStart; index < lineEnd; index++)
+        {
+            if (inBlockComment)
+            {
+                if (source[index] == '*' &&
+                    index + 1 < lineEnd &&
+                    source[index + 1] == '/')
+                {
+                    inBlockComment = false;
+                    index++;
+                }
+                continue;
+            }
+            if (quote != '\0')
+            {
+                if (source[index] == '\\' && index + 1 < lineEnd)
+                {
+                    index++;
+                }
+                else if (source[index] == quote)
+                {
+                    quote = '\0';
+                }
+                continue;
+            }
+            if (source[index] == '/' && index + 1 < lineEnd)
+            {
+                if (source[index + 1] == '/')
+                {
+                    break;
+                }
+                if (source[index + 1] == '*')
+                {
+                    inBlockComment = true;
+                    index++;
+                    continue;
+                }
+            }
+            if (source[index] == '"' || source[index] == '\'')
+            {
+                quote = source[index];
+                sawNonTrivia = true;
+            }
+            else if (!char.IsWhiteSpace(source[index]))
+            {
+                if (!sawNonTrivia && source[index] == '#')
+                {
+                    directiveStart = index;
+                }
+                sawNonTrivia = true;
+            }
+        }
+        return directiveStart;
+    }
+
+    private static bool CurrentBranchIsActive(Stack<ConditionalState> conditionals) =>
+        conditionals.Count == 0 || conditionals.Peek().CurrentBranchIsActive;
+
+    private static void UpdateConditionalState(
+        string directiveText,
+        Stack<ConditionalState> conditionals)
+    {
+        var index = 0;
+        SkipWhitespace(directiveText, ref index);
+        var nameStart = index;
+        while (index < directiveText.Length && IsIdentifierPart(directiveText[index]))
+        {
+            index++;
+        }
+        var name = directiveText.Substring(nameStart, index - nameStart);
+        SkipWhitespace(directiveText, ref index);
+        var expression = directiveText.Substring(index).Trim();
+
+        if (name == "if")
+        {
+            var parentIsActive = CurrentBranchIsActive(conditionals);
+            var condition = !IsLiteralFalse(expression);
+            conditionals.Push(
+                new ConditionalState(parentIsActive, condition, parentIsActive && condition));
+        }
+        else if (name == "ifdef" || name == "ifndef")
+        {
+            var parentIsActive = CurrentBranchIsActive(conditionals);
+            conditionals.Push(new ConditionalState(parentIsActive, true, parentIsActive));
+        }
+        else if (name == "else" && conditionals.Count != 0)
+        {
+            var state = conditionals.Pop();
+            conditionals.Push(
+                new ConditionalState(
+                    state.ParentIsActive,
+                    true,
+                    state.ParentIsActive && !state.BranchTaken));
+        }
+        else if (name == "elif" && conditionals.Count != 0)
+        {
+            var state = conditionals.Pop();
+            var condition = !IsLiteralFalse(expression);
+            conditionals.Push(
+                new ConditionalState(
+                    state.ParentIsActive,
+                    state.BranchTaken || condition,
+                    state.ParentIsActive && !state.BranchTaken && condition));
+        }
+        else if (name == "endif" && conditionals.Count != 0)
+        {
+            conditionals.Pop();
+        }
+    }
+
+    private static bool IsLiteralFalse(string expression)
+    {
+        var commentStart = expression.IndexOf("//", StringComparison.Ordinal);
+        if (commentStart >= 0)
+        {
+            expression = expression.Substring(0, commentStart).TrimEnd();
+        }
+        return expression == "0" ||
+               expression.Equals("false", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static void SkipWhitespace(string value, ref int index)
+    {
+        while (index < value.Length && char.IsWhiteSpace(value[index]))
+        {
+            index++;
+        }
+    }
+
     private static int FirstTokenEndingAfter(
         IReadOnlyList<TokenSpan> tokens,
         int position)
@@ -464,6 +682,36 @@ internal sealed class HlslClassifier : IClassifier
         internal int Length { get; }
         internal int End => Start + Length;
         internal IClassificationType Classification { get; }
+    }
+
+    private readonly struct TextRange
+    {
+        internal TextRange(int start, int length)
+        {
+            Start = start;
+            Length = length;
+        }
+
+        internal int Start { get; }
+        internal int Length { get; }
+        internal int End => Start + Length;
+    }
+
+    private readonly struct ConditionalState
+    {
+        internal ConditionalState(
+            bool parentIsActive,
+            bool branchTaken,
+            bool currentBranchIsActive)
+        {
+            ParentIsActive = parentIsActive;
+            BranchTaken = branchTaken;
+            CurrentBranchIsActive = currentBranchIsActive;
+        }
+
+        internal bool ParentIsActive { get; }
+        internal bool BranchTaken { get; }
+        internal bool CurrentBranchIsActive { get; }
     }
 
     private sealed class ClassificationCache

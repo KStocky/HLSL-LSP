@@ -133,6 +133,8 @@ TEST_CASE("LSP handler enforces lifecycle and invalid parameters", "[lsp][handle
     CHECK(response->result["capabilities"]["positionEncoding"] == "utf-16");
     CHECK(response->result["capabilities"]["textDocumentSync"]["change"] == 2);
     CHECK(response->result["capabilities"].contains("completionProvider"));
+    CHECK(response->result["capabilities"]["documentSymbolProvider"] == true);
+    CHECK(response->result["capabilities"]["workspaceSymbolProvider"] == true);
     CHECK(response->result["capabilities"]["workspace"]["workspaceFolders"]["supported"] == true);
 
     static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
@@ -152,6 +154,67 @@ TEST_CASE("LSP handler enforces lifecycle and invalid parameters", "[lsp][handle
         hlsl_intellisense::json_rpc::Notification{.method = "exit", .params = std::nullopt}));
     CHECK(server.exit_requested());
     CHECK(server.exit_code() == 1);
+}
+
+TEST_CASE("Server provides hierarchical document and searchable workspace symbols",
+          "[lsp][symbols][navigation][integration]") {
+    const auto uri = shader_uri();
+    const auto source = valid_hlsl();
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    hlsl_intellisense::lsp::Server server{
+        [&notifications](const auto& value) { notifications.push_back(value); }};
+
+    const auto initialized = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()});
+    REQUIRE(initialized.has_value());
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params =
+            Json{{"textDocument",
+                  {{"uri", uri}, {"languageId", "hlsl"}, {"version", 1}, {"text", source}}}}}));
+
+    const auto document_symbols = server.handle(
+        hlsl_intellisense::json_rpc::Request{.id = std::int64_t{2},
+                                             .method = "textDocument/documentSymbol",
+                                             .params = Json{{"textDocument", {{"uri", uri}}}}});
+    REQUIRE(document_symbols.has_value());
+    const auto* document_response =
+        std::get_if<hlsl_intellisense::json_rpc::Response>(&*document_symbols);
+    REQUIRE(document_response != nullptr);
+    const auto& symbols = document_response->result;
+    const auto number = std::ranges::find_if(
+        symbols, [](const auto& symbol) { return symbol["name"] == "Number"; });
+    REQUIRE(number != symbols.end());
+    CHECK((*number)["kind"] == 23);
+    CHECK((*number)["detail"] == "HLSL struct");
+    REQUIRE((*number).contains("children"));
+    CHECK(std::ranges::any_of((*number)["children"], [](const auto& symbol) {
+        return symbol["name"] == "value" && symbol["kind"] == 8;
+    }));
+    const auto overloaded_operator = std::ranges::find_if(
+        (*number)["children"],
+        [](const auto& symbol) { return symbol["name"] == "operator+"; });
+    REQUIRE(overloaded_operator != (*number)["children"].end());
+    CHECK((*overloaded_operator)["kind"] == 25);
+    CHECK((*overloaded_operator)["detail"] == "HLSL operator");
+    CHECK((*overloaded_operator)["selectionRange"]["end"]["character"] == 21);
+    CHECK(std::ranges::any_of(symbols, [](const auto& symbol) {
+        return symbol["name"] == "main" && symbol["kind"] == 12;
+    }));
+
+    const auto workspace_symbols = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{3}, .method = "workspace/symbol", .params = Json{{"query", "MAIN"}}});
+    REQUIRE(workspace_symbols.has_value());
+    const auto* workspace_response =
+        std::get_if<hlsl_intellisense::json_rpc::Response>(&*workspace_symbols);
+    REQUIRE(workspace_response != nullptr);
+    REQUIRE(workspace_response->result.size() == 1);
+    CHECK(workspace_response->result[0]["name"] == "main");
+    CHECK(workspace_response->result[0]["kind"] == 12);
+    CHECK(workspace_response->result[0]["containerName"] == "HLSL");
+    CHECK(workspace_response->result[0]["location"]["uri"] == uri);
 }
 
 TEST_CASE("Server provides semantic tokens and definitions", "[lsp][navigation][integration]") {

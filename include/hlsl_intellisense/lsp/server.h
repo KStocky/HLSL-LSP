@@ -52,6 +52,8 @@ class Server final {
     [[nodiscard]] json_rpc::Json shutdown(const std::optional<json_rpc::Json>& params);
     [[nodiscard]] json_rpc::Json completion(const std::optional<json_rpc::Json>& params);
     [[nodiscard]] json_rpc::Json definition(const std::optional<json_rpc::Json>& params);
+    [[nodiscard]] json_rpc::Json document_symbols(const std::optional<json_rpc::Json>& params);
+    [[nodiscard]] json_rpc::Json workspace_symbols(const std::optional<json_rpc::Json>& params);
     [[nodiscard]] json_rpc::Json semantic_tokens(const std::optional<json_rpc::Json>& params);
     void initialized(const std::optional<json_rpc::Json>& params);
     void did_open(const std::optional<json_rpc::Json>& params);

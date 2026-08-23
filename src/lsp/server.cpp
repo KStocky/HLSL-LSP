@@ -7,6 +7,7 @@
 #include <hlsl_intellisense/workspace/text_position.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <exception>
 #include <filesystem>
@@ -147,6 +148,186 @@ using json_rpc::Json;
         return 14;
     }
     return 1;
+}
+
+[[nodiscard]] int symbol_kind(std::uint32_t cursor_kind, std::string_view name) {
+    if (name.starts_with("operator")) {
+        return 25;
+    }
+    switch (cursor_kind) {
+    case 2:
+    case 3:
+        return 23;
+    case 4:
+    case 31:
+    case 32:
+        return 5;
+    case 5:
+        return 10;
+    case 6:
+        return 8;
+    case 7:
+        return 22;
+    case 8:
+    case 30:
+        return 12;
+    case 9:
+        return 13;
+    case 20:
+    case 36:
+        return 5;
+    case 21:
+    case 25:
+        return 6;
+    case 22:
+        return 3;
+    case 24:
+        return 9;
+    case 26:
+        return 25;
+    case 27:
+    case 28:
+    case 29:
+        return 26;
+    case 501:
+        return 14;
+    default:
+        return 13;
+    }
+}
+
+[[nodiscard]] std::string_view symbol_detail(const dxc::Symbol& symbol) {
+    switch (symbol_kind(symbol.cursor_kind, symbol.name)) {
+    case 3:
+        return "HLSL namespace";
+    case 5:
+        return "HLSL type";
+    case 6:
+        return "HLSL method";
+    case 8:
+        return "HLSL field";
+    case 9:
+        return "HLSL constructor";
+    case 10:
+        return "HLSL enum";
+    case 12:
+        return "HLSL function";
+    case 14:
+        return "HLSL macro";
+    case 22:
+        return "HLSL enum member";
+    case 23:
+        return "HLSL struct";
+    case 25:
+        return "HLSL operator";
+    case 26:
+        return "HLSL type parameter";
+    default:
+        return "HLSL variable";
+    }
+}
+
+[[nodiscard]] bool symbol_is_in_document(const dxc::Symbol& symbol,
+                                         const workspace::SourceSnapshot& snapshot) {
+    try {
+        return workspace::DocumentUri::from_path(symbol.location.path).identity() ==
+               snapshot.document_uri().identity();
+    } catch (const workspace::DocumentError&) {
+        return false;
+    }
+}
+
+[[nodiscard]] workspace::Range symbol_range(const dxc::Symbol& symbol,
+                                            const workspace::SourceSnapshot& snapshot) {
+    const auto text_size = snapshot.text().size();
+    const auto start = (std::min)(static_cast<std::size_t>(symbol.start_offset), text_size);
+    const auto end =
+        (std::min)((std::max)(static_cast<std::size_t>(symbol.end_offset), start), text_size);
+    return {.start = workspace::lsp_position_at(snapshot.text(), start),
+            .end = workspace::lsp_position_at(snapshot.text(), end)};
+}
+
+[[nodiscard]] workspace::Range symbol_selection_range(const dxc::Symbol& symbol,
+                                                      const workspace::SourceSnapshot& snapshot) {
+    const auto text_size = snapshot.text().size();
+    const auto start = (std::min)(static_cast<std::size_t>(symbol.location.offset), text_size);
+    auto source_offset = start;
+    auto name_offset = std::size_t{};
+    while (source_offset < text_size && name_offset < symbol.name.size()) {
+        if (snapshot.text()[source_offset] == symbol.name[name_offset]) {
+            ++source_offset;
+            ++name_offset;
+        } else if (snapshot.text()[source_offset] == ' ' ||
+                   snapshot.text()[source_offset] == '\t') {
+            ++source_offset;
+        } else {
+            break;
+        }
+    }
+    const auto end = name_offset == symbol.name.size()
+                         ? source_offset
+                         : (std::min)(start + symbol.name.size(), text_size);
+    return {.start = workspace::lsp_position_at(snapshot.text(), start),
+            .end = workspace::lsp_position_at(snapshot.text(), end)};
+}
+
+void append_document_symbols(Json& output, const std::vector<dxc::Symbol>& symbols,
+                             const workspace::SourceSnapshot& snapshot) {
+    for (const auto& symbol : symbols) {
+        Json children = Json::array();
+        append_document_symbols(children, symbol.children, snapshot);
+        if (!symbol_is_in_document(symbol, snapshot)) {
+            output.insert(output.end(), children.begin(), children.end());
+            continue;
+        }
+
+        Json item{{"name", symbol.name},
+                  {"detail", symbol_detail(symbol)},
+                  {"kind", symbol_kind(symbol.cursor_kind, symbol.name)},
+                  {"range", lsp_range(symbol_range(symbol, snapshot))},
+                  {"selectionRange", lsp_range(symbol_selection_range(symbol, snapshot))}};
+        if (!children.empty()) {
+            item["children"] = std::move(children);
+        }
+        output.push_back(std::move(item));
+    }
+}
+
+[[nodiscard]] bool contains_case_insensitive(std::string_view text, std::string_view query) {
+    return std::ranges::search(text, query, [](char left, char right) {
+               return std::tolower(static_cast<unsigned char>(left)) ==
+                      std::tolower(static_cast<unsigned char>(right));
+           }).begin() != text.end();
+}
+
+void append_workspace_symbols(Json& output, const std::vector<dxc::Symbol>& symbols,
+                              const workspace::SourceSnapshot& snapshot, std::string_view query,
+                              std::string_view container) {
+    for (const auto& symbol : symbols) {
+        if (symbol_is_in_document(symbol, snapshot) &&
+            contains_case_insensitive(symbol.name, query)) {
+            auto container_name = std::string{"HLSL"};
+            if (!container.empty()) {
+                container_name += " \xC2\xB7 ";
+                container_name += container;
+            }
+            output.push_back({{"name", symbol.name},
+                              {"kind", symbol_kind(symbol.cursor_kind, symbol.name)},
+                              {"location",
+                               {{"uri", snapshot.uri()},
+                                {"range", lsp_range(symbol_selection_range(symbol, snapshot))}}},
+                              {"containerName", std::move(container_name)}});
+        }
+
+        auto nested_container = std::string{container};
+        if (symbol_is_in_document(symbol, snapshot)) {
+            if (!nested_container.empty()) {
+                nested_container += "::";
+            }
+            nested_container += symbol.name;
+        }
+        append_workspace_symbols(output, symbol.children, snapshot, query, nested_container);
+    }
 }
 
 enum class SemanticTokenType : std::uint8_t {
@@ -516,6 +697,11 @@ void Server::register_handlers() {
                                          [this](const auto& params) { return completion(params); });
     dispatcher_.register_request_handler("textDocument/definition",
                                          [this](const auto& params) { return definition(params); });
+    dispatcher_.register_request_handler("textDocument/documentSymbol", [this](const auto& params) {
+        return document_symbols(params);
+    });
+    dispatcher_.register_request_handler(
+        "workspace/symbol", [this](const auto& params) { return workspace_symbols(params); });
     if (options_.semantic_tokens) {
         dispatcher_.register_request_handler(
             "textDocument/semanticTokens/full",
@@ -618,6 +804,8 @@ Json Server::initialize(const std::optional<Json>& params) {
          {{"openClose", true}, {"change", 2}, {"save", {{"includeText", true}}}}},
         {"completionProvider", {{"resolveProvider", false}}},
         {"definitionProvider", true},
+        {"documentSymbolProvider", true},
+        {"workspaceSymbolProvider", true},
         {"workspace",
          {{"workspaceFolders", {{"supported", true}, {"changeNotifications", true}}}}}};
     if (options_.semantic_tokens) {
@@ -752,6 +940,49 @@ Json Server::definition(const std::optional<Json>& params) {
         end.character += static_cast<std::uint32_t>(name_length);
     }
     return {{"uri", target.uri()}, {"range", lsp_range({.start = start, .end = end})}};
+}
+
+Json Server::document_symbols(const std::optional<Json>& params) {
+    require_running();
+    const auto uri = string_member(object_member(object_params(params), "textDocument"), "uri");
+    workspace::SourceSnapshot snapshot = [&] {
+        try {
+            const auto& state = documents_.document(uri);
+            if (!state.open) {
+                invalid_params("Document symbols require an open document");
+            }
+            return documents_.snapshot(uri);
+        } catch (const workspace::DocumentError& error) {
+            invalid_params(error.what());
+        }
+    }();
+
+    const auto analysis = analyses_.find(snapshot.document_uri().identity());
+    if (analysis == analyses_.end() || analysis->second.version != snapshot.version()) {
+        invalid_params("Document symbol analysis is stale");
+    }
+
+    Json result = Json::array();
+    append_document_symbols(result, analysis->second.translation_unit.symbols(), snapshot);
+    return result;
+}
+
+Json Server::workspace_symbols(const std::optional<Json>& params) {
+    require_running();
+    const auto query = string_member(object_params(params), "query");
+    Json result = Json::array();
+    for (const auto& [identity, analysis] : analyses_) {
+        if (!documents_.contains(analysis.root_uri)) {
+            continue;
+        }
+        const auto snapshot = documents_.snapshot(analysis.root_uri);
+        if (snapshot.document_uri().identity() != identity ||
+            analysis.version != snapshot.version()) {
+            continue;
+        }
+        append_workspace_symbols(result, analysis.translation_unit.symbols(), snapshot, query, {});
+    }
+    return result;
 }
 
 Json Server::semantic_tokens(const std::optional<Json>& params) {

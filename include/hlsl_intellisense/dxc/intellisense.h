@@ -51,6 +51,15 @@ struct Definition {
     SourceLocation location;
 };
 
+struct Symbol {
+    std::string name;
+    std::uint32_t cursor_kind{};
+    SourceLocation location;
+    std::uint32_t start_offset{};
+    std::uint32_t end_offset{};
+    std::vector<Symbol> children;
+};
+
 enum class TokenKind : std::uint8_t {
     punctuation,
     keyword,
@@ -83,6 +92,7 @@ class TranslationUnit final {
     [[nodiscard]] std::optional<Definition> definition_at(std::string_view path, std::uint32_t line,
                                                           std::uint32_t column) const;
     [[nodiscard]] std::vector<Token> tokens(std::string_view path) const;
+    [[nodiscard]] std::vector<Symbol> symbols() const;
 
     void reparse(std::vector<SourceFile> files);
 
