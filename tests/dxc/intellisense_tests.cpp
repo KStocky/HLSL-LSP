@@ -203,6 +203,20 @@ TEST_CASE("DXC IntelliSense reparses edited sources", "[dxc][integration]") {
         completions, [](const auto& completion) { return completion.label == "UpdatedNumber"; }));
 }
 
+TEST_CASE("DXC IntelliSense navigates to incomplete template declarations",
+          "[dxc][navigation][integration]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    const std::string source =
+        "template<typename T> struct container_wrapper;\n"
+        "template<typename T> void use_wrapper(inout container_wrapper<T> value) {}\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}});
+
+    const auto definition = translation_unit.definition_at(shader_path, 2, 49);
+    REQUIRE(definition.has_value());
+    CHECK(definition->name == "container_wrapper");
+    CHECK(definition->location.line == 1);
+}
+
 TEST_CASE("DXC IntelliSense requires the root source", "[dxc]") {
     hlsl_intellisense::dxc::Intellisense intellisense;
 

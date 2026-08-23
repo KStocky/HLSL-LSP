@@ -284,6 +284,15 @@ class TaskCursors final {
            message == "use of undeclared identifier 'SamplerDescriptorHeap'";
 }
 
+[[nodiscard]] bool is_null_cursor(IDxcCursor* cursor) {
+    if (cursor == nullptr) {
+        return true;
+    }
+    BOOL is_null{};
+    check(cursor->IsNull(&is_null), "IsNull");
+    return is_null != FALSE;
+}
+
 [[nodiscard]] auto cursor_kind_at(IDxcTranslationUnit& translation_unit,
                                   IDxcSourceLocation& location) -> std::uint32_t {
     ComPtr<IDxcCursor> cursor;
@@ -598,10 +607,17 @@ auto TranslationUnit::definition_at(std::string_view path, std::uint32_t line,
 
     ComPtr<IDxcCursor> definition;
     check(cursor->GetDefinitionCursor(definition.put()), "GetDefinitionCursor");
-    BOOL is_null{};
-    check(definition->IsNull(&is_null), "IsNull");
-    if (is_null != FALSE) {
-        return std::nullopt;
+    if (is_null_cursor(definition.get())) {
+        ComPtr<IDxcCursor> referenced;
+        check(cursor->GetReferencedCursor(referenced.put()), "GetReferencedCursor");
+        if (is_null_cursor(referenced.get())) {
+            return std::nullopt;
+        }
+
+        check(referenced->GetDefinitionCursor(definition.put()), "GetDefinitionCursor");
+        if (is_null_cursor(definition.get())) {
+            definition = std::move(referenced);
+        }
     }
 
     char* spelling{};
