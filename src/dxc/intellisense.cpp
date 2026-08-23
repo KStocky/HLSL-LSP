@@ -414,6 +414,61 @@ class TaskCursors final {
     return result;
 }
 
+[[nodiscard]] bool is_identifier_character(char character) {
+    return (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
+           (character >= '0' && character <= '9') || character == '_';
+}
+
+[[nodiscard]] auto identifier_at(const std::vector<SourceFile>& sources, std::string_view path,
+                                 std::uint32_t line, std::uint32_t column)
+    -> std::optional<std::string_view> {
+    const auto source = std::ranges::find(sources, path, &SourceFile::path);
+    if (source == sources.end() || line == 0 || column == 0) {
+        return std::nullopt;
+    }
+
+    std::size_t line_start{};
+    for (std::uint32_t current_line = 1; current_line < line; ++current_line) {
+        line_start = source->text.find('\n', line_start);
+        if (line_start == std::string::npos) {
+            return std::nullopt;
+        }
+        ++line_start;
+    }
+
+    auto line_end = source->text.find('\n', line_start);
+    if (line_end == std::string::npos) {
+        line_end = source->text.size();
+    }
+    const auto position = line_start + column - 1;
+    if (position >= line_end || !is_identifier_character(source->text[position])) {
+        return std::nullopt;
+    }
+
+    auto start = position;
+    while (start > line_start && is_identifier_character(source->text[start - 1])) {
+        --start;
+    }
+    auto end = position + 1;
+    while (end < line_end && is_identifier_character(source->text[end])) {
+        ++end;
+    }
+    return std::string_view{source->text}.substr(start, end - start);
+}
+
+[[nodiscard]] auto find_symbol_definition(const std::vector<Symbol>& symbols, std::string_view name)
+    -> std::optional<Definition> {
+    for (const auto& symbol : symbols) {
+        if (symbol.name == name) {
+            return Definition{.name = symbol.name, .location = symbol.location};
+        }
+        if (const auto nested = find_symbol_definition(symbol.children, name)) {
+            return nested;
+        }
+    }
+    return std::nullopt;
+}
+
 } // namespace
 
 struct Intellisense::Impl final {
@@ -611,7 +666,11 @@ auto TranslationUnit::definition_at(std::string_view path, std::uint32_t line,
         ComPtr<IDxcCursor> referenced;
         check(cursor->GetReferencedCursor(referenced.put()), "GetReferencedCursor");
         if (is_null_cursor(referenced.get())) {
-            return std::nullopt;
+            const auto identifier = identifier_at(implementation_->sources, path, line, column);
+            if (!identifier) {
+                return std::nullopt;
+            }
+            return find_symbol_definition(symbols(), *identifier);
         }
 
         check(referenced->GetDefinitionCursor(definition.put()), "GetDefinitionCursor");

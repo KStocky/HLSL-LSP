@@ -203,18 +203,41 @@ TEST_CASE("DXC IntelliSense reparses edited sources", "[dxc][integration]") {
         completions, [](const auto& completion) { return completion.label == "UpdatedNumber"; }));
 }
 
-TEST_CASE("DXC IntelliSense navigates to incomplete template declarations",
+TEST_CASE("DXC IntelliSense navigates to partially specialized template declarations",
           "[dxc][navigation][integration]") {
     hlsl_intellisense::dxc::Intellisense intellisense;
     const std::string source =
-        "template<typename T> struct container_wrapper;\n"
-        "template<typename T> void use_wrapper(inout container_wrapper<T> value) {}\n";
+        "template<bool B, typename T = void> struct enable_if {};\n"
+        "template<typename T> struct enable_if<true, T> { using type = T; };\n"
+        "template<typename T> struct container_traits { static const bool is_container = "
+        "true; };\n"
+        "template<typename T, typename = void> struct container_wrapper;\n"
+        "template<typename T> struct container_wrapper<T, typename "
+        "enable_if<container_traits<T>::is_container>::type> {};\n"
+        "template<typename U> void use_wrapper(U input) { container_wrapper<U> value; }\n";
     auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}});
 
-    const auto definition = translation_unit.definition_at(shader_path, 2, 49);
+    const auto diagnostics = translation_unit.diagnostics();
+    std::string diagnostic_messages;
+    for (const auto& diagnostic : diagnostics) {
+        diagnostic_messages += diagnostic.message;
+        diagnostic_messages += '\n';
+    }
+    INFO(diagnostic_messages);
+    CHECK(diagnostics.empty());
+
+    const auto symbols = translation_unit.symbols();
+    std::string symbol_names;
+    for (const auto& symbol : symbols) {
+        symbol_names += symbol.name;
+        symbol_names += '\n';
+    }
+    INFO(symbol_names);
+
+    const auto definition = translation_unit.definition_at(shader_path, 6, 50);
     REQUIRE(definition.has_value());
     CHECK(definition->name == "container_wrapper");
-    CHECK(definition->location.line == 1);
+    CHECK(definition->location.line == 4);
 }
 
 TEST_CASE("DXC IntelliSense requires the root source", "[dxc]") {

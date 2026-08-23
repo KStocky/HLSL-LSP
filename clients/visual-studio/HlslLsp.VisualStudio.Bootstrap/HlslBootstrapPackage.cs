@@ -14,7 +14,7 @@ using Microsoft.VisualStudio.Shell.Interop;
 namespace HlslLsp.VisualStudio.Bootstrap;
 
 [PackageRegistration(UseManagedResourcesOnly = true, AllowsBackgroundLoading = true)]
-[InstalledProductRegistration("HLSL-LSP", "DXC-powered HLSL IntelliSense", "0.5.45")]
+[InstalledProductRegistration("HLSL-LSP", "DXC-powered HLSL IntelliSense", "0.5.46")]
 [ProvideSettingsManifest(PackageRelativeManifestFile = "HlslLsp.registration.json")]
 [ProvideOptionPage(
     typeof(HlslOptionsPage),
