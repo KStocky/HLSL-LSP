@@ -94,14 +94,17 @@ internal sealed class HlslNavigationBarManager
             }
             ErrorHandler.ThrowOnFailure(
                 dropdownManager.AddDropdownBar(2, activeClient));
-            ErrorHandler.ThrowOnFailure(
-                dropdownManager.GetDropdownBar(out var reboundBar));
-            if (reboundBar == null)
+            if (!activeClient.HasDropdownBar)
             {
-                throw new InvalidOperationException(
-                    "Visual Studio did not return the rebound HLSL navigation bar.");
+                ErrorHandler.ThrowOnFailure(
+                    dropdownManager.GetDropdownBar(out var reboundBar));
+                if (reboundBar == null)
+                {
+                    throw new InvalidOperationException(
+                        "Visual Studio did not return the rebound HLSL navigation bar.");
+                }
+                activeClient.SetDropdownBar(reboundBar);
             }
-            activeClient.SetDropdownBar(reboundBar);
             client = activeClient;
             return;
         }

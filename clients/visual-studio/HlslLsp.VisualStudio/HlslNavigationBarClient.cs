@@ -194,6 +194,15 @@ internal sealed class HlslNavigationBarClient :
         {
             AddSymbol(symbol, null, global, result);
         }
+        foreach (var duplicates in result
+                     .GroupBy(item => item.Text)
+                     .Where(group => group.Count() > 1))
+        {
+            foreach (var item in duplicates)
+            {
+                item.Text += $" (line {item.SelectionStart.Line + 1})";
+            }
+        }
         return result;
     }
 
@@ -216,6 +225,7 @@ internal sealed class HlslNavigationBarClient :
                 var childItem = NavigationItem.FromJson(child);
                 if (IsContainer(childItem.Kind))
                 {
+                    item.Children.Add(childItem);
                     AddSymbol(child, item.Text, global, scopes);
                 }
                 else
@@ -286,6 +296,10 @@ internal sealed class HlslNavigationBarClient :
                 memberIndex = index;
                 break;
             }
+        }
+        if (memberIndex < 0 && scopes[scopeIndex].Kind == 3)
+        {
+            scopeIndex = 0;
         }
 
         dropdownBar.RefreshCombo(0, scopeIndex);
