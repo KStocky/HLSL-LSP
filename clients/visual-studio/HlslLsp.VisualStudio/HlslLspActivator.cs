@@ -20,7 +20,8 @@ namespace HlslLsp.VisualStudio;
 
 public sealed class HlslLspActivator :
     IVsSolutionEvents,
-    IVsSolutionEvents7
+    IVsSolutionEvents7,
+    IVsSelectionEvents
 {
     private readonly HlslBootstrapPackage host;
     private readonly JoinableTaskFactory joinableTaskFactory;
@@ -34,6 +35,7 @@ public sealed class HlslLspActivator :
     private ITextDocumentFactoryService textDocuments;
     private IComponentModel componentModel;
     private IVsRunningDocumentTable runningDocuments;
+    private IVsMonitorSelection selectionMonitor;
     private IVsEditorAdaptersFactoryService editorAdapters;
     private IContentType nativeShaderContentType;
     private IContentType nativeHeaderContentType;
@@ -41,6 +43,7 @@ public sealed class HlslLspActivator :
     private IContentType remoteHeaderContentType;
     private HlslLanguageClient languageClient;
     private HlslNavigationBarManager navigationBars;
+    private CancellationTokenSource navigationAttachCancellation;
     private HashSet<string> configuredExtensions =
         new(StringComparer.OrdinalIgnoreCase);
     private bool servicesReady;
@@ -73,6 +76,17 @@ public sealed class HlslLspActivator :
                 "Visual Studio's solution service is unavailable.");
         }
         ErrorHandler.ThrowOnFailure(solution.AdviseSolutionEvents(this, out _));
+        var resolvedSelectionMonitor =
+            await host.GetServiceAsync(typeof(SVsShellMonitorSelection))
+                as IVsMonitorSelection;
+        if (resolvedSelectionMonitor == null)
+        {
+            throw new InvalidOperationException(
+                "Visual Studio's selection monitor is unavailable.");
+        }
+        selectionMonitor = resolvedSelectionMonitor;
+        ErrorHandler.ThrowOnFailure(
+            selectionMonitor.AdviseSelectionEvents(this, out _));
 
         await ActivateLanguageClientAsync(cancellationToken);
     }
@@ -129,20 +143,13 @@ public sealed class HlslLspActivator :
         languageClient = new HlslLanguageClient(GetOptions().LanguageVersion);
         await broker.LoadAsync(new HlslLanguageClientMetadata(), languageClient);
 
-        var uiShell = await host.GetServiceAsync(typeof(SVsUIShell)) as IVsUIShell;
-        if (uiShell == null)
-        {
-            throw new InvalidOperationException(
-                "Visual Studio's UI shell service is unavailable.");
-        }
         navigationBars = new HlslNavigationBarManager(
-            uiShell,
             editorAdapters,
             textDocuments,
             languageClient,
             joinableTaskFactory,
             host);
-        navigationBars.AttachToOpenDocuments();
+        ScheduleNavigationBarAttachment();
     }
 
     private async Task ApplyOpenDocumentMappingsAsync(CancellationToken cancellationToken)
@@ -205,11 +212,38 @@ public sealed class HlslLspActivator :
                 {
                     await joinableTaskFactory.SwitchToMainThreadAsync();
                     ApplyConfiguredContentType(eventArgs.TextDocument.TextBuffer);
-                    await Task.Delay(100, disposalToken);
-                    await joinableTaskFactory.SwitchToMainThreadAsync(disposalToken);
-                    navigationBars?.AttachToOpenDocuments();
+                    ScheduleNavigationBarAttachment();
                 })
             .FileAndForget("HlslLsp/ApplyDocumentMapping");
+    }
+
+    private void ScheduleNavigationBarAttachment()
+    {
+        var replacement =
+            CancellationTokenSource.CreateLinkedTokenSource(disposalToken);
+        var previous = Interlocked.Exchange(
+            ref navigationAttachCancellation,
+            replacement);
+        previous?.Cancel();
+        previous?.Dispose();
+        joinableTaskFactory.RunAsync(
+                () => AttachActiveNavigationBarAsync(replacement.Token))
+            .FileAndForget("HlslLsp/AttachNavigationBar");
+    }
+
+    private async Task AttachActiveNavigationBarAsync(
+        CancellationToken cancellationToken)
+    {
+        for (var attempt = 0; attempt < 20; ++attempt)
+        {
+            await joinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+            ErrorHandler.ThrowOnFailure(
+                selectionMonitor.GetCurrentElementValue(
+                    (uint)VSConstants.VSSELELEMID.SEID_DocumentFrame,
+                    out var frame));
+            navigationBars?.AttachToDocumentFrame(frame);
+            await Task.Delay(250, cancellationToken);
+        }
     }
 
     private async Task ApplyOptionsAsync()
@@ -422,13 +456,7 @@ public sealed class HlslLspActivator :
 
     public void OnAfterOpenFolder(string folderPath)
     {
-        joinableTaskFactory.RunAsync(
-                async () =>
-                {
-                    await joinableTaskFactory.SwitchToMainThreadAsync(disposalToken);
-                    navigationBars?.AttachToOpenDocuments();
-                })
-            .FileAndForget("HlslLsp/AttachNavigationBars");
+        ScheduleNavigationBarAttachment();
     }
 
     public void OnBeforeCloseFolder(string folderPath)
@@ -445,6 +473,33 @@ public sealed class HlslLspActivator :
     public void OnAfterCloseFolder(string folderPath)
     {
     }
+
+    public int OnCmdUIContextChanged(uint commandUiCookie, int active) =>
+        VSConstants.S_OK;
+
+    public int OnElementValueChanged(
+        uint elementId,
+        object oldValue,
+        object newValue)
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        if (elementId == (uint)VSConstants.VSSELELEMID.SEID_DocumentFrame)
+        {
+            ScheduleNavigationBarAttachment();
+        }
+        return VSConstants.S_OK;
+    }
+
+    public int OnSelectionChanged(
+        IVsHierarchy oldHierarchy,
+        uint oldItemId,
+        IVsMultiItemSelect oldMultiItemSelect,
+        ISelectionContainer oldSelectionContainer,
+        IVsHierarchy newHierarchy,
+        uint newItemId,
+        IVsMultiItemSelect newMultiItemSelect,
+        ISelectionContainer newSelectionContainer) =>
+        VSConstants.S_OK;
 
 #pragma warning disable CS0618
     public void OnAfterLoadAllDeferredProjects()

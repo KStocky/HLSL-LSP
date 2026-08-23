@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Generic;
 using Microsoft.VisualStudio;
 using Microsoft.VisualStudio.Editor;
 using Microsoft.VisualStudio.Shell;
@@ -12,24 +11,20 @@ namespace HlslLsp.VisualStudio;
 
 internal sealed class HlslNavigationBarManager
 {
-    private readonly IVsUIShell uiShell;
     private readonly IVsEditorAdaptersFactoryService editorAdapters;
     private readonly ITextDocumentFactoryService textDocuments;
     private readonly HlslLanguageClient languageClient;
     private readonly JoinableTaskFactory joinableTaskFactory;
     private readonly IServiceProvider serviceProvider;
-    private readonly Dictionary<IVsCodeWindow, HlslNavigationBarClient> clients =
-        new();
+    private HlslNavigationBarClient client;
 
     internal HlslNavigationBarManager(
-        IVsUIShell uiShell,
         IVsEditorAdaptersFactoryService editorAdapters,
         ITextDocumentFactoryService textDocuments,
         HlslLanguageClient languageClient,
         JoinableTaskFactory joinableTaskFactory,
         IServiceProvider serviceProvider)
     {
-        this.uiShell = uiShell;
         this.editorAdapters = editorAdapters;
         this.textDocuments = textDocuments;
         this.languageClient = languageClient;
@@ -37,16 +32,12 @@ internal sealed class HlslNavigationBarManager
         this.serviceProvider = serviceProvider;
     }
 
-    internal void AttachToOpenDocuments()
+    internal void AttachToDocumentFrame(object value)
     {
         ThreadHelper.ThrowIfNotOnUIThread();
-        ErrorHandler.ThrowOnFailure(
-            uiShell.GetDocumentWindowEnum(out var windows));
-        var frames = new IVsWindowFrame[1];
-        while (windows.Next(1, frames, out var fetched) == VSConstants.S_OK &&
-               fetched == 1)
+        if (value is IVsWindowFrame frame)
         {
-            Attach(frames[0]);
+            Attach(frame);
         }
     }
 
@@ -58,7 +49,6 @@ internal sealed class HlslNavigationBarManager
                     (int)__VSFPROPID.VSFPROPID_DocView,
                     out var rawView)) ||
             rawView is not IVsCodeWindow codeWindow ||
-            clients.ContainsKey(codeWindow) ||
             codeWindow is not IVsDropdownBarManager dropdownManager ||
             ErrorHandler.Failed(codeWindow.GetBuffer(out var textLines)))
         {
@@ -66,6 +56,15 @@ internal sealed class HlslNavigationBarManager
         }
 
         var buffer = editorAdapters.GetDataBuffer(textLines);
+        if (client != null &&
+            buffer != null &&
+            textDocuments.TryGetTextDocument(buffer, out var activeDocument) &&
+            client.Matches(buffer, activeDocument.FilePath))
+        {
+            client.Activate(dropdownManager);
+            return;
+        }
+
         if (buffer == null ||
             (!buffer.ContentType.IsOfType("HLSL-LSP-Colored") &&
              !buffer.ContentType.IsOfType("HLSLHeader-LSP-Colored")) ||
@@ -76,12 +75,42 @@ internal sealed class HlslNavigationBarManager
 
         ErrorHandler.ThrowOnFailure(
             dropdownManager.GetDropdownBar(out var existing));
+        if (client != null)
+        {
+            var activeClient = client;
+            client = null;
+            activeClient.Detach();
+            activeClient.Rebind(
+                dropdownManager,
+                codeWindow,
+                buffer,
+                document.FilePath);
+            ErrorHandler.ThrowOnFailure(
+                dropdownManager.GetDropdownBar(out var remainingBar));
+            if (remainingBar != null)
+            {
+                ErrorHandler.ThrowOnFailure(
+                    dropdownManager.RemoveDropdownBar());
+            }
+            ErrorHandler.ThrowOnFailure(
+                dropdownManager.AddDropdownBar(2, activeClient));
+            ErrorHandler.ThrowOnFailure(
+                dropdownManager.GetDropdownBar(out var reboundBar));
+            if (reboundBar == null)
+            {
+                throw new InvalidOperationException(
+                    "Visual Studio did not return the rebound HLSL navigation bar.");
+            }
+            activeClient.SetDropdownBar(reboundBar);
+            client = activeClient;
+            return;
+        }
         if (existing != null)
         {
             return;
         }
 
-        var client = new HlslNavigationBarClient(
+        var addedClient = new HlslNavigationBarClient(
             dropdownManager,
             codeWindow,
             buffer,
@@ -91,41 +120,41 @@ internal sealed class HlslNavigationBarManager
             serviceProvider,
             document.FilePath,
             OnClientClosed);
-        var result = dropdownManager.AddDropdownBar(2, client);
+        var result = dropdownManager.AddDropdownBar(2, addedClient);
         if (ErrorHandler.Failed(result))
         {
-            client.Dispose();
+            addedClient.Dispose();
             ErrorHandler.ThrowOnFailure(result);
         }
-        clients.Add(codeWindow, client);
+        if (!addedClient.HasDropdownBar)
+        {
+            ErrorHandler.ThrowOnFailure(
+                dropdownManager.GetDropdownBar(out var addedBar));
+            if (addedBar == null)
+            {
+                addedClient.Dispose();
+                throw new InvalidOperationException(
+                    "Visual Studio did not return the added HLSL navigation bar.");
+            }
+            addedClient.SetDropdownBar(addedBar);
+        }
+        client = addedClient;
     }
 
-    private void OnClientClosed(HlslNavigationBarClient client)
+    private void OnClientClosed(HlslNavigationBarClient closedClient)
     {
         ThreadHelper.ThrowIfNotOnUIThread();
-        IVsCodeWindow closedWindow = null;
-        foreach (var entry in clients)
+        if (ReferenceEquals(client, closedClient))
         {
-            if (ReferenceEquals(entry.Value, client))
-            {
-                closedWindow = entry.Key;
-                break;
-            }
-        }
-        if (closedWindow != null)
-        {
-            clients.Remove(closedWindow);
+            client = null;
         }
     }
 
     internal void RemoveAll()
     {
         ThreadHelper.ThrowIfNotOnUIThread();
-        var activeClients = new List<HlslNavigationBarClient>(clients.Values);
-        clients.Clear();
-        foreach (var client in activeClients)
-        {
-            client.Dispose();
-        }
+        var activeClient = client;
+        client = null;
+        activeClient?.Dispose();
     }
 }

@@ -23,15 +23,16 @@ internal sealed class HlslNavigationBarClient :
     IVsCoTaskMemFreeMyStrings,
     IDisposable
 {
-    private readonly IVsDropdownBarManager manager;
-    private readonly ITextBuffer buffer;
-    private readonly IWpfTextView view;
+    private IVsDropdownBarManager manager;
+    private readonly IVsEditorAdaptersFactoryService editorAdapters;
     private readonly HlslLanguageClient languageClient;
     private readonly JoinableTaskFactory joinableTaskFactory;
     private readonly Action<HlslNavigationBarClient> closed;
-    private readonly Uri documentUri;
     private readonly IntPtr imageList;
     private readonly List<NavigationItem> scopes = new();
+    private ITextBuffer buffer;
+    private IWpfTextView view;
+    private Uri documentUri;
     private CancellationTokenSource updateCancellation = new();
     private IVsDropdownBar dropdownBar;
     private bool disposed;
@@ -49,6 +50,7 @@ internal sealed class HlslNavigationBarClient :
     {
         ThreadHelper.ThrowIfNotOnUIThread();
         this.manager = manager;
+        this.editorAdapters = editorAdapters;
         this.buffer = buffer;
         this.languageClient = languageClient;
         this.joinableTaskFactory = joinableTaskFactory;
@@ -84,6 +86,54 @@ internal sealed class HlslNavigationBarClient :
         joinableTaskFactory.RunAsync(
                 () => RefreshAndReportAsync(cancellation.Token))
             .FileAndForget("HlslLsp/RefreshNavigationBar");
+    }
+
+    internal bool Matches(ITextBuffer candidateBuffer, string filePath) =>
+        ReferenceEquals(buffer, candidateBuffer) &&
+        documentUri == new Uri(filePath);
+
+    internal bool HasDropdownBar => dropdownBar != null;
+
+    internal void Detach()
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        manager.RemoveDropdownBar();
+        dropdownBar = null;
+    }
+
+    internal void Activate(IVsDropdownBarManager candidateManager)
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        manager = candidateManager;
+        RefreshSelections();
+    }
+
+    internal void Rebind(
+        IVsDropdownBarManager candidateManager,
+        IVsCodeWindow codeWindow,
+        ITextBuffer candidateBuffer,
+        string filePath)
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        codeWindow.GetPrimaryView(out var textView);
+        var candidateView = editorAdapters.GetWpfTextView(textView);
+        if (candidateView == null)
+        {
+            throw new InvalidOperationException(
+                "Visual Studio's HLSL text view is unavailable.");
+        }
+
+        buffer.Changed -= OnBufferChanged;
+        view.Caret.PositionChanged -= OnCaretPositionChanged;
+        view.Closed -= OnViewClosed;
+        buffer = candidateBuffer;
+        view = candidateView;
+        documentUri = new Uri(filePath);
+        manager = candidateManager;
+        buffer.Changed += OnBufferChanged;
+        view.Caret.PositionChanged += OnCaretPositionChanged;
+        view.Closed += OnViewClosed;
+        Refresh();
     }
 
     private async Task RefreshAndReportAsync(CancellationToken cancellationToken)
