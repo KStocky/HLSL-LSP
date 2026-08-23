@@ -39,28 +39,45 @@ to set:
 Changes apply to open and future documents. Shutdown never waits for a failed
 LSP broker operation and bounds child-process cleanup.
 
-## Build
+## Install
+
+Download `HlslLsp.VisualStudio.vsix` from the
+[latest GitHub release](https://github.com/KStocky/HLSL-LSP/releases/latest).
+Close Visual Studio, run the VSIX, and follow the installer prompts.
+
+Release artifacts are not yet code-signed. Windows Smart App Control may block
+the extension or language server unless Developer Mode is enabled.
+
+## Build from source
 
 Build the native server first:
 
 ```powershell
-cmake --build --preset windows-msvc-debug --target hlsl-lsp
+cmake --preset windows-msvc
+cmake --build --preset windows-msvc-release --target hlsl-lsp
 ```
 
 Then build the VSIX with Visual Studio MSBuild:
 
 ```powershell
-$msbuild = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
-  -latest -products * -requires Microsoft.Component.MSBuild -find MSBuild\**\Bin\MSBuild.exe |
+$vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+$msbuild = & $vswhere -latest -products * `
+  -requires Microsoft.Component.MSBuild `
+  -find MSBuild\**\Bin\MSBuild.exe |
   Select-Object -First 1
+$serverDir = (Resolve-Path 'out\build\windows-msvc\Release').Path
+
 & $msbuild clients\visual-studio\HlslLsp.VisualStudio\HlslLsp.VisualStudio.csproj `
-  /restore /p:Configuration=Debug
+  /restore `
+  /p:Configuration=Release `
+  "/p:HlslLspServerDir=$serverDir"
 ```
 
-The VSIX is written under `clients\visual-studio\HlslLsp.VisualStudio\bin`.
-Opening the project in Visual Studio and pressing F5 installs it into the
-experimental instance. Open an `.hlsl`, `.hlsli`, or configured HLSL file; the
-server starts automatically once the host workspace is ready.
+The VSIX is written to
+`clients\visual-studio\HlslLsp.VisualStudio\bin\Release\net472\HlslLsp.VisualStudio.vsix`.
+Close Visual Studio and run that file to install the extension. Open an
+`.hlsl`, `.hlsli`, or configured HLSL file; the server starts automatically
+once the host workspace is ready.
 
 Use `.vs\VSWorkspaceSettings.json` for editor overrides:
 
