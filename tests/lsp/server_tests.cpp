@@ -159,7 +159,15 @@ TEST_CASE("LSP handler enforces lifecycle and invalid parameters", "[lsp][handle
 TEST_CASE("Server provides hierarchical document and searchable workspace symbols",
           "[lsp][symbols][navigation][integration]") {
     const auto uri = shader_uri();
-    const auto source = valid_hlsl();
+    const auto lf_source = valid_hlsl();
+    std::string source;
+    source.reserve(lf_source.size() + std::ranges::count(lf_source, '\n'));
+    for (const auto character : lf_source) {
+        if (character == '\n') {
+            source.push_back('\r');
+        }
+        source.push_back(character);
+    }
     std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
     hlsl_intellisense::lsp::Server server{
         [&notifications](const auto& value) { notifications.push_back(value); }};
@@ -194,8 +202,7 @@ TEST_CASE("Server provides hierarchical document and searchable workspace symbol
         return symbol["name"] == "value" && symbol["kind"] == 8;
     }));
     const auto overloaded_operator = std::ranges::find_if(
-        (*number)["children"],
-        [](const auto& symbol) { return symbol["name"] == "operator+"; });
+        (*number)["children"], [](const auto& symbol) { return symbol["name"] == "operator+"; });
     REQUIRE(overloaded_operator != (*number)["children"].end());
     CHECK((*overloaded_operator)["kind"] == 25);
     CHECK((*overloaded_operator)["detail"] == "HLSL operator");

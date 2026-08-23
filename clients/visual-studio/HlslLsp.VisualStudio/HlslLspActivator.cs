@@ -40,6 +40,7 @@ public sealed class HlslLspActivator :
     private IContentType remoteShaderContentType;
     private IContentType remoteHeaderContentType;
     private HlslLanguageClient languageClient;
+    private HlslNavigationBarManager navigationBars;
     private HashSet<string> configuredExtensions =
         new(StringComparer.OrdinalIgnoreCase);
     private bool servicesReady;
@@ -127,6 +128,21 @@ public sealed class HlslLspActivator :
         var broker = componentModel.GetService<ILanguageClientBroker>();
         languageClient = new HlslLanguageClient(GetOptions().LanguageVersion);
         await broker.LoadAsync(new HlslLanguageClientMetadata(), languageClient);
+
+        var uiShell = await host.GetServiceAsync(typeof(SVsUIShell)) as IVsUIShell;
+        if (uiShell == null)
+        {
+            throw new InvalidOperationException(
+                "Visual Studio's UI shell service is unavailable.");
+        }
+        navigationBars = new HlslNavigationBarManager(
+            uiShell,
+            editorAdapters,
+            textDocuments,
+            languageClient,
+            joinableTaskFactory,
+            host);
+        navigationBars.AttachToOpenDocuments();
     }
 
     private async Task ApplyOpenDocumentMappingsAsync(CancellationToken cancellationToken)
@@ -189,6 +205,9 @@ public sealed class HlslLspActivator :
                 {
                     await joinableTaskFactory.SwitchToMainThreadAsync();
                     ApplyConfiguredContentType(eventArgs.TextDocument.TextBuffer);
+                    await Task.Delay(100, disposalToken);
+                    await joinableTaskFactory.SwitchToMainThreadAsync(disposalToken);
+                    navigationBars?.AttachToOpenDocuments();
                 })
             .FileAndForget("HlslLsp/ApplyDocumentMapping");
     }
@@ -394,6 +413,7 @@ public sealed class HlslLspActivator :
     public int OnBeforeCloseSolution(object reserved)
     {
         ThreadHelper.ThrowIfNotOnUIThread();
+        navigationBars?.RemoveAll();
         DemoteOpenDocuments();
         return VSConstants.S_OK;
     }
@@ -402,11 +422,19 @@ public sealed class HlslLspActivator :
 
     public void OnAfterOpenFolder(string folderPath)
     {
+        joinableTaskFactory.RunAsync(
+                async () =>
+                {
+                    await joinableTaskFactory.SwitchToMainThreadAsync(disposalToken);
+                    navigationBars?.AttachToOpenDocuments();
+                })
+            .FileAndForget("HlslLsp/AttachNavigationBars");
     }
 
     public void OnBeforeCloseFolder(string folderPath)
     {
         ThreadHelper.ThrowIfNotOnUIThread();
+        navigationBars?.RemoveAll();
         DemoteOpenDocuments();
     }
 

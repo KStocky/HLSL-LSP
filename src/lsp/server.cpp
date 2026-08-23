@@ -237,12 +237,22 @@ using json_rpc::Json;
     }
 }
 
+[[nodiscard]] std::size_t symbol_offset(std::string_view text, std::size_t offset,
+                                        bool end_offset) {
+    offset = (std::min)(offset, text.size());
+    if (offset > 0 && offset < text.size() && text[offset - 1] == '\r' && text[offset] == '\n') {
+        return end_offset ? offset - 1 : offset + 1;
+    }
+    return offset;
+}
+
 [[nodiscard]] workspace::Range symbol_range(const dxc::Symbol& symbol,
                                             const workspace::SourceSnapshot& snapshot) {
-    const auto text_size = snapshot.text().size();
-    const auto start = (std::min)(static_cast<std::size_t>(symbol.start_offset), text_size);
-    const auto end =
-        (std::min)((std::max)(static_cast<std::size_t>(symbol.end_offset), start), text_size);
+    const auto start =
+        symbol_offset(snapshot.text(), static_cast<std::size_t>(symbol.start_offset), false);
+    const auto normalized_end = symbol_offset(
+        snapshot.text(), (std::max)(static_cast<std::size_t>(symbol.end_offset), start), true);
+    const auto end = (std::max)(normalized_end, start);
     return {.start = workspace::lsp_position_at(snapshot.text(), start),
             .end = workspace::lsp_position_at(snapshot.text(), end)};
 }
@@ -250,7 +260,8 @@ using json_rpc::Json;
 [[nodiscard]] workspace::Range symbol_selection_range(const dxc::Symbol& symbol,
                                                       const workspace::SourceSnapshot& snapshot) {
     const auto text_size = snapshot.text().size();
-    const auto start = (std::min)(static_cast<std::size_t>(symbol.location.offset), text_size);
+    const auto start =
+        symbol_offset(snapshot.text(), static_cast<std::size_t>(symbol.location.offset), false);
     auto source_offset = start;
     auto name_offset = std::size_t{};
     while (source_offset < text_size && name_offset < symbol.name.size()) {
@@ -264,9 +275,11 @@ using json_rpc::Json;
             break;
         }
     }
-    const auto end = name_offset == symbol.name.size()
-                         ? source_offset
-                         : (std::min)(start + symbol.name.size(), text_size);
+    const auto end = symbol_offset(snapshot.text(),
+                                   name_offset == symbol.name.size()
+                                       ? source_offset
+                                       : (std::min)(start + symbol.name.size(), text_size),
+                                   true);
     return {.start = workspace::lsp_position_at(snapshot.text(), start),
             .end = workspace::lsp_position_at(snapshot.text(), end)};
 }

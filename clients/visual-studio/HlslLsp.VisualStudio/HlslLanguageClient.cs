@@ -7,11 +7,14 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.VisualStudio.LanguageServer.Client;
 using Microsoft.VisualStudio.Threading;
+using Newtonsoft.Json.Linq;
 using StreamJsonRpc;
 
 namespace HlslLsp.VisualStudio;
 
-internal sealed class HlslLanguageClient : ILanguageClient, ILanguageClientCustomMessage2
+internal sealed class HlslLanguageClient :
+    ILanguageClient,
+    ILanguageClientCustomMessage2
 {
     private Process serverProcess;
     private string languageVersion;
@@ -73,6 +76,38 @@ internal sealed class HlslLanguageClient : ILanguageClient, ILanguageClientCusto
                 });
     }
 
+    internal async Task<JArray> GetDocumentSymbolsAsync(
+        Uri documentUri,
+        CancellationToken cancellationToken)
+    {
+        var currentRpc = rpc ??
+            throw new InvalidOperationException(
+                "The HLSL language server connection is unavailable.");
+        for (var attempt = 0; ; ++attempt)
+        {
+            try
+            {
+                var result = await currentRpc.InvokeWithParameterObjectAsync<JToken>(
+                        "textDocument/documentSymbol",
+                        new
+                        {
+                            textDocument = new
+                            {
+                                uri = documentUri.AbsoluteUri,
+                            },
+                        },
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                return result as JArray ?? new JArray();
+            }
+            catch (RemoteInvocationException error)
+                when (error.ErrorCode == -32602 && attempt < 20)
+            {
+                await Task.Delay(250, cancellationToken).ConfigureAwait(false);
+            }
+        }
+    }
+
     public async Task OnLoadedAsync()
     {
         if (StartAsync != null)
@@ -126,7 +161,8 @@ internal sealed class HlslLanguageClient : ILanguageClient, ILanguageClientCusto
             new Connection(process.StandardOutput.BaseStream, process.StandardInput.BaseStream));
     }
 
-    public Task OnServerInitializedAsync() => Task.CompletedTask;
+    public Task OnServerInitializedAsync()
+        => Task.CompletedTask;
 
     public Task<InitializationFailureContext> OnServerInitializeFailedAsync(
         ILanguageClientInitializationInfo initializationState)
