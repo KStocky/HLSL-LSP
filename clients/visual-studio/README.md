@@ -12,7 +12,7 @@ classification pipeline can hang the editor while applying them; the language
 server still provides richer semantic tokens to other clients. A separate MEF-only assembly provides immediate lexical classification for HLSL keywords,
 preprocessor directives, types, functions, comments, strings, and numbers.
 Each category appears as an `HLSL ...` item under **Environment > Fonts and
-Colors**.
+Colors**, using the same Visual Studio colour picker as HLSL Tools.
 
 The VSIX deliberately does not export a remote content type or language client
 through MEF. Those exports can change Visual Studio's workspace-composition graph
@@ -27,7 +27,8 @@ native content type, so restored documents never begin the next startup as
 LSP-backed buffers. Later HLSL documents activate automatically. No user action
 is required.
 
-Use **Tools > Options > HLSL-LSP > General** to set:
+Use the native **Tools > Options > HLSL-LSP > General** Unified Settings page
+to set:
 
 - **HLSL file extensions**: a semicolon-separated list such as
   `.hlsl;.hlsli;.usf`. This is also the default. The built-in `.hlsl` and

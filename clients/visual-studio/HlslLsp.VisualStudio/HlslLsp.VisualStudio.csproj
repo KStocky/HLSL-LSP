@@ -54,6 +54,10 @@
     <Content Include="source.extension.vsixmanifest">
       <IncludeInVSIX>true</IncludeInVSIX>
     </Content>
+    <Content Include="..\HlslLsp.VisualStudio.Bootstrap\HlslLsp.registration.json"
+             Link="HlslLsp.registration.json">
+      <IncludeInVSIX>true</IncludeInVSIX>
+    </Content>
   </ItemGroup>
 
   <Target Name="IncludeHlslLspServer" BeforeTargets="GetVsixSourceItems">

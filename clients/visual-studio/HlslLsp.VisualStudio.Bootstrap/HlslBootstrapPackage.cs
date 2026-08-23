@@ -14,8 +14,18 @@ using Microsoft.VisualStudio.Shell.Interop;
 namespace HlslLsp.VisualStudio.Bootstrap;
 
 [PackageRegistration(UseManagedResourcesOnly = true, AllowsBackgroundLoading = true)]
-[InstalledProductRegistration("HLSL-LSP", "DXC-powered HLSL IntelliSense", "0.5.37")]
-[ProvideOptionPage(typeof(HlslOptionsPage), "HLSL-LSP", "General", 0, 0, true)]
+[InstalledProductRegistration("HLSL-LSP", "DXC-powered HLSL IntelliSense", "0.5.40")]
+[ProvideSettingsManifest(PackageRelativeManifestFile = "HlslLsp.registration.json")]
+[ProvideOptionPage(
+    typeof(HlslOptionsPage),
+    "HLSL-LSP",
+    "General",
+    0,
+    0,
+    true,
+    IsInUnifiedSettings = true,
+    UnifiedSettingsCategoryMoniker = "hlslLsp.general",
+    ShouldShowUnifiedSettingsPlaceholder = false)]
 [Guid(PackageGuidString)]
 public sealed class HlslBootstrapPackage : AsyncPackage
 {
@@ -167,21 +177,126 @@ public sealed class HlslOptionsSnapshot
     public string LanguageVersion { get; }
 }
 
+[TypeDescriptionProvider(typeof(HlslOptionsTypeDescriptionProvider))]
 public sealed class HlslOptionsPage : DialogPage
 {
+    private string fileExtensions = ".hlsl;.hlsli;.usf";
+    private string languageVersion = "2021";
+
     [Category("Files")]
     [System.ComponentModel.DisplayName("HLSL file extensions")]
     [Description(
         "Semicolon-separated file extensions to treat as HLSL. " +
         "The built-in .hlsl and .hlsli extensions are always supported.")]
-    public string FileExtensions { get; set; } = ".hlsl;.hlsli;.usf";
+    public string FileExtensions
+    {
+        get => fileExtensions;
+        set
+        {
+            if (string.Equals(fileExtensions, value, StringComparison.Ordinal))
+            {
+                return;
+            }
+            fileExtensions = value;
+            HlslBootstrapPackage.NotifyOptionsChanged();
+        }
+    }
 
     [Category("Language")]
     [System.ComponentModel.DisplayName("Default HLSL language version")]
     [Description(
         "The default DXC -HV value, such as 2016, 2017, 2018, 2021, or 202x. " +
         "A shadertoolsconfig.json languageVersion setting takes precedence.")]
-    public string LanguageVersion { get; set; } = "2021";
+    public string LanguageVersion
+    {
+        get => languageVersion;
+        set
+        {
+            if (string.Equals(languageVersion, value, StringComparison.Ordinal))
+            {
+                return;
+            }
+            languageVersion = value;
+            HlslBootstrapPackage.NotifyOptionsChanged();
+        }
+    }
+
+    internal sealed class HlslOptionsTypeDescriptionProvider : TypeDescriptionProvider
+    {
+        private const string AttributeTypeName =
+            "Microsoft.VisualStudio.Shell.UnifiedSettingsMonikerAttribute, " +
+            "Microsoft.VisualStudio.Shell.15.0";
+
+        public HlslOptionsTypeDescriptionProvider()
+            : base(TypeDescriptor.GetProvider(typeof(DialogPage)))
+        {
+        }
+
+        public override ICustomTypeDescriptor GetTypeDescriptor(
+            Type objectType,
+            object instance)
+        {
+            return new HlslOptionsTypeDescriptor(
+                base.GetTypeDescriptor(objectType, instance));
+        }
+
+        private sealed class HlslOptionsTypeDescriptor : CustomTypeDescriptor
+        {
+            public HlslOptionsTypeDescriptor(ICustomTypeDescriptor parent)
+                : base(parent)
+            {
+            }
+
+            public override PropertyDescriptorCollection GetProperties()
+            {
+                return AddUnifiedSettingsMonikers(base.GetProperties());
+            }
+
+            public override PropertyDescriptorCollection GetProperties(
+                Attribute[] attributes)
+            {
+                return AddUnifiedSettingsMonikers(base.GetProperties(attributes));
+            }
+
+            private static PropertyDescriptorCollection AddUnifiedSettingsMonikers(
+                PropertyDescriptorCollection properties)
+            {
+                var attributeType = Type.GetType(AttributeTypeName, throwOnError: true);
+                var result = properties.Cast<PropertyDescriptor>()
+                    .Select(property =>
+                    {
+                        var moniker = GetMoniker(property.Name);
+                        if (moniker == null)
+                        {
+                            return property;
+                        }
+
+                        var attribute = (Attribute)Activator.CreateInstance(
+                            attributeType,
+                            moniker);
+                        return TypeDescriptor.CreateProperty(
+                            typeof(HlslOptionsPage),
+                            property,
+                            attribute);
+                    })
+                    .ToArray();
+                return new PropertyDescriptorCollection(result, readOnly: true);
+            }
+
+            private static string GetMoniker(string propertyName)
+            {
+                switch (propertyName)
+                {
+                    case nameof(HlslOptionsPage.FileExtensions):
+                        return "hlslLsp.general.fileExtensions";
+                    case nameof(HlslOptionsPage.LanguageVersion):
+                        return "hlslLsp.general.languageVersion";
+                    default:
+                        return null;
+                }
+            }
+        }
+    }
 
     protected override void OnApply(PageApplyEventArgs e)
     {

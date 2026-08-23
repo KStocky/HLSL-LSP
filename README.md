@@ -1,5 +1,7 @@
 # HLSL-LSP
 
+This project was generated with GitHub Copilot.
+
 An editor-independent HLSL language server built around DXC's
 `IDxcIntelliSense` API. The `hlsl-lsp` executable is an LSP 3.17 stdio server
 with:
@@ -11,6 +13,12 @@ with:
 - Hierarchical `shadertoolsconfig.json` compiler configuration
 - Transitive, virtual, open-buffer, and dependency-aware include handling
 - A Visual Studio 2026 VSIX prototype under `clients/visual-studio`
+
+The Visual Studio extension serves a similar purpose to
+[Tim Jones' HLSL Tools](https://github.com/tgjones/HlslTools), while using
+DXC's IntelliSense API so it can understand modern HLSL language and shader
+model features, including HLSL 2021 and Shader Model 6.6 resource descriptor
+heap types.
 
 The Visual Studio client disables LSP semantic tokens and uses a native lexical
 classifier for configurable HLSL-specific colours. Its startup-safe listener has
@@ -58,37 +66,8 @@ All C++ tests use Catch2. First-party targets use C++23 and warnings as errors:
 
 ## Configuration
 
-HLSL-LSP discovers `shadertoolsconfig.json` beside a shader and in its parent
-directories, stopping at `"root": true`. It supports:
-
-- `hlsl.preprocessorDefinitions`
-- `hlsl.additionalIncludeDirectories`
-- `hlsl.virtualDirectoryMappings`
-- `hlsl.languageVersion`
-- `hlsl.targetProfile`
-- `hlsl.entryPoint`
-- `hlsl.additionalArguments`
-
-Set `hlsl.targetProfile` to `lib_6_6` or another Shader Model 6.6+ profile when
-using `ResourceDescriptorHeap` or `SamplerDescriptorHeap`.
-
-The same properties can be sent as typed members of the `hlsl` object in
-`workspace/didChangeConfiguration`. Editor properties replace the corresponding
-file property, including empty arrays or objects; omitted properties retain the
-file value. Relative editor paths resolve from the containing workspace folder.
-Precedence is built-in defaults, client defaults, outer-to-nearest
-configuration files, then editor settings. This lets a Visual Studio default
-language version be overridden by `shadertoolsconfig.json`.
-
-## Code quality
-
-```powershell
-cmake --build out\build\windows-msvc --target format
-cmake --build out\build\windows-msvc --target format-check
-
-cmake --preset windows-clangcl -DHLSL_ENABLE_CLANG_TIDY=ON
-cmake --build --preset windows-clangcl-debug
-```
-
-Pushes and pull requests build and run the Catch2 suite with MSVC and clang-cl
-on Windows and Clang on Linux.
+HLSL-LSP supports the `shadertoolsconfig.json` format created by Tim Jones for
+HLSL Tools, together with additional DXC-oriented settings. See the
+[`shadertoolsconfig.json` reference](docs/shadertoolsconfig.md) for discovery,
+merging, every supported property, path handling, examples, and editor-setting
+precedence.

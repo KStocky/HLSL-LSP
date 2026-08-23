@@ -1,0 +1,40 @@
+{
+  "$schema": "registration.schema.json",
+  "properties": {
+    "hlslLsp.general.fileExtensions": {
+      "type": "string",
+      "title": "HLSL file extensions",
+      "description": "Semicolon-separated file extensions to treat as HLSL. The built-in .hlsl and .hlsli extensions are always supported.",
+      "default": ".hlsl;.hlsli;.usf"
+    },
+    "hlslLsp.general.languageVersion": {
+      "type": "string",
+      "title": "Default HLSL language version",
+      "description": "The default DXC -HV value. A shadertoolsconfig.json languageVersion setting takes precedence.",
+      "default": "2021",
+      "enum": [
+        "2016",
+        "2017",
+        "2018",
+        "2021",
+        "202x"
+      ],
+      "enumItemLabels": [
+        "HLSL 2016",
+        "HLSL 2017",
+        "HLSL 2018",
+        "HLSL 2021",
+        "Latest experimental (202x)"
+      ],
+      "allowsFreeformInput": true
+    }
+  },
+  "categories": {
+    "hlslLsp": {
+      "title": "HLSL-LSP"
+    },
+    "hlslLsp.general": {
+      "title": "General"
+    }
+  }
+}

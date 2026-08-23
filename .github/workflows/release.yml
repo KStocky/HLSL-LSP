@@ -1,0 +1,99 @@
+name: Release Visual Studio VSIX
+
+on:
+  release:
+    types:
+      - published
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  DXC_REF: v1.9.2607
+  DXC_WINDOWS_URL: https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.9.2607/dxc_2026_07_29.zip
+
+jobs:
+  build-vsix:
+    name: Build Visual Studio VSIX
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out HLSL-LSP
+        uses: actions/checkout@v5
+
+      - name: Check out matching DXC headers
+        uses: actions/checkout@v5
+        with:
+          repository: microsoft/DirectXShaderCompiler
+          ref: ${{ env.DXC_REF }}
+          path: .dxc-source
+          sparse-checkout: include/dxc
+
+      - name: Download DXC runtime
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP dxc.zip
+          Invoke-WebRequest $env:DXC_WINDOWS_URL -OutFile $archive
+          Expand-Archive $archive -DestinationPath "$env:RUNNER_TEMP\dxc-runtime"
+          $runtime = Get-ChildItem "$env:RUNNER_TEMP\dxc-runtime" -Recurse `
+            -Filter dxcompiler.dll |
+            Where-Object { $_.Directory.Name -eq 'x64' } |
+            Select-Object -First 1
+          if (-not $runtime) {
+            throw 'Unable to locate the x64 DXC runtime'
+          }
+          "DXC_RUNTIME_DIR=$($runtime.Directory.FullName)" |
+            Out-File $env:GITHUB_ENV -Append
+
+      - name: Build release server
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+          Import-Module "$vs\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation `
+            -DevCmdArguments '-arch=x64 -host_arch=x64'
+
+          cmake -S . -B out/build/release -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            "-DCMAKE_CXX_COMPILER=cl.exe" `
+            -DBUILD_TESTING=OFF `
+            -DDXC_INCLUDE_DIR="$env:GITHUB_WORKSPACE\.dxc-source\include\dxc" `
+            -DDXC_RUNTIME_DIR="$env:DXC_RUNTIME_DIR"
+          cmake --build out/build/release --target hlsl-lsp
+
+      - name: Build Visual Studio VSIX
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $msbuild = & $vswhere -latest -products * `
+            -requires Microsoft.Component.MSBuild `
+            -find MSBuild\**\Bin\MSBuild.exe |
+            Select-Object -First 1
+          & $msbuild `
+            clients\visual-studio\HlslLsp.VisualStudio\HlslLsp.VisualStudio.csproj `
+            /restore /p:Configuration=Release `
+            /p:HlslLspServerDir="$env:GITHUB_WORKSPACE\out\build\release"
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Upload VSIX workflow artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: HLSL-LSP-Visual-Studio
+          path: clients/visual-studio/HlslLsp.VisualStudio/bin/Release/net472/HlslLsp.VisualStudio.vsix
+          if-no-files-found: error
+
+      - name: Attach VSIX to GitHub release
+        if: github.event_name == 'release'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload '${{ github.event.release.tag_name }}' `
+            clients/visual-studio/HlslLsp.VisualStudio/bin/Release/net472/HlslLsp.VisualStudio.vsix `
+            --clobber
