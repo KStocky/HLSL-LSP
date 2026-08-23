@@ -4,7 +4,7 @@
                  xmlns:d="http://schemas.microsoft.com/developer/vsx-schema-design/2011">
   <Metadata>
     <Identity Id="KStocky.HlslLsp.VisualStudio"
-              Version="0.5.16"
+              Version="0.5.37"
               Language="en-US"
               Publisher="KStocky" />
     <DisplayName>HLSL-LSP</DisplayName>
@@ -36,8 +36,12 @@
   <Assets>
     <Asset Type="Microsoft.VisualStudio.VsPackage"
            d:Source="Project"
-           d:ProjectName="%CurrentProject%"
-           Path="|%CurrentProject%;PkgdefProjectOutputGroup|" />
+           d:ProjectName="HlslLsp.VisualStudio.Bootstrap"
+           Path="|HlslLsp.VisualStudio.Bootstrap;PkgdefProjectOutputGroup|" />
+    <Asset Type="Microsoft.VisualStudio.MefComponent"
+           d:Source="Project"
+           d:ProjectName="HlslLsp.VisualStudio.Bootstrap"
+           Path="|HlslLsp.VisualStudio.Bootstrap|" />
     <Asset Type="Microsoft.VisualStudio.MefComponent"
            d:Source="Project"
            d:ProjectName="HlslLsp.VisualStudio.Classification"

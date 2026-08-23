@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel.Composition;
 using System.Diagnostics;
+using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.VisualStudio.Language.StandardClassification;
@@ -61,6 +62,9 @@ internal static class HlslClassificationNames
 }
 
 [Export(typeof(IClassifierProvider))]
+[ContentType("text")]
+[ContentType("HLSL")]
+[ContentType("HLSLHeader")]
 [ContentType("HLSL-LSP-Colored")]
 [ContentType("HLSLHeader-LSP-Colored")]
 internal sealed class HlslClassifierProvider : IClassifierProvider
@@ -68,11 +72,27 @@ internal sealed class HlslClassifierProvider : IClassifierProvider
     [Import]
     internal IClassificationTypeRegistryService ClassificationRegistry { get; set; }
 
+    [Import]
+    internal ITextDocumentFactoryService TextDocuments { get; set; }
+
     public IClassifier GetClassifier(ITextBuffer textBuffer)
     {
         if (textBuffer == null)
         {
             throw new ArgumentNullException(nameof(textBuffer));
+        }
+
+        if (!TextDocuments.TryGetTextDocument(textBuffer, out var document))
+        {
+            return null;
+        }
+
+        var extension = Path.GetExtension(document.FilePath);
+        if (!extension.Equals(".hlsl", StringComparison.OrdinalIgnoreCase) &&
+            !extension.Equals(".hlsli", StringComparison.OrdinalIgnoreCase) &&
+            !extension.Equals(".usf", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
         }
 
         return textBuffer.Properties.GetOrCreateSingletonProperty(

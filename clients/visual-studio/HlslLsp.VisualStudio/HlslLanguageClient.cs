@@ -86,7 +86,8 @@ internal sealed class HlslLanguageClient : ILanguageClient, ILanguageClientCusto
         token.ThrowIfCancellationRequested();
 
         var extensionDirectory = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
-        var serverDirectory = Path.Combine(extensionDirectory, "Server");
+        var serverDirectory = Path.GetFullPath(
+            Path.Combine(extensionDirectory, "..", "Server"));
         var serverPath = Path.Combine(serverDirectory, "hlsl-lsp.exe");
         if (!File.Exists(serverPath))
         {

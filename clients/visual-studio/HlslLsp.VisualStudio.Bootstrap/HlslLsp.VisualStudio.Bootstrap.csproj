@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net472</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>HlslLsp.VisualStudio.Bootstrap</RootNamespace>
+    <AssemblyName>HlslLsp.VisualStudio.Bootstrap</AssemblyName>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <NoWarn>VSTHRD100</NoWarn>
+    <VSSDKBuildToolsAutoSetup>true</VSSDKBuildToolsAutoSetup>
+    <GeneratePkgDefFile>true</GeneratePkgDefFile>
+    <IncludeAssemblyInVSIXContainer>true</IncludeAssemblyInVSIXContainer>
+    <CreateVsixContainer>false</CreateVsixContainer>
+    <UseCodebase>true</UseCodebase>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="System.ComponentModel.Composition" />
+    <PackageReference Include="Microsoft.VisualStudio.SDK"
+                      Version="17.14.40265"
+                      ExcludeAssets="runtime" />
+    <PackageReference Include="Microsoft.VSSDK.BuildTools"
+                      Version="18.5.40034"
+                      PrivateAssets="all" />
+  </ItemGroup>
+</Project>

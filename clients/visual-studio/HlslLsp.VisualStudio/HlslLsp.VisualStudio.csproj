@@ -9,8 +9,8 @@
     <NoWarn>VSTHRD100</NoWarn>
     <VSSDKBuildToolsAutoSetup>true</VSSDKBuildToolsAutoSetup>
 
-    <GeneratePkgDefFile>true</GeneratePkgDefFile>
-    <IncludeAssemblyInVSIXContainer>true</IncludeAssemblyInVSIXContainer>
+    <GeneratePkgDefFile>false</GeneratePkgDefFile>
+    <IncludeAssemblyInVSIXContainer>false</IncludeAssemblyInVSIXContainer>
     <IncludeDebugSymbolsInVSIXContainer>true</IncludeDebugSymbolsInVSIXContainer>
     <IncludeDebugSymbolsInLocalVSIXDeployment>true</IncludeDebugSymbolsInLocalVSIXDeployment>
     <CopyBuildOutputToOutputDirectory>true</CopyBuildOutputToOutputDirectory>
@@ -40,6 +40,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\HlslLsp.VisualStudio.Bootstrap\HlslLsp.VisualStudio.Bootstrap.csproj">
+      <IncludeOutputGroupsInVSIX>BuiltProjectOutputGroup;PkgdefProjectOutputGroup</IncludeOutputGroupsInVSIX>
+      <Private>true</Private>
+    </ProjectReference>
     <ProjectReference Include="..\HlslLsp.VisualStudio.Classification\HlslLsp.VisualStudio.Classification.csproj">
       <IncludeOutputGroupsInVSIX>BuiltProjectOutputGroup</IncludeOutputGroupsInVSIX>
       <Private>true</Private>
@@ -60,6 +64,11 @@
     <Error Condition="!Exists('$(HlslLspServerDir)\dxil.dll')"
            Text="DXIL runtime is missing: $(HlslLspServerDir)\dxil.dll" />
     <ItemGroup>
+      <Content Include="$(TargetPath)"
+               Visible="false">
+        <IncludeInVSIX>true</IncludeInVSIX>
+        <VsixSubPath>Client</VsixSubPath>
+      </Content>
       <Content Include="$(HlslLspServerDir)\hlsl-lsp.exe;
                         $(HlslLspServerDir)\dxcompiler.dll;
                         $(HlslLspServerDir)\dxil.dll"

@@ -9,18 +9,19 @@ installing this VSIX.
 Go-to-definition for symbols and `#include` paths is provided by the server
 through LSP. LSP semantic tokens are disabled in Visual Studio because its
 classification pipeline can hang the editor while applying them; the language
-server still provides richer semantic tokens to other clients. A separate
-MEF-only assembly provides background lexical classification for HLSL keywords,
+server still provides richer semantic tokens to other clients. A separate MEF-only assembly provides immediate lexical classification for HLSL keywords,
 preprocessor directives, types, functions, comments, strings, and numbers.
 Each category appears as an `HLSL ...` item under **Environment > Fonts and
 Colors**.
 
 The VSIX deliberately does not export a remote content type or language client
 through MEF. Those exports can change Visual Studio's workspace-composition graph
-during startup and have caused the shell to deadlock. HLSL documents initially
-retain Visual Studio's built-in `HLSL` or `HLSLHeader` content type. A lightweight
-package waits for CMake parsing to finish, then loads one language client through
-the public broker and promotes open shaders to dynamic remote subtypes.
+during startup and have caused the shell to deadlock. A lightweight text-view
+listener records filenames without referencing Visual Studio's LSP APIs; the
+bootstrap matches them against the configured HLSL extensions.
+In CMake workspaces it waits for the CMake package's asynchronous load to finish;
+it then loads an isolated package and language-client assembly through the public
+broker and promotes open shaders to dynamic remote subtypes.
 Before a folder or solution closes, the package demotes every shader back to its
 native content type, so restored documents never begin the next startup as
 LSP-backed buffers. Later HLSL documents activate automatically. No user action
@@ -57,8 +58,8 @@ $msbuild = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere
 
 The VSIX is written under `clients\visual-studio\HlslLsp.VisualStudio\bin`.
 Opening the project in Visual Studio and pressing F5 installs it into the
-experimental instance. Open an `.hlsl` or `.hlsli` file; the server starts
-automatically after deferred startup activation.
+experimental instance. Open an `.hlsl`, `.hlsli`, or configured HLSL file; the
+server starts automatically once the host workspace is ready.
 
 Use `.vs\VSWorkspaceSettings.json` for editor overrides:
 

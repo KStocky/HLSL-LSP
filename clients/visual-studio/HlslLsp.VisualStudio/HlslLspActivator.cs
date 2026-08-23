@@ -1,9 +1,6 @@
 using System;
 using System.Collections.Generic;
-using System.ComponentModel;
 using System.Linq;
-using System.Linq.Expressions;
-using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -15,25 +12,19 @@ using Microsoft.VisualStudio.Shell;
 using Microsoft.VisualStudio.Shell.Interop;
 using Microsoft.VisualStudio.Text;
 using Microsoft.VisualStudio.TextManager.Interop;
+using Microsoft.VisualStudio.Threading;
 using Microsoft.VisualStudio.Utilities;
+using HlslLsp.VisualStudio.Bootstrap;
 
 namespace HlslLsp.VisualStudio;
 
-[PackageRegistration(UseManagedResourcesOnly = true, AllowsBackgroundLoading = true)]
-[InstalledProductRegistration("HLSL-LSP", "DXC-powered HLSL IntelliSense", "0.5.16")]
-[ProvideAutoLoad(VSConstants.UICONTEXT.ShellInitialized_string, PackageAutoLoadFlags.BackgroundLoad)]
-[ProvideOptionPage(typeof(HlslOptionsPage), "HLSL-LSP", "General", 0, 0, true)]
-[Guid(PackageGuidString)]
-public sealed class HlslLspPackage :
-    AsyncPackage,
+public sealed class HlslLspActivator :
     IVsSolutionEvents,
     IVsSolutionEvents7
 {
-    public const string PackageGuidString = "d1d7cf67-e1e0-452d-9a2e-1f556f76c1d7";
-
-    private static readonly object Gate = new();
-    private static HlslLspPackage instance;
-
+    private readonly HlslBootstrapPackage host;
+    private readonly JoinableTaskFactory joinableTaskFactory;
+    private readonly CancellationToken disposalToken;
     private readonly HashSet<string> registeredExtensions =
         new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, IContentType> replacedExtensions =
@@ -53,33 +44,28 @@ public sealed class HlslLspPackage :
         new(StringComparer.OrdinalIgnoreCase);
     private bool servicesReady;
 
-    internal static void OptionsChanged()
+    private HlslLspActivator(
+        HlslBootstrapPackage host,
+        CancellationToken disposalToken)
     {
-        HlslLspPackage package;
-        lock (Gate)
-        {
-            package = instance;
-        }
-
-        if (package != null)
-        {
-            package.JoinableTaskFactory.RunAsync(package.ApplyOptionsAsync)
-                .FileAndForget("HlslLsp/ApplyOptions");
-        }
+        this.host = host;
+        joinableTaskFactory = host.JoinableTaskFactory;
+        this.disposalToken = disposalToken;
     }
 
-    protected override async Task InitializeAsync(
-        CancellationToken cancellationToken,
-        IProgress<ServiceProgressData> progress)
+    public static async Task ActivateAsync(
+        HlslBootstrapPackage host,
+        CancellationToken cancellationToken)
     {
-        await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+        var activator = new HlslLspActivator(host, cancellationToken);
+        HlslBootstrapPackage.OptionsChanged += activator.OnOptionsChanged;
+        await activator.InitializeAsync(cancellationToken);
+    }
 
-        lock (Gate)
-        {
-            instance = this;
-        }
-
-        var solution = await GetServiceAsync(typeof(SVsSolution)) as IVsSolution;
+    private async Task InitializeAsync(CancellationToken cancellationToken)
+    {
+        await joinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+        var solution = await host.GetServiceAsync(typeof(SVsSolution)) as IVsSolution;
         if (solution == null)
         {
             throw new InvalidOperationException(
@@ -87,33 +73,20 @@ public sealed class HlslLspPackage :
         }
         ErrorHandler.ThrowOnFailure(solution.AdviseSolutionEvents(this, out _));
 
-        JoinableTaskFactory.RunAsync(
-                () => ActivateAndReportAsync(DisposalToken))
-            .FileAndForget("HlslLsp/DeferredActivation");
+        await ActivateLanguageClientAsync(cancellationToken);
     }
 
-    private async Task ActivateAndReportAsync(CancellationToken cancellationToken)
+    private void OnOptionsChanged()
     {
-        try
-        {
-            await ActivateLanguageClientAsync(cancellationToken);
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-        }
-        catch (Exception error)
-        {
-            ActivityLog.LogError(nameof(HlslLspPackage), error.ToString());
-            throw;
-        }
+        joinableTaskFactory.RunAsync(ApplyOptionsAsync)
+            .FileAndForget("HlslLsp/ApplyOptions");
     }
 
     private async Task ActivateLanguageClientAsync(CancellationToken cancellationToken)
     {
-        await WaitForWorkspaceReadyAsync(cancellationToken);
-        await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+        await joinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
 
-        var resolvedComponentModel = await GetServiceAsync(typeof(SComponentModel))
+        var resolvedComponentModel = await host.GetServiceAsync(typeof(SComponentModel))
             as IComponentModel;
         if (resolvedComponentModel == null)
         {
@@ -127,7 +100,7 @@ public sealed class HlslLspPackage :
         textDocuments = componentModel.GetService<ITextDocumentFactoryService>();
         editorAdapters = componentModel.GetService<IVsEditorAdaptersFactoryService>();
         runningDocuments =
-            await GetServiceAsync(typeof(SVsRunningDocumentTable))
+            await host.GetServiceAsync(typeof(SVsRunningDocumentTable))
                 as IVsRunningDocumentTable;
         if (runningDocuments == null)
         {
@@ -150,120 +123,9 @@ public sealed class HlslLspPackage :
         await broker.LoadAsync(new HlslLanguageClientMetadata(), languageClient);
     }
 
-    private async Task WaitForWorkspaceReadyAsync(
-        CancellationToken cancellationToken)
-    {
-        var folderOpened = WaitForContextAsync(KnownUIContexts.FolderOpened);
-        var solutionOpened = WaitForContextAsync(KnownUIContexts.SolutionExistsContext);
-        var documentOpened = WaitForContextAsync(KnownUIContexts.DocumentWindowActive);
-        var activated = await Task.WhenAny(folderOpened, solutionOpened, documentOpened);
-        cancellationToken.ThrowIfCancellationRequested();
-
-        if (activated == documentOpened)
-        {
-            var workspaceOpened = await Task.WhenAny(
-                folderOpened,
-                solutionOpened,
-                Task.Delay(TimeSpan.FromSeconds(15), cancellationToken));
-            cancellationToken.ThrowIfCancellationRequested();
-            if (workspaceOpened != folderOpened && workspaceOpened != solutionOpened)
-            {
-                return;
-            }
-            activated = workspaceOpened;
-        }
-
-        if (activated == folderOpened)
-        {
-            await WaitForCMakeParseAsync(cancellationToken);
-        }
-        else
-        {
-            await KnownUIContexts.SolutionExistsAndFullyLoadedContext;
-        }
-
-        await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken)
-            .ConfigureAwait(false);
-    }
-
-    private static async Task WaitForContextAsync(UIContext context)
-    {
-        await context;
-    }
-
-    private async Task WaitForCMakeParseAsync(CancellationToken cancellationToken)
-    {
-        var service = await GetServiceAsync(typeof(SCMakeEventNotificationService));
-        if (service == null)
-        {
-            return;
-        }
-
-        var completion =
-            new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        Action signal = () => completion.TrySetResult(true);
-        var parseComplete = AddEventHandler(service, "NotifyParseComplete", signal);
-        var parseError = AddEventHandler(service, "NotifyParseError", signal);
-        using (cancellationToken.Register(() => completion.TrySetCanceled()))
-        {
-            try
-            {
-                var ready = await Task.WhenAny(
-                    completion.Task,
-                    Task.Delay(TimeSpan.FromSeconds(30), cancellationToken));
-                await ready;
-            }
-            finally
-            {
-                RemoveEventHandler(service, "NotifyParseComplete", parseComplete);
-                RemoveEventHandler(service, "NotifyParseError", parseError);
-            }
-        }
-    }
-
-    private static Delegate AddEventHandler(
-        object source,
-        string eventName,
-        Action callback)
-    {
-        var eventInfo = GetEvent(source, eventName);
-        var invoke = eventInfo.EventHandlerType.GetMethod("Invoke");
-        var parameters = invoke.GetParameters()
-            .Select(parameter => Expression.Parameter(parameter.ParameterType))
-            .ToArray();
-        var handler = Expression.Lambda(
-                eventInfo.EventHandlerType,
-                Expression.Call(Expression.Constant(callback), nameof(Action.Invoke), null),
-                parameters)
-            .Compile();
-        eventInfo.AddEventHandler(source, handler);
-        return handler;
-    }
-
-    private static void RemoveEventHandler(
-        object source,
-        string eventName,
-        Delegate handler)
-    {
-        GetEvent(source, eventName).RemoveEventHandler(source, handler);
-    }
-
-    private static EventInfo GetEvent(object source, string eventName)
-    {
-        var contract = source.GetType()
-            .GetInterfaces()
-            .FirstOrDefault(
-                candidate =>
-                    candidate.FullName ==
-                    "Microsoft.VisualStudio.CMake.Project.ICMakeEventNotificationService");
-        return contract?.GetEvent(eventName)
-            ?? throw new InvalidOperationException(
-                $"Visual Studio's CMake event service does not expose {eventName}.");
-    }
-
     private async Task ApplyOpenDocumentMappingsAsync(CancellationToken cancellationToken)
     {
-        await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+        await joinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
         ForEachOpenBuffer(ApplyConfiguredContentType);
     }
 
@@ -316,10 +178,10 @@ public sealed class HlslLspPackage :
 
     private void OnTextDocumentCreated(object sender, TextDocumentEventArgs eventArgs)
     {
-        JoinableTaskFactory.RunAsync(
+        joinableTaskFactory.RunAsync(
                 async () =>
                 {
-                    await JoinableTaskFactory.SwitchToMainThreadAsync();
+                    await joinableTaskFactory.SwitchToMainThreadAsync();
                     ApplyConfiguredContentType(eventArgs.TextDocument.TextBuffer);
                 })
             .FileAndForget("HlslLsp/ApplyDocumentMapping");
@@ -327,7 +189,7 @@ public sealed class HlslLspPackage :
 
     private async Task ApplyOptionsAsync()
     {
-        await JoinableTaskFactory.SwitchToMainThreadAsync();
+        await joinableTaskFactory.SwitchToMainThreadAsync();
         if (!servicesReady)
         {
             return;
@@ -335,17 +197,17 @@ public sealed class HlslLspPackage :
 
         var options = GetOptions();
         ApplyFileExtensions(options.FileExtensions);
-        await ApplyOpenDocumentMappingsAsync(DisposalToken);
+        await ApplyOpenDocumentMappingsAsync(disposalToken);
         if (languageClient != null)
         {
             await languageClient.UpdateLanguageVersionAsync(options.LanguageVersion);
         }
     }
 
-    private HlslOptionsPage GetOptions()
+    private HlslOptionsSnapshot GetOptions()
     {
         ThreadHelper.ThrowIfNotOnUIThread();
-        return (HlslOptionsPage)GetDialogPage(typeof(HlslOptionsPage));
+        return host.GetOptions();
     }
 
     private void ApplyFileExtensions(string value)
@@ -383,7 +245,7 @@ public sealed class HlslLspPackage :
                 !existing.IsOfType("plaintext"))
             {
                 ActivityLog.LogWarning(
-                    nameof(HlslLspPackage),
+                    nameof(HlslLspActivator),
                     $"The {extension} extension is already associated with " +
                     $"{existing.DisplayName}; HLSL-LSP did not replace it.");
                 continue;
@@ -402,12 +264,7 @@ public sealed class HlslLspPackage :
 
     private static IEnumerable<string> ParseExtensions(string value)
     {
-        return (value ?? string.Empty)
-            .Split(new[] { ';', ',', ' ' }, StringSplitOptions.RemoveEmptyEntries)
-            .Select(extension => extension.Trim())
-            .Where(extension => extension.Length > 0)
-            .Select(extension => extension[0] == '.' ? extension : "." + extension)
-            .Distinct(StringComparer.OrdinalIgnoreCase);
+        return HlslBootstrapPackage.ParseExtensions(value);
     }
 
     private IContentType GetOrCreateRemoteContentType(string name, string nativeBaseType)
@@ -561,34 +418,4 @@ public sealed class HlslLspPackage :
     }
 #pragma warning restore CS0618
 
-    [Guid("AE781D07-40B6-4C0A-8AB3-4B75FEFC43C7")]
-    private sealed class SCMakeEventNotificationService
-    {
-    }
-}
-
-public sealed class HlslOptionsPage : DialogPage
-{
-    [Category("Files")]
-    [System.ComponentModel.DisplayName("HLSL file extensions")]
-    [Description(
-        "Semicolon-separated file extensions to treat as HLSL. " +
-        "The built-in .hlsl and .hlsli extensions are always supported.")]
-    public string FileExtensions { get; set; } = ".hlsl;.hlsli;.usf";
-
-    [Category("Language")]
-    [System.ComponentModel.DisplayName("Default HLSL language version")]
-    [Description(
-        "The default DXC -HV value, such as 2016, 2017, 2018, 2021, or 202x. " +
-        "A shadertoolsconfig.json languageVersion setting takes precedence.")]
-    public string LanguageVersion { get; set; } = "2021";
-
-    protected override void OnApply(PageApplyEventArgs e)
-    {
-        base.OnApply(e);
-        if (e.ApplyBehavior == ApplyKind.Apply)
-        {
-            HlslLspPackage.OptionsChanged();
-        }
-    }
 }
