@@ -69,7 +69,8 @@ All C++ tests use Catch2. First-party targets use C++23 and warnings as errors:
 ## Configuration
 
 HLSL-LSP supports the `shadertoolsconfig.json` format created by Tim Jones for
-HLSL Tools, together with additional DXC-oriented settings. See the
+[HLSL Tools](https://github.com/tgjones/HlslTools), together with additional
+DXC-oriented settings. See the
 [`shadertoolsconfig.json` reference](docs/shadertoolsconfig.md) for discovery,
 merging, every supported property, path handling, examples, and editor-setting
 precedence.
