@@ -19,6 +19,7 @@ internal sealed class HlslLanguageClient :
     private Process serverProcess;
     private string languageVersion;
     private JsonRpc rpc;
+    private readonly AsyncManualResetEvent rpcAttached = new();
 
     internal HlslLanguageClient(string languageVersion)
     {
@@ -55,14 +56,17 @@ internal sealed class HlslLanguageClient :
 
     public Task AttachForCustomMessageAsync(JsonRpc jsonRpc)
     {
-        rpc = jsonRpc ?? throw new ArgumentNullException(nameof(jsonRpc));
+        Volatile.Write(
+            ref rpc,
+            jsonRpc ?? throw new ArgumentNullException(nameof(jsonRpc)));
+        rpcAttached.Set();
         return Task.CompletedTask;
     }
 
     internal Task UpdateLanguageVersionAsync(string value)
     {
         Volatile.Write(ref languageVersion, value);
-        var currentRpc = rpc;
+        var currentRpc = Volatile.Read(ref rpc);
         return currentRpc == null
             ? Task.CompletedTask
             : currentRpc.NotifyAsync(
@@ -80,9 +84,17 @@ internal sealed class HlslLanguageClient :
         Uri documentUri,
         CancellationToken cancellationToken)
     {
-        var currentRpc = rpc ??
-            throw new InvalidOperationException(
-                "The HLSL language server connection is unavailable.");
+        var currentRpc = Volatile.Read(ref rpc);
+        if (currentRpc == null)
+        {
+            await rpcAttached.WaitAsync(cancellationToken).ConfigureAwait(false);
+            currentRpc = Volatile.Read(ref rpc);
+            if (currentRpc == null)
+            {
+                throw new InvalidOperationException(
+                    "The HLSL language server connection is unavailable.");
+            }
+        }
         for (var attempt = 0; ; ++attempt)
         {
             try
