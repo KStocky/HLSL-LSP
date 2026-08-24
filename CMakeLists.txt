@@ -83,7 +83,7 @@ if(CMAKE_DL_LIBS)
     target_link_libraries(hlsl_dxc PRIVATE "${CMAKE_DL_LIBS}")
 endif()
 if(WIN32)
-    target_link_libraries(hlsl_dxc PRIVATE ole32)
+    target_link_libraries(hlsl_dxc PRIVATE ole32 oleaut32)
 endif()
 hlsl_enable_clang_tidy(hlsl_dxc)
 

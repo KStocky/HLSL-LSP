@@ -271,3 +271,179 @@ TEST_CASE("DXC IntelliSense consumes unsaved include buffers", "[dxc][includes][
     CHECK(diagnostics.empty());
     std::filesystem::remove_all(directory);
 }
+
+TEST_CASE("DXC IntelliSense exposes hover and overload signatures for HLSL 2021",
+          "[dxc][hover][signature-help][integration]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    const std::string source = "float shade(float value) { return value; }\n"
+                               "float shade(float value, float bias) { return value + bias; }\n"
+                               "struct Material {\n"
+                               "  float Scale(float value) { return value; }\n"
+                               "  float Scale(float value, float bias) { return value + bias; }\n"
+                               "};\n"
+                               "float4 main() : SV_Target {\n"
+                               "  Material material;\n"
+                               "  float value = shade(1.0, 2.0);\n"
+                               "  value = material.Scale(value, 3.0);\n"
+                               "  return float4(value, value, value, 1.0);\n"
+                               "}\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}});
+    REQUIRE(translation_unit.diagnostics().empty());
+
+    const auto hover = translation_unit.hover_at(shader_path, 9, 17);
+    REQUIRE(hover.has_value());
+    const auto hover_info = hover.value_or(hlsl_intellisense::dxc::Hover{});
+    CHECK(hover_info.name == "shade");
+    CHECK(hover_info.qualified_name == "shade");
+    CHECK(hover_info.display_name == "shade(float, float)");
+    CHECK(hover_info.type == "float (float, float)");
+    CHECK(hover_info.declaration == "float shade(float value, float bias)");
+    CHECK(hover_info.declaration_location.line == 2);
+    CHECK(hover_info.end_offset > hover_info.start_offset);
+
+    const auto functions = translation_unit.signatures_at(shader_path, 9, 17);
+    REQUIRE(functions.size() == 2);
+    CHECK(functions[0].label == "float shade(float value, float bias)");
+    CHECK(functions[0].parameters.size() == 2);
+    CHECK(functions[0].parameters[1].label == "float bias");
+    CHECK(functions[1].label == "float shade(float value)");
+
+    const auto methods = translation_unit.signatures_at(shader_path, 10, 20);
+    REQUIRE(methods.size() == 2);
+    CHECK(methods[0].label == "float Material::Scale(float value, float bias)");
+    CHECK(methods[1].label == "float Material::Scale(float value)");
+
+    translation_unit.reparse(
+        {{shader_path, "float updated(float value) { return value; }\n"
+                       "float4 main() : SV_Target { return updated(1.0).xxxx; }\n"}});
+    const auto edited_hover = translation_unit.hover_at(shader_path, 2, 42);
+    REQUIRE(edited_hover.has_value());
+    CHECK(edited_hover.value_or(hlsl_intellisense::dxc::Hover{}).name == "updated");
+    const auto edited_signatures = translation_unit.signatures_at(shader_path, 2, 42);
+    REQUIRE(edited_signatures.size() == 1);
+    CHECK(edited_signatures[0].label == "float updated(float value)");
+}
+
+TEST_CASE("DXC IntelliSense exposes explicit and inferred function-template calls",
+          "[dxc][hover][signature-help][templates][integration]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+
+    SECTION("explicit template arguments") {
+        const std::string source =
+            "template<typename T, typename U> T conv(U value) { return (T)value; }\n"
+            "float4 main(float x : X) : SV_Target { return conv<float, float>(x).xxxx; }\n";
+        auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}});
+        REQUIRE(translation_unit.diagnostics().empty());
+
+        const auto hover = translation_unit.hover_at(shader_path, 2, 49);
+        REQUIRE(hover.has_value());
+        CHECK(hover->name == "conv");
+        CHECK(hover->type == "float (float)");
+
+        const auto signatures = translation_unit.signatures_at(shader_path, 2, 49);
+        REQUIRE(signatures.size() == 2);
+        CHECK(signatures[0].label == "float conv(float value)");
+        REQUIRE(signatures[0].parameters.size() == 1);
+        CHECK(signatures[0].parameters[0].label == "float value");
+        CHECK(signatures[1].label == "T conv(U value)");
+    }
+
+    SECTION("inferred template arguments") {
+        const std::string source =
+            "template<typename T> T conv(T value) { return value; }\n"
+            "float4 main(float x : X) : SV_Target { return conv(x).xxxx; }\n";
+        auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}});
+        REQUIRE(translation_unit.diagnostics().empty());
+
+        const auto hover = translation_unit.hover_at(shader_path, 2, 49);
+        REQUIRE(hover.has_value());
+        CHECK(hover->name == "conv");
+        CHECK(hover->type == "float (float)");
+
+        const auto signatures = translation_unit.signatures_at(shader_path, 2, 49);
+        REQUIRE(signatures.size() == 2);
+        CHECK(signatures[0].label == "float conv(float value)");
+        REQUIRE(signatures[0].parameters.size() == 1);
+        CHECK(signatures[0].parameters[0].label == "float value");
+        CHECK(signatures[1].label == "T conv(T value)");
+    }
+}
+
+TEST_CASE("DXC IntelliSense supports hover and signatures with common source line endings",
+          "[dxc][hover][signature-help][line-endings][integration]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    const auto check_line_ending = [&intellisense](std::string_view line_ending) {
+        const auto source = "float shade(float value) { return value; }" +
+                            std::string{line_ending} +
+                            "float4 main(float x : X) : SV_Target { return shade(x).xxxx; }";
+        auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}});
+        REQUIRE(translation_unit.diagnostics().empty());
+
+        const auto hover = translation_unit.hover_at(shader_path, 2, 48);
+        REQUIRE(hover.has_value());
+        CHECK(hover->name == "shade");
+        CHECK(hover->start_offset == source.find("shade(x)"));
+
+        const auto signatures = translation_unit.signatures_at(shader_path, 2, 48);
+        REQUIRE(signatures.size() == 1);
+        CHECK(signatures[0].label == "float shade(float value)");
+    };
+
+    SECTION("CR") { check_line_ending("\r"); }
+    SECTION("LF") { check_line_ending("\n"); }
+    SECTION("CRLF") { check_line_ending("\r\n"); }
+}
+
+TEST_CASE("Pinned DXC exposes built-in type declarations but not constructor overloads",
+          "[dxc][hover][signature-help][integration]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    const std::string source =
+        "float4 main() : SV_Target {\n"
+        "  float scalar_value = float(1.0);\n"
+        "  float4 vector_value = float4(1.0, 2.0, 3.0, 4.0);\n"
+        "  float2x2 matrix_value = float2x2(1.0, 2.0, 3.0, 4.0);\n"
+        "  vector<float, 4> generic_vector = vector<float, 4>(1.0, 2.0, 3.0, 4.0);\n"
+        "  matrix<float, 2, 2> generic_matrix = matrix<float, 2, 2>(1.0, 2.0, 3.0, 4.0);\n"
+        "  return vector_value + matrix_value[0].xyxy + generic_vector + generic_matrix[0].xyxy + "
+        "scalar_value;\n"
+        "}\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}});
+    REQUIRE(translation_unit.diagnostics().empty());
+
+    CHECK_FALSE(translation_unit.hover_at(shader_path, 2, 25).has_value());
+    CHECK(translation_unit.signatures_at(shader_path, 2, 25).empty());
+
+    const auto probe = [&translation_unit](std::uint32_t line, std::uint32_t column,
+                                           std::string_view name, std::string_view type,
+                                           std::string_view declaration, std::uint32_t kind) {
+        const auto hover = translation_unit.hover_at(shader_path, line, column);
+        REQUIRE(hover.has_value());
+        CHECK(hover->name == std::string{name});
+        CHECK(hover->type == std::string{type});
+        CHECK(hover->declaration == std::string{declaration});
+        CHECK(hover->cursor_kind == kind);
+        CHECK(translation_unit.signatures_at(shader_path, line, column).empty());
+    };
+    probe(3, 27, "float4", "float4", "typedef vector<float, 4> float4", 20);
+    probe(4, 31, "float2x2", "float2x2", "typedef matrix<float, 2, 2> float2x2", 20);
+    probe(5, 39, "vector", "",
+          "template <class element = float, int element_count = 4> class final vector", 31);
+    probe(6, 42, "matrix", "",
+          "template <class element = float, int row_count = 4, int col_count = 4> class final "
+          "matrix",
+          31);
+
+    const std::string completion_source = "floa\n";
+    auto completion_unit = intellisense.parse(shader_path, {{shader_path, completion_source}});
+    const auto completions = completion_unit.complete(shader_path, 1, 5);
+    const auto vector_completion =
+        std::ranges::find(completions, "vector", &hlsl_intellisense::dxc::Completion::label);
+    const auto matrix_completion =
+        std::ranges::find(completions, "matrix", &hlsl_intellisense::dxc::Completion::label);
+    REQUIRE(vector_completion != completions.end());
+    REQUIRE(matrix_completion != completions.end());
+    CHECK(vector_completion->detail == "vector::");
+    CHECK(matrix_completion->detail == "matrix::");
+    CHECK(std::ranges::find(completions, "float4", &hlsl_intellisense::dxc::Completion::label) ==
+          completions.end());
+}

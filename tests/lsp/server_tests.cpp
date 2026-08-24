@@ -1,6 +1,7 @@
 #include <hlsl_intellisense/json_rpc/framing.h>
 #include <hlsl_intellisense/json_rpc/message.h>
 #include <hlsl_intellisense/lsp/server.h>
+#include <hlsl_intellisense/workspace/text_position.h>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -107,6 +108,11 @@ class TestDirectory final {
     return {{"jsonrpc", "2.0"}, {"method", std::move(method)}};
 }
 
+[[nodiscard]] Json position_at(std::string_view source, std::size_t offset) {
+    const auto position = hlsl_intellisense::workspace::lsp_position_at(source, offset);
+    return {{"line", position.line}, {"character", position.character}};
+}
+
 } // namespace
 
 TEST_CASE("LSP handler enforces lifecycle and invalid parameters", "[lsp][handler]") {
@@ -133,6 +139,11 @@ TEST_CASE("LSP handler enforces lifecycle and invalid parameters", "[lsp][handle
     CHECK(response->result["capabilities"]["positionEncoding"] == "utf-16");
     CHECK(response->result["capabilities"]["textDocumentSync"]["change"] == 2);
     CHECK(response->result["capabilities"].contains("completionProvider"));
+    CHECK(response->result["capabilities"]["hoverProvider"] == true);
+    CHECK(response->result["capabilities"]["signatureHelpProvider"]["triggerCharacters"] ==
+          Json::array({"(", ","}));
+    CHECK(response->result["capabilities"]["signatureHelpProvider"]["retriggerCharacters"] ==
+          Json::array({")"}));
     CHECK(response->result["capabilities"]["documentSymbolProvider"] == true);
     CHECK(response->result["capabilities"]["workspaceSymbolProvider"] == true);
     CHECK(response->result["capabilities"]["workspace"]["workspaceFolders"]["supported"] == true);
@@ -149,6 +160,18 @@ TEST_CASE("LSP handler enforces lifecycle and invalid parameters", "[lsp][handle
         std::get_if<hlsl_intellisense::json_rpc::ErrorResponse>(&*invalid_completion);
     REQUIRE(params_error != nullptr);
     CHECK(params_error->error.code == hlsl_intellisense::json_rpc::invalid_params_code);
+
+    for (const auto method : {"textDocument/hover", "textDocument/signatureHelp"}) {
+        const auto invalid = server.handle(hlsl_intellisense::json_rpc::Request{
+            .id = std::int64_t{4},
+            .method = method,
+            .params = Json{{"textDocument", {{"uri", shader_uri()}}},
+                           {"position", {{"line", 0}, {"character", -1}}}}});
+        REQUIRE(invalid.has_value());
+        const auto* error = std::get_if<hlsl_intellisense::json_rpc::ErrorResponse>(&*invalid);
+        REQUIRE(error != nullptr);
+        CHECK(error->error.code == hlsl_intellisense::json_rpc::invalid_params_code);
+    }
 
     static_cast<void>(server.handle(
         hlsl_intellisense::json_rpc::Notification{.method = "exit", .params = std::nullopt}));
@@ -278,6 +301,323 @@ TEST_CASE("Server provides semantic tokens and definitions", "[lsp][navigation][
     CHECK(definition_response->result["uri"] == uri);
     CHECK(definition_response->result["range"]["start"]["line"] == 1);
     CHECK(definition_response->result["range"]["start"]["character"] == 2);
+}
+
+TEST_CASE("Server provides UTF-16 hover and overload signature help from open buffers",
+          "[lsp][hover][signature-help][integration]") {
+    const auto uri = shader_uri();
+    const std::string source =
+        "float shade(float value, float bias) { return value + bias; }\n"
+        "float shade(float value, float bias, float weight) { return value + bias * weight; }\n"
+        "template<typename T, typename U> T convert(U value) { return value; }\n"
+        "struct Material {\n"
+        "  float Scale(float value) { return value; }\n"
+        "  float Scale(float value, float bias) { return value + bias; }\n"
+        "};\n"
+        "float4 main() : SV_Target {\n"
+        "  Material material;\n"
+        "  /* \xF0\x9F\x98\x80 */ float value = shade(1.0, 2.0, 3.0);\n"
+        "  value = material.Scale(value, 4.0);\n"
+        "  float values[2] = {1.0, 2.0};\n"
+        "  value = shade(convert<float, float>(value), values[uint(shade(0.0, 0.0, 0.0))], "
+        "1.0);\n"
+        "  value = shade(value, /* ignored (, [, {, <, */ 2.0, 3.0);\n"
+        "  value = shade(value, \"ignored (, [, {, <, )\", 3.0);\n"
+        "  value = shade(value < 1.0, value > 2.0, value);\n"
+        "  value = shade(uint(value) << 1, uint(value) >> 1, value);\n"
+        "  value = shade(convert<float, float>(convert<float, float>(value)), value, value);\n"
+        "  return float4(value, value, value, 1.0);\n"
+        "}\n";
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    hlsl_intellisense::lsp::Server server{
+        [&notifications](const auto& value) { notifications.push_back(value); }};
+
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params =
+            Json{{"textDocument",
+                  {{"uri", uri}, {"languageId", "hlsl"}, {"version", 1}, {"text", source}}}}}));
+
+    const auto request_result = [&server, &uri](std::int64_t id, std::string method,
+                                                const Json& request_position) {
+        const auto result = server.handle(hlsl_intellisense::json_rpc::Request{
+            .id = id,
+            .method = std::move(method),
+            .params = Json{{"textDocument", {{"uri", uri}}}, {"position", request_position}}});
+        REQUIRE(result.has_value());
+        const auto* response = std::get_if<hlsl_intellisense::json_rpc::Response>(&*result);
+        REQUIRE(response != nullptr);
+        return response->result;
+    };
+
+    const auto value_offset = source.find("value = shade");
+    REQUIRE(value_offset != std::string::npos);
+    const auto hover =
+        request_result(2, "textDocument/hover", position_at(source, value_offset + 1));
+    CHECK(hover["contents"]["kind"] == "plaintext");
+    CHECK(hover["contents"]["value"].get<std::string>().find("float value") != std::string::npos);
+    CHECK(hover["contents"]["value"].get<std::string>().find("Type: float") != std::string::npos);
+    CHECK(hover["range"]["start"] == position_at(source, value_offset));
+    CHECK(hover["range"]["end"] == position_at(source, value_offset + 5));
+
+    const auto method_expression = source.find("material.Scale(value");
+    REQUIRE(method_expression != std::string::npos);
+    const auto method_offset = method_expression + std::string_view{"material."}.size();
+    const auto method_hover =
+        request_result(3, "textDocument/hover", position_at(source, method_offset + 1));
+    CHECK(method_hover["contents"]["value"].get<std::string>().find("Material::Scale") !=
+          std::string::npos);
+    CHECK(method_hover["contents"]["value"].get<std::string>().find(
+              "float Scale(float value, float bias)") != std::string::npos);
+
+    const auto function_call = source.find("shade(1.0, 2.0, 3.0)");
+    REQUIRE(function_call != std::string::npos);
+    const auto second_comma = source.find(',', source.find(',', function_call) + 1);
+    const auto function_help =
+        request_result(4, "textDocument/signatureHelp", position_at(source, second_comma + 1));
+    CHECK(function_help["activeSignature"] == 0);
+    CHECK(function_help["activeParameter"] == 2);
+    REQUIRE(function_help["signatures"].size() == 2);
+    CHECK(function_help["signatures"][0]["label"] ==
+          "float shade(float value, float bias, float weight)");
+    CHECK(function_help["signatures"][0]["parameters"][2]["label"] == "float weight");
+    CHECK(function_help["signatures"][1]["activeParameter"] == 1);
+
+    const auto method_comma = source.find(',', method_offset);
+    const auto method_help =
+        request_result(5, "textDocument/signatureHelp", position_at(source, method_comma + 1));
+    CHECK(method_help["activeParameter"] == 1);
+    REQUIRE(method_help["signatures"].size() == 2);
+    CHECK(method_help["signatures"][0]["label"] ==
+          "float Material::Scale(float value, float bias)");
+
+    const auto nested_call = source.find("shade(convert<float, float>");
+    REQUIRE(nested_call != std::string::npos);
+    const auto nested_second_comma = source.find("], 1.0", nested_call) + 1;
+    const auto nested_help = request_result(6, "textDocument/signatureHelp",
+                                            position_at(source, nested_second_comma + 1));
+    CHECK(nested_help["activeParameter"] == 2);
+
+    const auto comment_call = source.find("shade(value, /*");
+    REQUIRE(comment_call != std::string::npos);
+    const auto comment_second_comma =
+        source.find(',', source.find("*/", comment_call) + std::string_view{"*/"}.size());
+    const auto comment_help = request_result(7, "textDocument/signatureHelp",
+                                             position_at(source, comment_second_comma + 1));
+    CHECK(comment_help["activeParameter"] == 2);
+
+    const auto comment_word = source.find("ignored", comment_call);
+    CHECK(request_result(8, "textDocument/hover", position_at(source, comment_word + 1)).is_null());
+    CHECK(request_result(9, "textDocument/signatureHelp", position_at(source, comment_word + 1))
+              .is_null());
+
+    const auto string_call = source.find("shade(value, \"");
+    REQUIRE(string_call != std::string::npos);
+    const auto string_end = source.find("\",", string_call);
+    const auto string_help =
+        request_result(10, "textDocument/signatureHelp", position_at(source, string_end + 2));
+    CHECK(string_help["activeParameter"] == 1);
+    CHECK(std::ranges::any_of(string_help["signatures"], [](const auto& signature) {
+        return signature["parameters"].size() == 3 && signature["activeParameter"] == 2;
+    }));
+
+    const auto comparison_call = source.find("shade(value < 1.0");
+    REQUIRE(comparison_call != std::string::npos);
+    const auto comparison_second_comma = source.find(", value);", comparison_call);
+    const auto comparison_help = request_result(11, "textDocument/signatureHelp",
+                                                position_at(source, comparison_second_comma + 1));
+    CHECK(comparison_help["activeParameter"] == 2);
+
+    const auto shift_call = source.find("shade(uint(value) << 1");
+    REQUIRE(shift_call != std::string::npos);
+    const auto shift_second_comma = source.find(", value);", shift_call);
+    const auto shift_help = request_result(12, "textDocument/signatureHelp",
+                                           position_at(source, shift_second_comma + 1));
+    CHECK(shift_help["activeParameter"] == 2);
+
+    const auto template_call = source.find("shade(convert<float, float>(convert<float, float>");
+    REQUIRE(template_call != std::string::npos);
+    const auto template_first_comma = source.find(")), value, value", template_call) + 2;
+    const auto template_second_comma = source.find(',', template_first_comma + 1);
+    const auto template_help = request_result(13, "textDocument/signatureHelp",
+                                              position_at(source, template_second_comma + 1));
+    CHECK(template_help["activeParameter"] == 2);
+
+    const auto constructor = source.find("float4(value");
+    CHECK(request_result(14, "textDocument/signatureHelp",
+                         position_at(source, source.find('(', constructor) + 1))
+              .is_null());
+    CHECK(request_result(15, "textDocument/hover",
+                         position_at(source, source.find("return float4") + 2))
+              .is_null());
+}
+
+TEST_CASE("Server provides hover and signature help for function-template calls",
+          "[lsp][hover][signature-help][templates][integration]") {
+    const auto check_call = [](std::string source, std::string_view call) {
+        const auto uri = shader_uri();
+        std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+        hlsl_intellisense::lsp::Server server{
+            [&notifications](const auto& value) { notifications.push_back(value); }};
+        static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+            .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+        static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+            .method = "initialized", .params = Json::object()}));
+        static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+            .method = "textDocument/didOpen",
+            .params =
+                Json{{"textDocument",
+                      {{"uri", uri}, {"languageId", "hlsl"}, {"version", 1}, {"text", source}}}}}));
+
+        const auto call_offset = source.find(call);
+        REQUIRE(call_offset != std::string::npos);
+        const auto hover = server.handle(hlsl_intellisense::json_rpc::Request{
+            .id = std::int64_t{2},
+            .method = "textDocument/hover",
+            .params = Json{{"textDocument", {{"uri", uri}}},
+                           {"position", position_at(source, call_offset + 1)}}});
+        REQUIRE(hover.has_value());
+        const auto* hover_response = std::get_if<hlsl_intellisense::json_rpc::Response>(&*hover);
+        REQUIRE(hover_response != nullptr);
+        CHECK(hover_response->result["contents"]["value"].get<std::string>().find(
+                  "float conv(float value)") != std::string::npos);
+
+        const auto open_parenthesis = source.find('(', call_offset);
+        const auto signature = server.handle(hlsl_intellisense::json_rpc::Request{
+            .id = std::int64_t{3},
+            .method = "textDocument/signatureHelp",
+            .params = Json{{"textDocument", {{"uri", uri}}},
+                           {"position", position_at(source, open_parenthesis + 1)}}});
+        REQUIRE(signature.has_value());
+        const auto* signature_response =
+            std::get_if<hlsl_intellisense::json_rpc::Response>(&*signature);
+        REQUIRE(signature_response != nullptr);
+        REQUIRE_FALSE(signature_response->result.is_null());
+        CHECK(signature_response->result["signatures"][0]["label"] == "float conv(float value)");
+        CHECK(signature_response->result["signatures"][0]["parameters"][0]["label"] ==
+              "float value");
+    };
+
+    SECTION("explicit template arguments") {
+        check_call("template<typename T, typename U> T conv(U value) { return (T)value; }\n"
+                   "float4 main(float x : X) : SV_Target { return conv<float, float>(x).xxxx; }\n",
+                   "conv<float, float>");
+    }
+
+    SECTION("inferred template arguments") {
+        check_call("template<typename T> T conv(T value) { return value; }\n"
+                   "float4 main(float x : X) : SV_Target { return conv(x).xxxx; }\n",
+                   "conv(x)");
+    }
+}
+
+TEST_CASE("Server supports hover and signature help with common source line endings",
+          "[lsp][hover][signature-help][line-endings][integration]") {
+    const auto check_line_ending = [](std::string_view line_ending) {
+        const auto uri = shader_uri();
+        const auto source = "float shade(float value) { return value; }" +
+                            std::string{line_ending} +
+                            "float4 main(float x : X) : SV_Target { return shade(x).xxxx; }";
+        std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+        hlsl_intellisense::lsp::Server server{
+            [&notifications](const auto& value) { notifications.push_back(value); }};
+        static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+            .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+        static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+            .method = "initialized", .params = Json::object()}));
+        static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+            .method = "textDocument/didOpen",
+            .params =
+                Json{{"textDocument",
+                      {{"uri", uri}, {"languageId", "hlsl"}, {"version", 1}, {"text", source}}}}}));
+
+        const auto call = source.find("shade(x)");
+        REQUIRE(call != std::string::npos);
+        const auto hover = server.handle(hlsl_intellisense::json_rpc::Request{
+            .id = std::int64_t{2},
+            .method = "textDocument/hover",
+            .params = Json{{"textDocument", {{"uri", uri}}},
+                           {"position", position_at(source, call + 1)}}});
+        REQUIRE(hover.has_value());
+        const auto* hover_response = std::get_if<hlsl_intellisense::json_rpc::Response>(&*hover);
+        REQUIRE(hover_response != nullptr);
+        CHECK(hover_response->result["contents"]["value"].get<std::string>().find(
+                  "float shade(float value)") != std::string::npos);
+        CHECK(hover_response->result["range"]["start"] == position_at(source, call));
+
+        const auto signature = server.handle(hlsl_intellisense::json_rpc::Request{
+            .id = std::int64_t{3},
+            .method = "textDocument/signatureHelp",
+            .params = Json{{"textDocument", {{"uri", uri}}},
+                           {"position", position_at(source, source.find('(', call) + 1)}}});
+        REQUIRE(signature.has_value());
+        const auto* signature_response =
+            std::get_if<hlsl_intellisense::json_rpc::Response>(&*signature);
+        REQUIRE(signature_response != nullptr);
+        REQUIRE_FALSE(signature_response->result.is_null());
+        CHECK(signature_response->result["signatures"][0]["label"] == "float shade(float value)");
+    };
+
+    SECTION("CR") { check_line_ending("\r"); }
+    SECTION("LF") { check_line_ending("\n"); }
+    SECTION("CRLF") { check_line_ending("\r\n"); }
+}
+
+TEST_CASE("Hover and signature help reparse unsaved edits", "[lsp][hover][signature-help]") {
+    const auto uri = shader_uri();
+    const std::string original = "float oldFunction(float value) { return value; }\n"
+                                 "float4 main() : SV_Target { return oldFunction(1.0).xxxx; }\n";
+    const std::string edited =
+        "float newFunction(float value, float bias) { return value + bias; }\n"
+        "float4 main() : SV_Target { return newFunction(1.0, 2.0).xxxx; }\n";
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    hlsl_intellisense::lsp::Server server{
+        [&notifications](const auto& value) { notifications.push_back(value); }};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params =
+            Json{{"textDocument",
+                  {{"uri", uri}, {"languageId", "hlsl"}, {"version", 1}, {"text", original}}}}}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didChange",
+        .params = Json{{"textDocument", {{"uri", uri}, {"version", 2}}},
+                       {"contentChanges", Json::array({Json{{"text", edited}}})}}}));
+
+    const auto hover_offset = edited.find("newFunction(1.0");
+    const auto hover = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{2},
+        .method = "textDocument/hover",
+        .params = Json{{"textDocument", {{"uri", uri}}},
+                       {"position", position_at(edited, hover_offset + 1)}}});
+    REQUIRE(hover.has_value());
+    const auto* hover_response = std::get_if<hlsl_intellisense::json_rpc::Response>(&*hover);
+    REQUIRE(hover_response != nullptr);
+    CHECK(hover_response->result["contents"]["value"].get<std::string>().find("newFunction") !=
+          std::string::npos);
+    CHECK(hover_response->result["contents"]["value"].get<std::string>().find("oldFunction") ==
+          std::string::npos);
+
+    const auto comma = edited.find(',', hover_offset);
+    const auto signature = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{3},
+        .method = "textDocument/signatureHelp",
+        .params =
+            Json{{"textDocument", {{"uri", uri}}}, {"position", position_at(edited, comma + 1)}}});
+    REQUIRE(signature.has_value());
+    const auto* signature_response =
+        std::get_if<hlsl_intellisense::json_rpc::Response>(&*signature);
+    REQUIRE(signature_response != nullptr);
+    CHECK(signature_response->result["activeParameter"] == 1);
+    CHECK(signature_response->result["signatures"][0]["label"] ==
+          "float newFunction(float value, float bias)");
 }
 
 TEST_CASE("Server can disable semantic tokens for incompatible clients", "[lsp][navigation]") {
