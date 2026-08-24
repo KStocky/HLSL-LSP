@@ -51,6 +51,31 @@ struct Definition {
     SourceLocation location;
 };
 
+struct Hover {
+    std::string name;
+    std::string qualified_name;
+    std::string display_name;
+    std::string type;
+    std::string declaration;
+    std::uint32_t cursor_kind{};
+    SourceLocation declaration_location;
+    std::uint32_t start_offset{};
+    std::uint32_t end_offset{};
+};
+
+struct SignatureParameter {
+    std::string label;
+    std::string name;
+    std::string type;
+};
+
+struct Signature {
+    std::string label;
+    std::string qualified_name;
+    std::uint32_t cursor_kind{};
+    std::vector<SignatureParameter> parameters;
+};
+
 struct Symbol {
     std::string name;
     std::uint32_t cursor_kind{};
@@ -91,6 +116,10 @@ class TranslationUnit final {
                                                    std::uint32_t column) const;
     [[nodiscard]] std::optional<Definition> definition_at(std::string_view path, std::uint32_t line,
                                                           std::uint32_t column) const;
+    [[nodiscard]] std::optional<Hover> hover_at(std::string_view path, std::uint32_t line,
+                                                std::uint32_t column) const;
+    [[nodiscard]] std::vector<Signature> signatures_at(std::string_view path, std::uint32_t line,
+                                                       std::uint32_t column) const;
     [[nodiscard]] std::vector<Token> tokens(std::string_view path) const;
     [[nodiscard]] std::vector<Symbol> symbols() const;
 

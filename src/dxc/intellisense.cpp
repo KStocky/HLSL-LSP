@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <iterator>
 #include <limits>
 #include <regex>
@@ -157,6 +158,102 @@ class TaskString final {
 
   private:
     char* value_{};
+};
+
+[[nodiscard]] std::size_t bstr_length(BSTR value) noexcept {
+    if (value == nullptr) {
+        return 0;
+    }
+#ifdef _WIN32
+    return static_cast<std::size_t>(::SysStringLen(value));
+#else
+    const auto address = reinterpret_cast<std::uintptr_t>(value) - sizeof(std::uint32_t);
+    const auto* byte_length = reinterpret_cast<const std::uint32_t*>(address);
+    return *byte_length / sizeof(OLECHAR);
+#endif
+}
+
+void free_bstr(BSTR value) noexcept {
+    if (value == nullptr) {
+        return;
+    }
+#ifdef _WIN32
+    ::SysFreeString(value);
+#else
+    const auto address = reinterpret_cast<std::uintptr_t>(value) - sizeof(std::uint32_t);
+    std::free(reinterpret_cast<void*>(address));
+#endif
+}
+
+void append_utf8(std::string& output, std::uint32_t code_point) {
+    if (code_point <= 0x7F) {
+        output.push_back(static_cast<char>(code_point));
+    } else if (code_point <= 0x7FF) {
+        output.push_back(static_cast<char>(0xC0 | (code_point >> 6)));
+        output.push_back(static_cast<char>(0x80 | (code_point & 0x3F)));
+    } else if (code_point <= 0xFFFF) {
+        output.push_back(static_cast<char>(0xE0 | (code_point >> 12)));
+        output.push_back(static_cast<char>(0x80 | ((code_point >> 6) & 0x3F)));
+        output.push_back(static_cast<char>(0x80 | (code_point & 0x3F)));
+    } else {
+        output.push_back(static_cast<char>(0xF0 | (code_point >> 18)));
+        output.push_back(static_cast<char>(0x80 | ((code_point >> 12) & 0x3F)));
+        output.push_back(static_cast<char>(0x80 | ((code_point >> 6) & 0x3F)));
+        output.push_back(static_cast<char>(0x80 | (code_point & 0x3F)));
+    }
+}
+
+[[nodiscard]] std::string bstr_to_utf8(BSTR value) {
+    const auto length = bstr_length(value);
+    std::string result;
+    result.reserve(length);
+    for (std::size_t index = 0; index < length; ++index) {
+        auto code_point = static_cast<std::uint32_t>(value[index]);
+        if constexpr (sizeof(OLECHAR) == 2) {
+            if (code_point >= 0xD800 && code_point <= 0xDBFF && index + 1 < length) {
+                const auto low = static_cast<std::uint32_t>(value[index + 1]);
+                if (low >= 0xDC00 && low <= 0xDFFF) {
+                    code_point = 0x10000 + ((code_point - 0xD800) << 10) + (low - 0xDC00);
+                    ++index;
+                } else {
+                    code_point = 0xFFFD;
+                }
+            } else if (code_point >= 0xD800 && code_point <= 0xDFFF) {
+                code_point = 0xFFFD;
+            }
+        }
+        if (code_point > 0x10FFFF) {
+            code_point = 0xFFFD;
+        }
+        append_utf8(result, code_point);
+    }
+    return result;
+}
+
+class TaskBstr final {
+  public:
+    TaskBstr() = default;
+    explicit TaskBstr(BSTR value) : value_{value} {}
+
+    TaskBstr(const TaskBstr&) = delete;
+    auto operator=(const TaskBstr&) -> TaskBstr& = delete;
+
+    TaskBstr(TaskBstr&& other) noexcept : value_{std::exchange(other.value_, nullptr)} {}
+
+    auto operator=(TaskBstr&& other) noexcept -> TaskBstr& {
+        if (this != &other) {
+            free_bstr(value_);
+            value_ = std::exchange(other.value_, nullptr);
+        }
+        return *this;
+    }
+
+    ~TaskBstr() { free_bstr(value_); }
+
+    [[nodiscard]] std::string utf8() const { return bstr_to_utf8(value_); }
+
+  private:
+    BSTR value_{};
 };
 
 class TaskTokens final {
@@ -419,9 +516,15 @@ class TaskCursors final {
            (character >= '0' && character <= '9') || character == '_';
 }
 
+struct IdentifierExtent {
+    std::string_view name;
+    std::size_t start{};
+    std::size_t end{};
+};
+
 [[nodiscard]] auto identifier_at(const std::vector<SourceFile>& sources, std::string_view path,
                                  std::uint32_t line, std::uint32_t column)
-    -> std::optional<std::string_view> {
+    -> std::optional<IdentifierExtent> {
     const auto source = std::ranges::find(sources, path, &SourceFile::path);
     if (source == sources.end() || line == 0 || column == 0) {
         return std::nullopt;
@@ -429,14 +532,18 @@ class TaskCursors final {
 
     std::size_t line_start{};
     for (std::uint32_t current_line = 1; current_line < line; ++current_line) {
-        line_start = source->text.find('\n', line_start);
-        if (line_start == std::string::npos) {
+        const auto line_end = source->text.find_first_of("\r\n", line_start);
+        if (line_end == std::string::npos) {
             return std::nullopt;
         }
-        ++line_start;
+        line_start = line_end + 1;
+        if (source->text[line_end] == '\r' && line_start < source->text.size() &&
+            source->text[line_start] == '\n') {
+            ++line_start;
+        }
     }
 
-    auto line_end = source->text.find('\n', line_start);
+    auto line_end = source->text.find_first_of("\r\n", line_start);
     if (line_end == std::string::npos) {
         line_end = source->text.size();
     }
@@ -453,7 +560,9 @@ class TaskCursors final {
     while (end < line_end && is_identifier_character(source->text[end])) {
         ++end;
     }
-    return std::string_view{source->text}.substr(start, end - start);
+    return IdentifierExtent{.name = std::string_view{source->text}.substr(start, end - start),
+                            .start = start,
+                            .end = end};
 }
 
 [[nodiscard]] auto find_symbol_definition(const std::vector<Symbol>& symbols, std::string_view name)
@@ -467,6 +576,241 @@ class TaskCursors final {
         }
     }
     return std::nullopt;
+}
+
+[[nodiscard]] std::string cursor_spelling(IDxcCursor& cursor) {
+    char* spelling{};
+    check(cursor.GetSpelling(&spelling), "GetSpelling");
+    return std::string{TaskString{spelling}.view()};
+}
+
+[[nodiscard]] std::string cursor_display_name(IDxcCursor& cursor) {
+    BSTR display_name{};
+    check(cursor.GetDisplayName(&display_name), "GetDisplayName");
+    return TaskBstr{display_name}.utf8();
+}
+
+[[nodiscard]] DxcCursorKind cursor_kind(IDxcCursor& cursor);
+[[nodiscard]] bool callable_cursor(DxcCursorKind kind);
+[[nodiscard]] std::string trim(std::string_view value);
+
+[[nodiscard]] std::string cursor_qualified_symbol_name(IDxcCursor& cursor) {
+    std::vector<std::string> components;
+    if (auto spelling = cursor_spelling(cursor); !spelling.empty()) {
+        components.push_back(std::move(spelling));
+    }
+
+    ComPtr<IDxcCursor> current;
+    check(cursor.GetSemanticParent(current.put()), "GetSemanticParent");
+    for (std::uint32_t depth = 0; !is_null_cursor(current.get()) && depth < 64; ++depth) {
+        const auto kind = cursor_kind(*current.get());
+        if (symbol_container(kind) || callable_cursor(kind)) {
+            if (auto spelling = cursor_spelling(*current.get()); !spelling.empty()) {
+                components.push_back(std::move(spelling));
+            }
+        }
+        ComPtr<IDxcCursor> parent;
+        check(current->GetSemanticParent(parent.put()), "GetSemanticParent");
+        current = std::move(parent);
+    }
+
+    std::string result;
+    for (auto component = components.rbegin(); component != components.rend(); ++component) {
+        if (!result.empty()) {
+            result += "::";
+        }
+        result += *component;
+    }
+    return result;
+}
+
+[[nodiscard]] std::string cursor_formatted_name(IDxcCursor& cursor) {
+    BSTR formatted_name{};
+    check(cursor.GetFormattedName(DxcCursorFormatting_UseLanguageOptions, &formatted_name),
+          "GetFormattedName");
+    return TaskBstr{formatted_name}.utf8();
+}
+
+[[nodiscard]] std::string declaration_header(IDxcCursor& cursor) {
+    auto result = cursor_formatted_name(cursor);
+    const auto kind = cursor_kind(cursor);
+    if (callable_cursor(kind) || symbol_container(kind)) {
+        if (const auto body = result.find('{'); body != std::string::npos) {
+            result.erase(body);
+        }
+    }
+    return trim(result);
+}
+
+[[nodiscard]] std::string cursor_type(IDxcCursor& cursor) {
+    ComPtr<IDxcType> type;
+    check(cursor.GetCursorType(type.put()), "GetCursorType");
+    if (type.get() == nullptr) {
+        return {};
+    }
+    char* spelling{};
+    check(type->GetSpelling(&spelling), "GetSpelling");
+    return std::string{TaskString{spelling}.view()};
+}
+
+[[nodiscard]] DxcCursorKind cursor_kind(IDxcCursor& cursor) {
+    DxcCursorKind kind{DxcCursor_UnexposedDecl};
+    check(cursor.GetKind(&kind), "GetKind");
+    return kind;
+}
+
+[[nodiscard]] bool callable_cursor(DxcCursorKind kind) {
+    return kind == DxcCursor_FunctionDecl || kind == DxcCursor_CXXMethod ||
+           kind == DxcCursor_Constructor || kind == DxcCursor_ConversionFunction ||
+           kind == DxcCursor_FunctionTemplate;
+}
+
+[[nodiscard]] bool type_cursor(DxcCursorKind kind) {
+    return kind == DxcCursor_StructDecl || kind == DxcCursor_UnionDecl ||
+           kind == DxcCursor_ClassDecl || kind == DxcCursor_ClassTemplate ||
+           kind == DxcCursor_ClassTemplatePartialSpecialization;
+}
+
+[[nodiscard]] std::string trim(std::string_view value) {
+    while (!value.empty() && (value.front() == ' ' || value.front() == '\t')) {
+        value.remove_prefix(1);
+    }
+    while (!value.empty() && (value.back() == ' ' || value.back() == '\t')) {
+        value.remove_suffix(1);
+    }
+    return std::string{value};
+}
+
+[[nodiscard]] SignatureParameter signature_parameter(IDxcCursor& cursor) {
+    auto name = cursor_spelling(cursor);
+    auto type = cursor_type(cursor);
+    auto label = cursor_formatted_name(cursor);
+    if (label.empty()) {
+        label = type;
+        if (!name.empty()) {
+            if (!label.empty()) {
+                label += ' ';
+            }
+            label += name;
+        }
+    }
+    return {.label = std::move(label), .name = std::move(name), .type = std::move(type)};
+}
+
+[[nodiscard]] bool append_template_parameters(IDxcCursor& cursor,
+                                              std::vector<SignatureParameter>& parameters) {
+    constexpr unsigned page_size = 256;
+    for (unsigned skip = 0;; skip += page_size) {
+        unsigned child_count{};
+        IDxcCursor** raw_children{};
+        check(cursor.GetChildren(skip, page_size, &child_count, &raw_children), "GetChildren");
+        TaskCursors children{raw_children, child_count};
+        for (unsigned index = 0; index < child_count; ++index) {
+            auto* child = children[index];
+            if (child != nullptr && cursor_kind(*child) == DxcCursor_ParmDecl) {
+                parameters.push_back(signature_parameter(*child));
+            }
+        }
+        if (child_count < page_size) {
+            return true;
+        }
+        if (skip > (std::numeric_limits<unsigned>::max)() - page_size) {
+            return false;
+        }
+    }
+}
+
+[[nodiscard]] std::optional<Signature> signature_from_cursor(IDxcCursor& cursor) {
+    Signature result;
+    const auto kind = cursor_kind(cursor);
+    result.cursor_kind = static_cast<std::uint32_t>(kind);
+    result.qualified_name = cursor_qualified_symbol_name(cursor);
+    if (result.qualified_name.empty()) {
+        result.qualified_name = cursor_spelling(cursor);
+    }
+
+    int argument_count{};
+    check(cursor.GetNumArguments(&argument_count), "GetNumArguments");
+    if (argument_count < 0) {
+        if (kind != DxcCursor_FunctionTemplate ||
+            !append_template_parameters(cursor, result.parameters)) {
+            return std::nullopt;
+        }
+    } else {
+        result.parameters.reserve(static_cast<std::size_t>(argument_count));
+        for (int index = 0; index < argument_count; ++index) {
+            ComPtr<IDxcCursor> argument;
+            check(cursor.GetArgumentAt(index, argument.put()), "GetArgumentAt");
+            if (is_null_cursor(argument.get())) {
+                return std::nullopt;
+            }
+            result.parameters.push_back(signature_parameter(*argument.get()));
+        }
+    }
+
+    std::string return_type;
+    if (kind != DxcCursor_Constructor) {
+        const auto type = cursor_type(cursor);
+        if (const auto open = type.find('('); open != std::string::npos) {
+            return_type = trim(std::string_view{type}.substr(0, open));
+        }
+    }
+    if (!return_type.empty()) {
+        result.label = std::move(return_type);
+        result.label += ' ';
+    }
+    result.label += result.qualified_name;
+    result.label += '(';
+    for (std::size_t index = 0; index < result.parameters.size(); ++index) {
+        if (index != 0) {
+            result.label += ", ";
+        }
+        result.label += result.parameters[index].label;
+    }
+    result.label += ')';
+    return result;
+}
+
+void append_signature(std::vector<Signature>& result, IDxcCursor& cursor) {
+    auto signature = signature_from_cursor(cursor);
+    if (!signature.has_value()) {
+        return;
+    }
+    const auto duplicate = std::ranges::any_of(
+        result, [&signature](const auto& existing) { return existing.label == signature->label; });
+    if (!duplicate) {
+        result.push_back(std::move(*signature));
+    }
+}
+
+void append_named_callables(IDxcCursor& parent, std::string_view name,
+                            std::vector<Signature>& result, std::uint32_t depth, bool recursive) {
+    if (depth >= 64) {
+        return;
+    }
+    constexpr unsigned page_size = 256;
+    for (unsigned skip = 0;; skip += page_size) {
+        unsigned child_count{};
+        IDxcCursor** raw_children{};
+        check(parent.GetChildren(skip, page_size, &child_count, &raw_children), "GetChildren");
+        TaskCursors children{raw_children, child_count};
+        for (unsigned index = 0; index < child_count; ++index) {
+            auto* child = children[index];
+            if (child == nullptr) {
+                continue;
+            }
+            const auto kind = cursor_kind(*child);
+            if (callable_cursor(kind) && cursor_spelling(*child) == name) {
+                append_signature(result, *child);
+            }
+            if (recursive && !callable_cursor(kind)) {
+                append_named_callables(*child, name, result, depth + 1, true);
+            }
+        }
+        if (child_count < page_size) {
+            break;
+        }
+    }
 }
 
 } // namespace
@@ -670,7 +1014,7 @@ auto TranslationUnit::definition_at(std::string_view path, std::uint32_t line,
             if (!identifier) {
                 return std::nullopt;
             }
-            return find_symbol_definition(symbols(), *identifier);
+            return find_symbol_definition(symbols(), identifier->name);
         }
 
         check(referenced->GetDefinitionCursor(definition.put()), "GetDefinitionCursor");
@@ -688,6 +1032,105 @@ auto TranslationUnit::definition_at(std::string_view path, std::uint32_t line,
 
     return Definition{.name = std::string{owned_spelling.view()},
                       .location = make_source_location(*definition_location.get())};
+}
+
+auto TranslationUnit::hover_at(std::string_view path, std::uint32_t line,
+                               std::uint32_t column) const -> std::optional<Hover> {
+    const auto identifier = identifier_at(implementation_->sources, path, line, column);
+    if (!identifier.has_value()) {
+        return std::nullopt;
+    }
+    if (identifier->start > UINT32_MAX || identifier->end > UINT32_MAX) {
+        throw std::invalid_argument{"The hover source file is too large"};
+    }
+
+    const std::string owned_path{path};
+    ComPtr<IDxcFile> file;
+    check(implementation_->translation_unit->GetFile(owned_path.c_str(), file.put()), "GetFile");
+    ComPtr<IDxcSourceLocation> location;
+    check(implementation_->translation_unit->GetLocation(file.get(), line, column, location.put()),
+          "GetLocation");
+    ComPtr<IDxcCursor> cursor;
+    check(implementation_->translation_unit->GetCursorForLocation(location.get(), cursor.put()),
+          "GetCursorForLocation");
+    if (is_null_cursor(cursor.get())) {
+        return std::nullopt;
+    }
+
+    ComPtr<IDxcCursor> referenced;
+    check(cursor->GetReferencedCursor(referenced.put()), "GetReferencedCursor");
+    auto* target = is_null_cursor(referenced.get()) ? cursor.get() : referenced.get();
+    auto name = cursor_spelling(*target);
+    if (name.empty()) {
+        return std::nullopt;
+    }
+
+    SourceLocation declaration_location;
+    ComPtr<IDxcSourceLocation> target_location;
+    check(target->GetLocation(target_location.put()), "GetLocation");
+    if (target_location.get() != nullptr) {
+        BOOL location_is_null{};
+        check(target_location->IsNull(&location_is_null), "IsNull");
+        if (location_is_null == FALSE) {
+            declaration_location = make_source_location(*target_location.get());
+        }
+    }
+
+    return Hover{
+        .name = std::move(name),
+        .qualified_name = cursor_qualified_symbol_name(*target),
+        .display_name = cursor_display_name(*target),
+        .type = cursor_type(*target),
+        .declaration = declaration_header(*target),
+        .cursor_kind = static_cast<std::uint32_t>(cursor_kind(*target)),
+        .declaration_location = std::move(declaration_location),
+        .start_offset = static_cast<std::uint32_t>(identifier->start),
+        .end_offset = static_cast<std::uint32_t>(identifier->end),
+    };
+}
+
+auto TranslationUnit::signatures_at(std::string_view path, std::uint32_t line,
+                                    std::uint32_t column) const -> std::vector<Signature> {
+    const auto identifier = identifier_at(implementation_->sources, path, line, column);
+    if (!identifier.has_value()) {
+        return {};
+    }
+
+    const std::string owned_path{path};
+    ComPtr<IDxcFile> file;
+    check(implementation_->translation_unit->GetFile(owned_path.c_str(), file.put()), "GetFile");
+    ComPtr<IDxcSourceLocation> location;
+    check(implementation_->translation_unit->GetLocation(file.get(), line, column, location.put()),
+          "GetLocation");
+    ComPtr<IDxcCursor> cursor;
+    check(implementation_->translation_unit->GetCursorForLocation(location.get(), cursor.put()),
+          "GetCursorForLocation");
+    if (is_null_cursor(cursor.get())) {
+        return {};
+    }
+
+    ComPtr<IDxcCursor> referenced;
+    check(cursor->GetReferencedCursor(referenced.put()), "GetReferencedCursor");
+    auto* target = is_null_cursor(referenced.get()) ? cursor.get() : referenced.get();
+    const auto target_kind = cursor_kind(*target);
+    std::vector<Signature> result;
+    if (callable_cursor(target_kind)) {
+        append_signature(result, *target);
+        ComPtr<IDxcCursor> parent;
+        check(target->GetSemanticParent(parent.put()), "GetSemanticParent");
+        if (!is_null_cursor(parent.get())) {
+            append_named_callables(*parent.get(), identifier->name, result, 0, false);
+        }
+    } else if (type_cursor(target_kind)) {
+        append_named_callables(*target, identifier->name, result, 0, false);
+    }
+
+    if (result.empty()) {
+        ComPtr<IDxcCursor> root;
+        check(implementation_->translation_unit->GetCursor(root.put()), "GetCursor");
+        append_named_callables(*root.get(), identifier->name, result, 0, true);
+    }
+    return result;
 }
 
 auto TranslationUnit::tokens(std::string_view path) const -> std::vector<Token> {

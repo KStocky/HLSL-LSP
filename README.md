@@ -9,6 +9,7 @@ with:
 - UTF-16 incremental document synchronization
 - DXC diagnostics for open HLSL documents
 - DXC-backed code completion
+- DXC-backed hover and signature help
 - DXC-backed semantic colouring and go-to-definition for symbols and include paths
 - Workspace symbol support for Visual Studio's All-In-One Search
 - Hierarchical `shadertoolsconfig.json` compiler configuration
@@ -36,6 +37,21 @@ symbols, templates, and DXC intrinsics. Trigger it with Visual Studio's normal
 `Ctrl+J` or `Ctrl+Space` shortcuts.
 
 ![HLSL code completion in Visual Studio](art/completion.png)
+
+### Hover and signature help
+
+Hover reports DXC's symbol name, type, declaration, and source location.
+Signature help reports stable labels and parameters for functions, overloaded
+functions, and methods, including nested call sites and unsaved edits.
+
+The pinned DXC `1.9.2607.13` API exposes no callable constructor overloads or
+parameter cursors. Scalar casts resolve to an unnamed initializer expression;
+`float4` and `float2x2` resolve to typedefs; and generic `vector` and `matrix`
+resolve to class templates whose only callable children are subscript operators.
+Completion provides `vector::` and `matrix::` qualification entries, not
+constructor placeholders. It also rejects user-defined HLSL constructor
+declarations. HLSL-LSP therefore returns `null` for constructor signature help
+instead of fabricating signatures.
 
 ### Semantic colouring
 

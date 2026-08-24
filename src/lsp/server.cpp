@@ -435,11 +435,14 @@ struct SemanticToken {
     }
     std::size_t line_start = 0;
     for (std::uint32_t current = 1; current < line; ++current) {
-        const auto newline = text.find('\n', line_start);
+        const auto newline = text.find_first_of("\r\n", line_start);
         if (newline == std::string_view::npos) {
             return std::nullopt;
         }
         line_start = newline + 1;
+        if (text[newline] == '\r' && line_start < text.size() && text[line_start] == '\n') {
+            ++line_start;
+        }
     }
     const auto offset = line_start + column - 1;
     const auto line_end = text.find_first_of("\r\n", line_start);
@@ -506,6 +509,222 @@ dxc_position(std::string_view text, workspace::Position request_position) {
         invalid_params("Completion position is too large");
     }
     return {request_position.line + 1, static_cast<std::uint32_t>(byte_column)};
+}
+
+struct CallContext {
+    std::size_t callee_offset{};
+    std::size_t active_parameter{};
+};
+
+enum class LexicalState : std::uint8_t { code, line_comment, block_comment, string, character };
+
+struct LexicalPrefix {
+    std::vector<bool> code;
+    LexicalState state{LexicalState::code};
+};
+
+[[nodiscard]] LexicalPrefix lexical_prefix(std::string_view text, std::size_t limit) {
+    LexicalPrefix result{.code = std::vector<bool>(limit, false)};
+    for (std::size_t offset = 0; offset < limit;) {
+        const auto character = text[offset];
+        switch (result.state) {
+        case LexicalState::code:
+            if (character == '/' && offset + 1 < limit && text[offset + 1] == '/') {
+                result.state = LexicalState::line_comment;
+                offset += 2;
+            } else if (character == '/' && offset + 1 < limit && text[offset + 1] == '*') {
+                result.state = LexicalState::block_comment;
+                offset += 2;
+            } else if (character == '"') {
+                result.state = LexicalState::string;
+                ++offset;
+            } else if (character == '\'') {
+                result.state = LexicalState::character;
+                ++offset;
+            } else {
+                result.code[offset] = true;
+                ++offset;
+            }
+            break;
+        case LexicalState::line_comment:
+            if (character == '\r' || character == '\n') {
+                result.state = LexicalState::code;
+                result.code[offset] = true;
+            }
+            ++offset;
+            break;
+        case LexicalState::block_comment:
+            if (character == '*' && offset + 1 < limit && text[offset + 1] == '/') {
+                result.state = LexicalState::code;
+                offset += 2;
+            } else {
+                ++offset;
+            }
+            break;
+        case LexicalState::string:
+        case LexicalState::character: {
+            const auto quote = result.state == LexicalState::string ? '"' : '\'';
+            if (character == '\\' && offset + 1 < limit) {
+                offset += 2;
+            } else {
+                ++offset;
+                if (character == quote) {
+                    result.state = LexicalState::code;
+                }
+            }
+            break;
+        }
+        }
+    }
+    return result;
+}
+
+[[nodiscard]] std::optional<std::size_t>
+previous_code_offset(std::string_view text, const std::vector<bool>& code, std::size_t offset) {
+    while (offset > 0) {
+        --offset;
+        if (code[offset] && std::isspace(static_cast<unsigned char>(text[offset])) == 0) {
+            return offset;
+        }
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] bool template_close_follows(std::string_view text, const std::vector<bool>& code,
+                                          std::size_t open) {
+    std::size_t depth = 1;
+    for (auto offset = open + 1; offset < code.size(); ++offset) {
+        if (!code[offset]) {
+            continue;
+        }
+        if (text[offset] == '<') {
+            ++depth;
+        } else if (text[offset] == '>') {
+            if (--depth == 0) {
+                auto next = offset + 1;
+                while (next < code.size() &&
+                       (!code[next] || std::isspace(static_cast<unsigned char>(text[next])) != 0)) {
+                    ++next;
+                }
+                return next < code.size() && text[next] == '(';
+            }
+        } else if ((text[offset] == ';' || text[offset] == ')' || text[offset] == ']' ||
+                    text[offset] == '}') &&
+                   depth == 1) {
+            return false;
+        }
+    }
+    return false;
+}
+
+[[nodiscard]] bool template_open(std::string_view text, const std::vector<bool>& code,
+                                 std::size_t offset) {
+    const auto previous = previous_code_offset(text, code, offset);
+    if (!previous.has_value()) {
+        return false;
+    }
+    const auto character = text[*previous];
+    const auto possible_name = std::isalnum(static_cast<unsigned char>(character)) != 0 ||
+                               character == '_' || character == '>' || character == ']';
+    return possible_name && template_close_follows(text, code, offset);
+}
+
+[[nodiscard]] std::optional<std::size_t>
+callee_at(std::string_view text, const std::vector<bool>& code, std::size_t open_parenthesis) {
+    auto previous = previous_code_offset(text, code, open_parenthesis);
+    if (!previous.has_value()) {
+        return std::nullopt;
+    }
+    if (text[*previous] == '>') {
+        std::size_t depth = 1;
+        auto offset = *previous;
+        while (offset > 0 && depth != 0) {
+            --offset;
+            if (!code[offset]) {
+                continue;
+            }
+            if (text[offset] == '>') {
+                ++depth;
+            } else if (text[offset] == '<') {
+                --depth;
+            }
+        }
+        if (depth != 0) {
+            return std::nullopt;
+        }
+        previous = previous_code_offset(text, code, offset);
+        if (!previous.has_value()) {
+            return std::nullopt;
+        }
+    }
+
+    auto start = *previous;
+    const auto identifier_character = [](char value) {
+        return std::isalnum(static_cast<unsigned char>(value)) != 0 || value == '_';
+    };
+    if (!identifier_character(text[start])) {
+        return std::nullopt;
+    }
+    while (start > 0 && code[start - 1] && identifier_character(text[start - 1])) {
+        --start;
+    }
+    const auto name = text.substr(start, *previous - start + 1);
+    static constexpr std::string_view non_call_keywords[] = {"if",     "for",     "while", "switch",
+                                                             "sizeof", "alignof", "return"};
+    if (std::ranges::find(non_call_keywords, name) != std::ranges::end(non_call_keywords)) {
+        return std::nullopt;
+    }
+    return start;
+}
+
+[[nodiscard]] std::optional<CallContext> call_context(std::string_view text,
+                                                      std::size_t cursor_offset) {
+    const auto lexical = lexical_prefix(text, cursor_offset);
+    if (lexical.state != LexicalState::code) {
+        return std::nullopt;
+    }
+
+    struct Delimiter {
+        char value{};
+        std::optional<std::size_t> callee;
+        std::size_t active_parameter{};
+    };
+    std::vector<Delimiter> delimiters;
+    for (std::size_t offset = 0; offset < cursor_offset; ++offset) {
+        if (!lexical.code[offset]) {
+            continue;
+        }
+        const auto character = text[offset];
+        if (character == '(') {
+            delimiters.push_back({.value = character,
+                                  .callee = callee_at(text, lexical.code, offset),
+                                  .active_parameter = 0});
+        } else if (character == '[' || character == '{' ||
+                   (character == '<' && ((!delimiters.empty() && delimiters.back().value == '<') ||
+                                         template_open(text, lexical.code, offset)))) {
+            delimiters.push_back({.value = character});
+        } else if (character == ')' || character == ']' || character == '}' || character == '>') {
+            const auto expected =
+                character == ')' ? '(' : (character == ']' ? '[' : (character == '}' ? '{' : '<'));
+            const auto matching = std::ranges::find(delimiters.rbegin(), delimiters.rend(),
+                                                    expected, &Delimiter::value);
+            if (matching != delimiters.rend()) {
+                delimiters.erase(matching.base() - 1, delimiters.end());
+            }
+        } else if (character == ',' && !delimiters.empty() && delimiters.back().value == '(' &&
+                   delimiters.back().callee.has_value()) {
+            ++delimiters.back().active_parameter;
+        }
+    }
+
+    const auto call =
+        std::ranges::find_if(delimiters.rbegin(), delimiters.rend(), [](const auto& delimiter) {
+            return delimiter.value == '(' && delimiter.callee.has_value();
+        });
+    if (call == delimiters.rend()) {
+        return std::nullopt;
+    }
+    return CallContext{.callee_offset = *call->callee, .active_parameter = call->active_parameter};
 }
 
 [[nodiscard]] workspace::Range diagnostic_range(const workspace::SourceSnapshot& snapshot,
@@ -710,6 +929,11 @@ void Server::register_handlers() {
                                          [this](const auto& params) { return completion(params); });
     dispatcher_.register_request_handler("textDocument/definition",
                                          [this](const auto& params) { return definition(params); });
+    dispatcher_.register_request_handler("textDocument/hover",
+                                         [this](const auto& params) { return hover(params); });
+    dispatcher_.register_request_handler("textDocument/signatureHelp", [this](const auto& params) {
+        return signature_help(params);
+    });
     dispatcher_.register_request_handler("textDocument/documentSymbol", [this](const auto& params) {
         return document_symbols(params);
     });
@@ -817,6 +1041,10 @@ Json Server::initialize(const std::optional<Json>& params) {
          {{"openClose", true}, {"change", 2}, {"save", {{"includeText", true}}}}},
         {"completionProvider", {{"resolveProvider", false}}},
         {"definitionProvider", true},
+        {"hoverProvider", true},
+        {"signatureHelpProvider",
+         {{"triggerCharacters", Json::array({"(", ","})},
+          {"retriggerCharacters", Json::array({")"})}}},
         {"documentSymbolProvider", true},
         {"workspaceSymbolProvider", true},
         {"workspace",
@@ -953,6 +1181,155 @@ Json Server::definition(const std::optional<Json>& params) {
         end.character += static_cast<std::uint32_t>(name_length);
     }
     return {{"uri", target.uri()}, {"range", lsp_range({.start = start, .end = end})}};
+}
+
+Json Server::hover(const std::optional<Json>& params) {
+    require_running();
+    const auto& value = object_params(params);
+    const auto uri = string_member(object_member(value, "textDocument"), "uri");
+    const auto request_position = position(object_member(value, "position"));
+
+    workspace::SourceSnapshot snapshot = [&] {
+        try {
+            const auto& state = documents_.document(uri);
+            if (!state.open) {
+                invalid_params("Hover document is not open");
+            }
+            return documents_.snapshot(uri);
+        } catch (const workspace::DocumentError& error) {
+            invalid_params(error.what());
+        }
+    }();
+    const auto analysis = analyses_.find(snapshot.document_uri().identity());
+    if (analysis == analyses_.end() || analysis->second.version != snapshot.version()) {
+        invalid_params("Hover analysis is stale");
+    }
+
+    const auto request_offset = [&] {
+        try {
+            return workspace::utf8_offset_at(snapshot.text(), request_position);
+        } catch (const workspace::DocumentError& error) {
+            invalid_params(error.what());
+        }
+    }();
+    if (request_offset >= snapshot.text().size()) {
+        return nullptr;
+    }
+    const auto lexical = lexical_prefix(snapshot.text(), request_offset + 1);
+    if (!lexical.code[request_offset]) {
+        return nullptr;
+    }
+
+    const auto [line, column] = dxc_position(snapshot.text(), request_position);
+    const auto information =
+        analysis->second.translation_unit.hover_at(analysis->second.dxc_root_path, line, column);
+    if (!information.has_value()) {
+        return nullptr;
+    }
+
+    std::string contents;
+    if (!information->declaration.empty()) {
+        contents += information->declaration;
+    } else if (!information->display_name.empty()) {
+        contents += information->display_name;
+    } else {
+        contents += information->name;
+    }
+    if (!information->qualified_name.empty() &&
+        information->qualified_name != information->display_name &&
+        information->qualified_name != information->declaration) {
+        contents += "\nSymbol: ";
+        contents += information->qualified_name;
+    }
+    if (!information->type.empty()) {
+        contents += "\nType: ";
+        contents += information->type;
+    }
+    if (!information->declaration_location.path.empty()) {
+        contents += "\nDeclared at ";
+        contents += information->declaration_location.path;
+        if (information->declaration_location.line != 0) {
+            contents += ':';
+            contents += std::to_string(information->declaration_location.line);
+            if (information->declaration_location.column != 0) {
+                contents += ':';
+                contents += std::to_string(information->declaration_location.column);
+            }
+        }
+    }
+
+    Json result{{"contents", {{"kind", "plaintext"}, {"value", std::move(contents)}}}};
+    if (information->start_offset <= information->end_offset &&
+        information->end_offset <= snapshot.text().size()) {
+        result["range"] = lsp_range(
+            {.start = workspace::lsp_position_at(snapshot.text(), information->start_offset),
+             .end = workspace::lsp_position_at(snapshot.text(), information->end_offset)});
+    }
+    return result;
+}
+
+Json Server::signature_help(const std::optional<Json>& params) {
+    require_running();
+    const auto& value = object_params(params);
+    const auto uri = string_member(object_member(value, "textDocument"), "uri");
+    const auto request_position = position(object_member(value, "position"));
+
+    workspace::SourceSnapshot snapshot = [&] {
+        try {
+            const auto& state = documents_.document(uri);
+            if (!state.open) {
+                invalid_params("Signature help document is not open");
+            }
+            return documents_.snapshot(uri);
+        } catch (const workspace::DocumentError& error) {
+            invalid_params(error.what());
+        }
+    }();
+    const auto analysis = analyses_.find(snapshot.document_uri().identity());
+    if (analysis == analyses_.end() || analysis->second.version != snapshot.version()) {
+        invalid_params("Signature help analysis is stale");
+    }
+
+    const auto cursor_offset = [&] {
+        try {
+            return workspace::utf8_offset_at(snapshot.text(), request_position);
+        } catch (const workspace::DocumentError& error) {
+            invalid_params(error.what());
+        }
+    }();
+    const auto context = call_context(snapshot.text(), cursor_offset);
+    if (!context.has_value()) {
+        return nullptr;
+    }
+    const auto callee_position =
+        workspace::lsp_position_at(snapshot.text(), context->callee_offset);
+    const auto [line, column] = dxc_position(snapshot.text(), callee_position);
+    const auto signatures = analysis->second.translation_unit.signatures_at(
+        analysis->second.dxc_root_path, line, column);
+    if (signatures.empty()) {
+        return nullptr;
+    }
+
+    Json items = Json::array();
+    for (const auto& signature : signatures) {
+        Json parameters = Json::array();
+        for (const auto& parameter : signature.parameters) {
+            parameters.push_back({{"label", parameter.label}});
+        }
+        Json item{{"label", signature.label}, {"parameters", std::move(parameters)}};
+        if (!signature.parameters.empty()) {
+            item["activeParameter"] =
+                (std::min)(context->active_parameter, signature.parameters.size() - 1);
+        }
+        items.push_back(std::move(item));
+    }
+
+    Json result{{"signatures", std::move(items)}, {"activeSignature", 0}};
+    if (!signatures.front().parameters.empty()) {
+        result["activeParameter"] =
+            (std::min)(context->active_parameter, signatures.front().parameters.size() - 1);
+    }
+    return result;
 }
 
 Json Server::document_symbols(const std::optional<Json>& params) {
