@@ -92,6 +92,10 @@ class Manager final {
     definition(std::string root_identity, std::int64_t version, std::string path,
                std::uint32_t line, std::uint32_t column,
                const json_rpc::CancellationToken& cancellation);
+    [[nodiscard]] std::vector<dxc::Reference>
+    references(std::string root_identity, std::int64_t version, std::string path,
+               std::uint32_t line, std::uint32_t column,
+               const json_rpc::CancellationToken& cancellation);
     [[nodiscard]] std::optional<dxc::Hover> hover(std::string root_identity, std::int64_t version,
                                                   std::string path, std::uint32_t line,
                                                   std::uint32_t column,

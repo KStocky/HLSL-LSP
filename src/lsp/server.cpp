@@ -916,7 +916,152 @@ optional_string_setting(const Json& settings, const Json* hlsl, std::string_view
     return result;
 }
 
+[[nodiscard]] bool valid_rename_identifier(std::string_view value) {
+    if (value.empty() ||
+        (std::isalpha(static_cast<unsigned char>(value.front())) == 0 && value.front() != '_') ||
+        !std::ranges::all_of(value.substr(1), [](char character) {
+            return std::isalnum(static_cast<unsigned char>(character)) != 0 || character == '_';
+        })) {
+        return false;
+    }
+    static constexpr std::string_view keywords[] = {"bool",
+                                                    "break",
+                                                    "Buffer",
+                                                    "ByteAddressBuffer",
+                                                    "case",
+                                                    "catch",
+                                                    "cbuffer",
+                                                    "centroid",
+                                                    "char",
+                                                    "class",
+                                                    "column_major",
+                                                    "const",
+                                                    "continue",
+                                                    "default",
+                                                    "delete",
+                                                    "do",
+                                                    "double",
+                                                    "else",
+                                                    "enum",
+                                                    "explicit",
+                                                    "extern",
+                                                    "false",
+                                                    "float",
+                                                    "for",
+                                                    "friend",
+                                                    "globallycoherent",
+                                                    "goto",
+                                                    "groupshared",
+                                                    "half",
+                                                    "if",
+                                                    "in",
+                                                    "inline",
+                                                    "inout",
+                                                    "int",
+                                                    "linear",
+                                                    "long",
+                                                    "matrix",
+                                                    "namespace",
+                                                    "new",
+                                                    "nointerpolation",
+                                                    "noperspective",
+                                                    "operator",
+                                                    "out",
+                                                    "packoffset",
+                                                    "precise",
+                                                    "private",
+                                                    "protected",
+                                                    "public",
+                                                    "register",
+                                                    "return",
+                                                    "row_major",
+                                                    "RWBuffer",
+                                                    "RWByteAddressBuffer",
+                                                    "RWStructuredBuffer",
+                                                    "sample",
+                                                    "SamplerComparisonState",
+                                                    "SamplerState",
+                                                    "short",
+                                                    "signed",
+                                                    "sizeof",
+                                                    "snorm",
+                                                    "static",
+                                                    "StructuredBuffer",
+                                                    "struct",
+                                                    "switch",
+                                                    "tbuffer",
+                                                    "template",
+                                                    "Texture1D",
+                                                    "Texture1DArray",
+                                                    "Texture2D",
+                                                    "Texture2DArray",
+                                                    "Texture2DMS",
+                                                    "Texture2DMSArray",
+                                                    "Texture3D",
+                                                    "TextureCube",
+                                                    "TextureCubeArray",
+                                                    "this",
+                                                    "throw",
+                                                    "true",
+                                                    "try",
+                                                    "typedef",
+                                                    "typename",
+                                                    "uint",
+                                                    "uniform",
+                                                    "union",
+                                                    "unorm",
+                                                    "unsigned",
+                                                    "using",
+                                                    "vector",
+                                                    "virtual",
+                                                    "void",
+                                                    "volatile",
+                                                    "while"};
+    if (std::ranges::find(keywords, value) != std::ranges::end(keywords)) {
+        return false;
+    }
+    static constexpr std::string_view scalar_types[] = {
+        "bool",       "double",   "dword",      "float",    "half",      "int",
+        "min10float", "min12int", "min16float", "min16int", "min16uint", "uint"};
+    for (const auto scalar : scalar_types) {
+        if (!value.starts_with(scalar)) {
+            continue;
+        }
+        auto suffix = value.substr(scalar.size());
+        if (suffix.empty()) {
+            return false;
+        }
+        const auto dimension = [](char character) { return character >= '1' && character <= '4'; };
+        if (suffix.size() == 1 && dimension(suffix[0])) {
+            return false;
+        }
+        if (suffix.size() == 3 && dimension(suffix[0]) && suffix[1] == 'x' &&
+            dimension(suffix[2])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] workspace::Range reference_range(std::string_view text,
+                                               const dxc::Reference& reference) {
+    const auto start = static_cast<std::size_t>(reference.start_offset);
+    const auto end = static_cast<std::size_t>(reference.end_offset);
+    if (start > end || end > text.size()) {
+        throw HandlerError{json_rpc::content_modified_code,
+                           "Reference source changed after analysis"};
+    }
+    return {.start = workspace::lsp_position_at(text, start),
+            .end = workspace::lsp_position_at(text, end)};
+}
+
 } // namespace
+
+struct Server::ReferenceResult final {
+    workspace::SourceSnapshot request;
+    dxc::Definition target;
+    std::vector<dxc::Reference> references;
+};
 
 Server::Server(NotificationSender sender, Logger logger, ServerOptions options)
     : sender_{std::move(sender)}, logger_{std::move(logger)}, options_{std::move(options)},
@@ -947,6 +1092,16 @@ void Server::register_handlers() {
     dispatcher_.register_request_handler(
         "textDocument/definition",
         [this](const auto& params, const auto& context) { return definition(params, context); });
+    dispatcher_.register_request_handler(
+        "textDocument/references",
+        [this](const auto& params, const auto& context) { return references(params, context); });
+    dispatcher_.register_request_handler("textDocument/prepareRename",
+                                         [this](const auto& params, const auto& context) {
+                                             return prepare_rename(params, context);
+                                         });
+    dispatcher_.register_request_handler(
+        "textDocument/rename",
+        [this](const auto& params, const auto& context) { return rename(params, context); });
     dispatcher_.register_request_handler(
         "textDocument/hover",
         [this](const auto& params, const auto& context) { return hover(params, context); });
@@ -1104,6 +1259,8 @@ Json Server::initialize(const std::optional<Json>& params) {
          {{"openClose", true}, {"change", 2}, {"save", {{"includeText", true}}}}},
         {"completionProvider", {{"resolveProvider", false}}},
         {"definitionProvider", true},
+        {"referencesProvider", true},
+        {"renameProvider", {{"prepareProvider", true}}},
         {"hoverProvider", true},
         {"signatureHelpProvider",
          {{"triggerCharacters", Json::array({"(", ","})},
@@ -1269,6 +1426,244 @@ Json Server::definition(const std::optional<Json>& params,
         end.character += static_cast<std::uint32_t>(name_length);
     }
     return {{"uri", target.uri()}, {"range", lsp_range({.start = start, .end = end})}};
+}
+
+Server::ReferenceResult Server::find_references(std::string_view uri,
+                                                const workspace::Position& request_position,
+                                                const json_rpc::RequestContext& context) {
+    workspace::SourceSnapshot request = [&] {
+        std::scoped_lock state_lock{state_mutex_};
+        try {
+            const auto& state = documents_.document(uri);
+            if (!state.open) {
+                invalid_params("Reference document is not open");
+            }
+            return documents_.snapshot(uri);
+        } catch (const workspace::DocumentError& error) {
+            invalid_params(error.what());
+        }
+    }();
+
+    analyze_and_publish(request.uri());
+    const auto [line, column] = dxc_position(request.text(), request_position);
+    const auto target = analysis_.definition(request.document_uri().identity(), request.version(),
+                                             request.path(), line, column, context.cancellation);
+    if (!target.has_value()) {
+        return {.request = std::move(request), .target = {}, .references = {}};
+    }
+
+    std::vector<dxc::Reference> found;
+    const auto target_identity =
+        workspace::DocumentUri::from_path(target->location.path).identity();
+    for (const auto& root : analysis_.roots()) {
+        context.cancellation.throw_if_cancellation_requested();
+        if (root.root_identity != target_identity &&
+            !root.dependency_identities.contains(target_identity)) {
+            continue;
+        }
+        workspace::SourceSnapshot root_snapshot = [&] {
+            std::scoped_lock state_lock{state_mutex_};
+            if (!documents_.contains(root.root_uri) || !documents_.document(root.root_uri).open) {
+                throw HandlerError{json_rpc::content_modified_code,
+                                   "A referenced root is no longer open"};
+            }
+            return documents_.snapshot(root.root_uri);
+        }();
+        analyze_and_publish(root_snapshot.uri());
+        auto references = analysis_.references(root.root_identity, root_snapshot.version(),
+                                               target->location.path, target->location.line,
+                                               target->location.column, context.cancellation);
+        {
+            std::scoped_lock state_lock{state_mutex_};
+            if (!documents_.contains(root_snapshot.uri()) ||
+                !documents_.document(root_snapshot.uri()).open ||
+                documents_.document(root_snapshot.uri()).version != root_snapshot.version()) {
+                throw HandlerError{json_rpc::content_modified_code,
+                                   "A referenced root changed during analysis"};
+            }
+        }
+        found.insert(found.end(), std::make_move_iterator(references.begin()),
+                     std::make_move_iterator(references.end()));
+    }
+
+    std::ranges::sort(found, [](const auto& left, const auto& right) {
+        const auto left_uri = workspace::DocumentUri::from_path(left.location.path);
+        const auto right_uri = workspace::DocumentUri::from_path(right.location.path);
+        return std::tie(left_uri.identity(), left.start_offset, left.end_offset) <
+               std::tie(right_uri.identity(), right.start_offset, right.end_offset);
+    });
+    found.erase(std::ranges::unique(
+                    found, {},
+                    [](const auto& reference) {
+                        return std::tuple{
+                            workspace::DocumentUri::from_path(reference.location.path).identity(),
+                            reference.start_offset, reference.end_offset};
+                    })
+                    .begin(),
+                found.end());
+
+    {
+        std::scoped_lock state_lock{state_mutex_};
+        if (!documents_.contains(request.uri())) {
+            throw HandlerError{json_rpc::content_modified_code, "Reference request was superseded"};
+        }
+        const auto& latest = documents_.document(request.uri());
+        if (!latest.open || latest.version != request.version()) {
+            throw HandlerError{json_rpc::content_modified_code, "Reference request was superseded"};
+        }
+    }
+    return {.request = std::move(request), .target = *target, .references = std::move(found)};
+}
+
+Json Server::references(const std::optional<Json>& params,
+                        const json_rpc::RequestContext& context) {
+    require_running();
+    const auto& value = object_params(params);
+    const auto uri = string_member(object_member(value, "textDocument"), "uri");
+    const auto request_position = position(object_member(value, "position"));
+    bool include_declaration = true;
+    if (const auto request_context = value.find("context"); request_context != value.end()) {
+        if (!request_context->is_object()) {
+            invalid_params("Reference context must be an object");
+        }
+        if (const auto include = request_context->find("includeDeclaration");
+            include != request_context->end()) {
+            if (!include->is_boolean()) {
+                invalid_params("includeDeclaration must be a boolean");
+            }
+            include_declaration = include->get<bool>();
+        }
+    }
+
+    auto result = find_references(uri, request_position, context);
+    Json locations = Json::array();
+    for (const auto& reference : result.references) {
+        const auto target = workspace::DocumentUri::from_path(reference.location.path);
+        if (!include_declaration &&
+            target.identity() ==
+                workspace::DocumentUri::from_path(result.target.location.path).identity() &&
+            reference.start_offset == result.target.location.offset) {
+            continue;
+        }
+        std::string text;
+        {
+            std::scoped_lock state_lock{state_mutex_};
+            if (documents_.contains(target.uri())) {
+                text = documents_.snapshot(target.uri()).text();
+            }
+        }
+        if (text.empty()) {
+            std::ifstream stream{target.path(), std::ios::binary};
+            if (!stream) {
+                continue;
+            }
+            text = {std::istreambuf_iterator<char>{stream}, std::istreambuf_iterator<char>{}};
+        }
+        const auto start = static_cast<std::size_t>(reference.start_offset);
+        const auto end = static_cast<std::size_t>(reference.end_offset);
+        if (start > end || end > text.size() ||
+            text.substr(start, end - start) != result.target.name) {
+            throw HandlerError{json_rpc::content_modified_code,
+                               "A referenced source file changed after analysis"};
+        }
+        locations.push_back(
+            {{"uri", target.uri()}, {"range", lsp_range(reference_range(text, reference))}});
+    }
+    return locations;
+}
+
+Json Server::prepare_rename(const std::optional<Json>& params,
+                            const json_rpc::RequestContext& context) {
+    require_running();
+    const auto& value = object_params(params);
+    const auto uri = string_member(object_member(value, "textDocument"), "uri");
+    const auto request_position = position(object_member(value, "position"));
+    auto result = find_references(uri, request_position, context);
+    if (result.target.name.empty()) {
+        return nullptr;
+    }
+
+    const auto offset = workspace::utf8_offset_at(result.request.text(), request_position);
+    for (const auto& reference : result.references) {
+        if (workspace::DocumentUri::from_path(reference.location.path).identity() ==
+                result.request.document_uri().identity() &&
+            reference.start_offset <= offset && offset <= reference.end_offset) {
+            return {{"range", lsp_range(reference_range(result.request.text(), reference))},
+                    {"placeholder", result.target.name}};
+        }
+    }
+    return nullptr;
+}
+
+Json Server::rename(const std::optional<Json>& params, const json_rpc::RequestContext& context) {
+    require_running();
+    const auto& value = object_params(params);
+    const auto uri = string_member(object_member(value, "textDocument"), "uri");
+    const auto request_position = position(object_member(value, "position"));
+    const auto new_name = string_member(value, "newName");
+    if (!valid_rename_identifier(new_name)) {
+        invalid_params("Rename requires a non-keyword HLSL identifier");
+    }
+
+    auto result = find_references(uri, request_position, context);
+    if (result.target.name.empty()) {
+        invalid_params("The selected token cannot be renamed");
+    }
+
+    struct FileEdits final {
+        workspace::DocumentUri uri;
+        std::optional<std::int64_t> version;
+        std::string text;
+        std::vector<dxc::Reference> references;
+    };
+    std::map<std::string, FileEdits, std::less<>> files;
+    for (const auto& reference : result.references) {
+        const auto target = workspace::DocumentUri::from_path(reference.location.path);
+        auto [entry, inserted] = files.try_emplace(
+            target.identity(),
+            FileEdits{.uri = target, .version = std::nullopt, .text = {}, .references = {}});
+        if (inserted) {
+            std::scoped_lock state_lock{state_mutex_};
+            if (documents_.contains(target.uri())) {
+                const auto& state = documents_.document(target.uri());
+                entry->second.text = state.text;
+                if (state.open) {
+                    entry->second.version = state.version;
+                }
+            }
+        }
+        entry->second.references.push_back(reference);
+    }
+
+    Json document_changes = Json::array();
+    for (auto& [identity, file] : files) {
+        static_cast<void>(identity);
+        if (file.text.empty()) {
+            std::ifstream stream{file.uri.path(), std::ios::binary};
+            if (!stream) {
+                throw HandlerError{json_rpc::content_modified_code,
+                                   "A referenced source file is no longer available"};
+            }
+            file.text = {std::istreambuf_iterator<char>{stream}, std::istreambuf_iterator<char>{}};
+        }
+        Json edits = Json::array();
+        for (const auto& reference : file.references) {
+            const auto start = static_cast<std::size_t>(reference.start_offset);
+            const auto end = static_cast<std::size_t>(reference.end_offset);
+            if (start > end || end > file.text.size() ||
+                file.text.substr(start, end - start) != result.target.name) {
+                throw HandlerError{json_rpc::content_modified_code,
+                                   "A referenced source file changed after analysis"};
+            }
+            edits.push_back({{"range", lsp_range(reference_range(file.text, reference))},
+                             {"newText", new_name}});
+        }
+        Json version = file.version.has_value() ? Json(*file.version) : Json(nullptr);
+        document_changes.push_back(
+            {{"textDocument", {{"uri", file.uri.uri()}, {"version", std::move(version)}}},
+             {"edits", std::move(edits)}});
+    }
+    return {{"documentChanges", std::move(document_changes)}};
 }
 
 Json Server::hover(const std::optional<Json>& params, const json_rpc::RequestContext& context) {

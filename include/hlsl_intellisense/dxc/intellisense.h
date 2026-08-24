@@ -51,6 +51,12 @@ struct Definition {
     SourceLocation location;
 };
 
+struct Reference {
+    SourceLocation location;
+    std::uint32_t start_offset{};
+    std::uint32_t end_offset{};
+};
+
 struct Hover {
     std::string name;
     std::string qualified_name;
@@ -116,6 +122,8 @@ class TranslationUnit final {
                                                    std::uint32_t column) const;
     [[nodiscard]] std::optional<Definition> definition_at(std::string_view path, std::uint32_t line,
                                                           std::uint32_t column) const;
+    [[nodiscard]] std::vector<Reference> references_at(std::string_view path, std::uint32_t line,
+                                                       std::uint32_t column) const;
     [[nodiscard]] std::optional<Hover> hover_at(std::string_view path, std::uint32_t line,
                                                 std::uint32_t column) const;
     [[nodiscard]] std::vector<Signature> signatures_at(std::string_view path, std::uint32_t line,

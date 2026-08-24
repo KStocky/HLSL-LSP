@@ -1035,6 +1035,80 @@ auto TranslationUnit::definition_at(std::string_view path, std::uint32_t line,
                       .location = make_source_location(*definition_location.get())};
 }
 
+auto TranslationUnit::references_at(std::string_view path, std::uint32_t line,
+                                    std::uint32_t column) const -> std::vector<Reference> {
+    const auto source = std::ranges::find(implementation_->sources, path, &SourceFile::path);
+    if (source == implementation_->sources.end()) {
+        return {};
+    }
+
+    ComPtr<IDxcFile> file;
+    check(implementation_->translation_unit->GetFile(source->path.c_str(), file.put()), "GetFile");
+    ComPtr<IDxcSourceLocation> location;
+    check(implementation_->translation_unit->GetLocation(file.get(), line, column, location.put()),
+          "GetLocation");
+    ComPtr<IDxcCursor> cursor;
+    check(implementation_->translation_unit->GetCursorForLocation(location.get(), cursor.put()),
+          "GetCursorForLocation");
+    if (is_null_cursor(cursor.get())) {
+        return {};
+    }
+
+    ComPtr<IDxcCursor> referenced;
+    check(cursor->GetReferencedCursor(referenced.put()), "GetReferencedCursor");
+    auto* target = is_null_cursor(referenced.get()) ? cursor.get() : referenced.get();
+
+    constexpr unsigned page_size = 256;
+    std::vector<Reference> result;
+    for (const auto& candidate_source : implementation_->sources) {
+        ComPtr<IDxcFile> candidate_file;
+        check(implementation_->translation_unit->GetFile(candidate_source.path.c_str(),
+                                                         candidate_file.put()),
+              "GetFile");
+        for (unsigned skip = 0;; skip += page_size) {
+            unsigned count{};
+            IDxcCursor** raw_references{};
+            check(target->FindReferencesInFile(candidate_file.get(), skip, page_size, &count,
+                                               &raw_references),
+                  "FindReferencesInFile");
+            TaskCursors references{raw_references, count};
+            for (unsigned index = 0; index < count; ++index) {
+                auto* reference = references[index];
+                if (reference == nullptr) {
+                    continue;
+                }
+                ComPtr<IDxcSourceLocation> reference_location;
+                check(reference->GetLocation(reference_location.put()), "GetLocation");
+                const auto resolved = make_source_location(*reference_location.get());
+                const auto identifier = identifier_at(implementation_->sources, resolved.path,
+                                                      resolved.line, resolved.column);
+                if (!identifier.has_value() || identifier->start > UINT32_MAX ||
+                    identifier->end > UINT32_MAX) {
+                    continue;
+                }
+                result.push_back({.location = resolved,
+                                  .start_offset = static_cast<std::uint32_t>(identifier->start),
+                                  .end_offset = static_cast<std::uint32_t>(identifier->end)});
+            }
+            if (count < page_size) {
+                break;
+            }
+        }
+    }
+    std::ranges::sort(result, [](const auto& left, const auto& right) {
+        return std::tie(left.location.path, left.start_offset) <
+               std::tie(right.location.path, right.start_offset);
+    });
+    result.erase(std::ranges::unique(result, {},
+                                     [](const auto& reference) {
+                                         return std::tie(reference.location.path,
+                                                         reference.start_offset);
+                                     })
+                     .begin(),
+                 result.end());
+    return result;
+}
+
 auto TranslationUnit::hover_at(std::string_view path, std::uint32_t line,
                                std::uint32_t column) const -> std::optional<Hover> {
     const auto identifier = identifier_at(implementation_->sources, path, line, column);

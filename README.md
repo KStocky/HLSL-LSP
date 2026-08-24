@@ -69,6 +69,17 @@ including files reached through virtual directory mappings.
 
 ![Go to definition for an HLSL include](art/go-to-definition.png)
 
+### References and rename
+
+Find All References and Rename use DXC cursor identity, so overloads and
+same-named symbols in different scopes remain distinct. Searches cover every
+analyzed root and its transitive includes, including open unsaved buffers.
+Rename validates the new HLSL identifier, versions edits for open documents,
+and rejects the operation if a disk source changed or disappeared after
+analysis. The pinned DXC reference API does not expose macro definition or
+expansion references, so Rename is not offered on macros. Unresolved or
+generated sources that cannot be represented as file URIs are not renamed.
+
 ### Navigation bar
 
 The native Visual Studio navigation bar tracks namespaces, types, functions,

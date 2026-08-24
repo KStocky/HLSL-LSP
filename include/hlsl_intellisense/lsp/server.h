@@ -52,6 +52,8 @@ class Server final {
     [[nodiscard]] int exit_code() const noexcept;
 
   private:
+    struct ReferenceResult;
+
     enum class State { uninitialized, awaiting_initialized, running, shutdown };
 
     void register_handlers();
@@ -61,6 +63,15 @@ class Server final {
                                             const json_rpc::RequestContext& context);
     [[nodiscard]] json_rpc::Json definition(const std::optional<json_rpc::Json>& params,
                                             const json_rpc::RequestContext& context);
+    [[nodiscard]] json_rpc::Json references(const std::optional<json_rpc::Json>& params,
+                                            const json_rpc::RequestContext& context);
+    [[nodiscard]] json_rpc::Json prepare_rename(const std::optional<json_rpc::Json>& params,
+                                                const json_rpc::RequestContext& context);
+    [[nodiscard]] json_rpc::Json rename(const std::optional<json_rpc::Json>& params,
+                                        const json_rpc::RequestContext& context);
+    [[nodiscard]] ReferenceResult find_references(std::string_view uri,
+                                                  const workspace::Position& position,
+                                                  const json_rpc::RequestContext& context);
     [[nodiscard]] json_rpc::Json hover(const std::optional<json_rpc::Json>& params,
                                        const json_rpc::RequestContext& context);
     [[nodiscard]] json_rpc::Json signature_help(const std::optional<json_rpc::Json>& params,

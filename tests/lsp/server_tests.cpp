@@ -622,6 +622,197 @@ TEST_CASE("Hover and signature help reparse unsaved edits", "[lsp][hover][signat
           "float newFunction(float value, float bias)");
 }
 
+TEST_CASE("References and rename preserve identity across open roots and disk includes",
+          "[lsp][references][rename]") {
+    TestDirectory directory;
+    const auto include_path = directory.path() / "shared.hlsli";
+    const std::string include_text = "static const float sharedValue = 1.0;\n";
+    {
+        std::ofstream include{include_path};
+        REQUIRE(include);
+        include << include_text;
+    }
+    const auto first = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "a.hlsl").string());
+    const auto second = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "b.hlsl").string());
+    const std::string first_text = "#include \"shared.hlsli\"\n"
+                                   "float4 main() : SV_Target { float sharedValue = 2.0; return "
+                                   "(sharedValue + ::sharedValue).xxxx; }\n";
+    const std::string second_text = "#include \"shared.hlsli\"\n"
+                                    "float4 main() : SV_Target { return sharedValue.xxxx; }\n";
+
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    hlsl_intellisense::lsp::Server server{
+        [&notifications](const auto& value) { notifications.push_back(value); },
+        {},
+        {.semantic_tokens = true,
+         .background_analysis = false,
+         .request_worker_count = 4,
+         .request_queue_capacity = 64,
+         .analysis =
+             {.scheduler = {.worker_count = 1, .queue_capacity = 8},
+              .limits = {.max_translation_units = 1,
+                         .max_translation_unit_estimated_bytes = std::size_t{64} * 1024U * 1024U,
+                         .opaque_translation_unit_estimate = std::size_t{1024} * 1024U,
+                         .include_cache = {.max_entries = 16,
+                                           .max_estimated_bytes = std::size_t{1024} * 1024U}}},
+         .analysis_hooks = {}}};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    for (const auto& [uri, text] :
+         std::array{std::pair{first.uri(), first_text}, std::pair{second.uri(), second_text}}) {
+        static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+            .method = "textDocument/didOpen",
+            .params =
+                Json{{"textDocument",
+                      {{"uri", uri}, {"languageId", "hlsl"}, {"version", 1}, {"text", text}}}}}));
+    }
+
+    const auto selected = first_text.find("::sharedValue") + 3;
+    const auto references = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{2},
+        .method = "textDocument/references",
+        .params = Json{{"textDocument", {{"uri", first.uri()}}},
+                       {"position", position_at(first_text, selected)},
+                       {"context", {{"includeDeclaration", true}}}}});
+    REQUIRE(references.has_value());
+    const auto* reference_response =
+        std::get_if<hlsl_intellisense::json_rpc::Response>(&*references);
+    REQUIRE(reference_response != nullptr);
+    REQUIRE(reference_response->result.size() == 3);
+
+    const auto without_declaration = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{3},
+        .method = "textDocument/references",
+        .params = Json{{"textDocument", {{"uri", first.uri()}}},
+                       {"position", position_at(first_text, selected)},
+                       {"context", {{"includeDeclaration", false}}}}});
+    REQUIRE(without_declaration.has_value());
+    const auto* without_declaration_response =
+        std::get_if<hlsl_intellisense::json_rpc::Response>(&*without_declaration);
+    REQUIRE(without_declaration_response != nullptr);
+    CHECK(without_declaration_response->result.size() == 2);
+
+    const auto prepare = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{4},
+        .method = "textDocument/prepareRename",
+        .params = Json{{"textDocument", {{"uri", first.uri()}}},
+                       {"position", position_at(first_text, selected)}}});
+    REQUIRE(prepare.has_value());
+    const auto* prepare_response = std::get_if<hlsl_intellisense::json_rpc::Response>(&*prepare);
+    REQUIRE(prepare_response != nullptr);
+    CHECK(prepare_response->result["placeholder"] == "sharedValue");
+
+    const auto rename = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{5},
+        .method = "textDocument/rename",
+        .params = Json{{"textDocument", {{"uri", first.uri()}}},
+                       {"position", position_at(first_text, selected)},
+                       {"newName", "renamedValue"}}});
+    REQUIRE(rename.has_value());
+    const auto* rename_response = std::get_if<hlsl_intellisense::json_rpc::Response>(&*rename);
+    REQUIRE(rename_response != nullptr);
+    const auto& changes = rename_response->result["documentChanges"];
+    REQUIRE(changes.size() == 3);
+    CHECK(std::ranges::count_if(changes, [](const auto& change) {
+              return change["textDocument"]["version"].is_number_integer();
+          }) == 2);
+    CHECK(std::ranges::count_if(changes, [](const auto& change) {
+              return change["textDocument"]["version"].is_null();
+          }) == 1);
+    CHECK(std::ranges::fold_left(changes, std::size_t{}, [](std::size_t count, const auto& change) {
+              return count + change["edits"].size();
+          }) == 3);
+
+    const auto local = first_text.find("sharedValue = 2.0");
+    const auto local_references = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{6},
+        .method = "textDocument/references",
+        .params = Json{{"textDocument", {{"uri", first.uri()}}},
+                       {"position", position_at(first_text, local)},
+                       {"context", {{"includeDeclaration", true}}}}});
+    REQUIRE(local_references.has_value());
+    const auto* local_response =
+        std::get_if<hlsl_intellisense::json_rpc::Response>(&*local_references);
+    REQUIRE(local_response != nullptr);
+    CHECK(local_response->result.size() == 2);
+
+    const auto invalid_rename = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{7},
+        .method = "textDocument/rename",
+        .params = Json{{"textDocument", {{"uri", first.uri()}}},
+                       {"position", position_at(first_text, selected)},
+                       {"newName", "float"}}});
+    REQUIRE(invalid_rename.has_value());
+    const auto* invalid_response =
+        std::get_if<hlsl_intellisense::json_rpc::ErrorResponse>(&*invalid_rename);
+    REQUIRE(invalid_response != nullptr);
+    CHECK(invalid_response->error.code == hlsl_intellisense::json_rpc::invalid_params_code);
+}
+
+TEST_CASE("Rename rejects disk sources changed after analysis",
+          "[lsp][references][rename][safety]") {
+    TestDirectory directory;
+    const auto include_path = directory.path() / "shared.hlsli";
+    {
+        std::ofstream include{include_path};
+        REQUIRE(include);
+        include << "static const float sharedValue = 1.0;\n";
+    }
+    const auto root = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "root.hlsl").string());
+    const std::string source =
+        "#include \"shared.hlsli\"\nfloat4 main() : SV_Target { return sharedValue.xxxx; }\n";
+    auto hooks = std::make_shared<hlsl_intellisense::analysis::AnalysisHooks>();
+    std::atomic_int interactive_calls{};
+    std::promise<void> reference_entered;
+    std::promise<void> release_reference;
+    auto released = release_reference.get_future().share();
+    hooks->before_interactive = [&](std::string_view) {
+        if (interactive_calls.fetch_add(1) + 1 == 2) {
+            reference_entered.set_value();
+            released.wait();
+        }
+    };
+    hlsl_intellisense::lsp::ServerOptions options;
+    options.analysis_hooks = hooks;
+    hlsl_intellisense::lsp::Server server{[](const auto&) {}, {}, options};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params = Json{
+            {"textDocument",
+             {{"uri", root.uri()}, {"languageId", "hlsl"}, {"version", 1}, {"text", source}}}}}));
+
+    auto response = std::async(std::launch::async, [&] {
+        return server.handle(hlsl_intellisense::json_rpc::Request{
+            .id = std::int64_t{2},
+            .method = "textDocument/rename",
+            .params = Json{{"textDocument", {{"uri", root.uri()}}},
+                           {"position", position_at(source, source.find("sharedValue"))},
+                           {"newName", "renamedValue"}}});
+    });
+    reference_entered.get_future().wait();
+    {
+        std::ofstream include{include_path, std::ios::trunc};
+        REQUIRE(include);
+        include << "// externally changed\n";
+    }
+    release_reference.set_value();
+
+    const auto result = response.get();
+    REQUIRE(result.has_value());
+    const auto* error = std::get_if<hlsl_intellisense::json_rpc::ErrorResponse>(&*result);
+    REQUIRE(error != nullptr);
+    CHECK(error->error.code == hlsl_intellisense::json_rpc::content_modified_code);
+}
+
 TEST_CASE("Server can disable semantic tokens for incompatible clients", "[lsp][navigation]") {
     std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
     hlsl_intellisense::lsp::Server server{
@@ -641,6 +832,8 @@ TEST_CASE("Server can disable semantic tokens for incompatible clients", "[lsp][
     REQUIRE(response != nullptr);
     CHECK_FALSE(response->result["capabilities"].contains("semanticTokensProvider"));
     CHECK(response->result["capabilities"]["definitionProvider"] == true);
+    CHECK(response->result["capabilities"]["referencesProvider"] == true);
+    CHECK(response->result["capabilities"]["renameProvider"]["prepareProvider"] == true);
 }
 
 TEST_CASE("Framed LSP session publishes diagnostics and completes HLSL 2021",
