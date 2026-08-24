@@ -1,0 +1,194 @@
+{
+  "name": "hlsl-lsp",
+  "displayName": "HLSL-LSP",
+  "description": "DXC-powered HLSL IntelliSense through the Language Server Protocol.",
+  "version": "0.1.0",
+  "publisher": "KStocky",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/KStocky/HLSL-LSP.git"
+  },
+  "bugs": {
+    "url": "https://github.com/KStocky/HLSL-LSP/issues"
+  },
+  "homepage": "https://github.com/KStocky/HLSL-LSP#readme",
+  "categories": [
+    "Programming Languages",
+    "Linters"
+  ],
+  "keywords": [
+    "hlsl",
+    "shader",
+    "dxc",
+    "language-server",
+    "intellisense",
+    "directx"
+  ],
+  "engines": {
+    "vscode": "^1.96.0"
+  },
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onLanguage:hlsl",
+    "onCommand:hlsl.restartServer",
+    "onCommand:hlsl.stopServer",
+    "onCommand:hlsl.showOutput",
+    "onCommand:hlsl.showDiagnostics"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "HLSL-LSP executes a native language server and reads shader include files."
+    },
+    "virtualWorkspaces": false
+  },
+  "contributes": {
+    "languages": [
+      {
+        "id": "hlsl",
+        "aliases": [
+          "HLSL",
+          "High Level Shader Language"
+        ],
+        "extensions": [
+          ".hlsl",
+          ".hlsli",
+          ".usf"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "hlsl.restartServer",
+        "title": "HLSL: Restart Language Server",
+        "category": "HLSL"
+      },
+      {
+        "command": "hlsl.stopServer",
+        "title": "HLSL: Stop Language Server",
+        "category": "HLSL"
+      },
+      {
+        "command": "hlsl.showOutput",
+        "title": "HLSL: Show Language Server Output",
+        "category": "HLSL"
+      },
+      {
+        "command": "hlsl.showDiagnostics",
+        "title": "HLSL: Show Client Diagnostics",
+        "category": "HLSL"
+      }
+    ],
+    "configuration": {
+      "title": "HLSL-LSP",
+      "properties": {
+        "hlsl.server.path": {
+          "type": "string",
+          "default": "",
+          "scope": "machine-overridable",
+          "description": "Path to an external hlsl-lsp executable. The first workspace folder selects this setting for the window and resolves a relative path. When empty, the platform-specific bundled server is required."
+        },
+        "hlsl.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "scope": "window",
+          "description": "Controls Language Server Protocol tracing in the HLSL-LSP output channel."
+        },
+        "hlsl.languageVersion": {
+          "type": "string",
+          "enum": [
+            "2016",
+            "2018",
+            "2021",
+            "202x"
+          ],
+          "default": "2021",
+          "scope": "window",
+          "description": "Default DXC HLSL language version. An explicitly configured editor value overrides shadertoolsconfig.json; the default does not."
+        },
+        "hlsl.preprocessorDefinitions": {
+          "type": "object",
+          "scope": "window",
+          "additionalProperties": {
+            "type": [
+              "string",
+              "number",
+              "boolean"
+            ]
+          },
+          "description": "DXC preprocessor definitions. An explicitly configured object replaces file-derived definitions; use an empty object to clear them."
+        },
+        "hlsl.additionalIncludeDirectories": {
+          "type": "array",
+          "scope": "window",
+          "items": {
+            "type": "string"
+          },
+          "description": "Existing DXC include directories. The value is selected from the first workspace folder; relative paths are resolved by the server from the folder containing each shader. An explicitly configured array replaces file-derived directories."
+        },
+        "hlsl.virtualDirectoryMappings": {
+          "type": "object",
+          "scope": "window",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Virtual include roots (keys beginning with / or \\) mapped to existing directories. The value is selected from the first workspace folder; relative targets are resolved by the server from the folder containing each shader."
+        },
+        "hlsl.targetProfile": {
+          "type": "string",
+          "scope": "window",
+          "description": "Optional DXC target profile, such as ps_6_6 or lib_6_8. When explicitly configured, this overrides shadertoolsconfig.json."
+        },
+        "hlsl.entryPoint": {
+          "type": "string",
+          "scope": "window",
+          "description": "Optional shader entry point supplied to DXC. When explicitly configured, this overrides shadertoolsconfig.json."
+        },
+        "hlsl.additionalArguments": {
+          "type": "array",
+          "scope": "window",
+          "items": {
+            "type": "string"
+          },
+          "description": "Additional DXC arguments, for example -enable-16bit-types. An explicitly configured array replaces file-derived arguments."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "clean": "node scripts/clean.mjs",
+    "compile": "tsc -p tsconfig.json",
+    "build": "npm run typecheck && node scripts/build.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test:unit": "npm run compile && node --test dist/test/unit/index.test.js",
+    "test:integration": "npm run compile && npm run build && node scripts/run-integration.mjs",
+    "stage:runtime": "node scripts/stage-runtime.mjs",
+    "package": "npm run build && vsce package --no-dependencies --out hlsl-lsp-vscode.vsix",
+    "check": "npm run typecheck && npm run lint && npm run format:check && npm run test:unit"
+  },
+  "dependencies": {
+    "vscode-languageclient": "10.1.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/node": "22.20.1",
+    "@types/vscode": "1.96.0",
+    "@vscode/test-electron": "3.1.0",
+    "@vscode/vsce": "3.9.2",
+    "esbuild": "0.28.2",
+    "eslint": "10.0.0",
+    "prettier": "3.9.6",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.67.0"
+  }
+}

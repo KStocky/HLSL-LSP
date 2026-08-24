@@ -1,0 +1,17 @@
+.github/**
+.test-data/**
+.vscode-test/**
+.gitignore
+src/**
+test/**
+scripts/**
+server/**/README.md
+.prettierignore
+.vscodeignore
+eslint.config.mjs
+tsconfig.json
+**/*.map
+dist/src/**
+dist/test/**
+node_modules/**
+*.vsix

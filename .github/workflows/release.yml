@@ -1,4 +1,4 @@
-name: Release Visual Studio VSIX
+name: Release editor VSIX packages
 
 on:
   release:
@@ -66,4 +66,72 @@ jobs:
         run: |
           gh release upload '${{ github.event.release.tag_name }}' `
             clients/visual-studio/HlslLsp.VisualStudio/bin/Release/net472/HlslLsp.VisualStudio.vsix `
+            --clobber
+
+  build-vscode-vsix:
+    name: Build Visual Studio Code VSIX
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out HLSL-LSP
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: clients/vscode/package-lock.json
+
+      - name: Build release server
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+          Import-Module "$vs\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation `
+            -DevCmdArguments '-arch=x64 -host_arch=x64'
+
+          cmake -S . -B out/build/vscode-release -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            "-DCMAKE_CXX_COMPILER=cl.exe" `
+            -DBUILD_TESTING=OFF
+          cmake --build out/build/vscode-release --target hlsl-lsp
+
+      - name: Install and stage VS Code client
+        working-directory: clients/vscode
+        shell: pwsh
+        run: |
+          npm ci
+          npm run stage:runtime -- --server-dir ..\..\out\build\vscode-release
+
+      - name: Check and test VS Code client
+        working-directory: clients/vscode
+        run: npm run check
+
+      - name: Run extension-host smoke tests
+        working-directory: clients/vscode
+        run: npm run test:integration -- --server-path server\win32-x64\hlsl-lsp.exe
+
+      - name: Package VS Code VSIX
+        working-directory: clients/vscode
+        run: npm run package
+
+      - name: Upload VS Code VSIX workflow artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: HLSL-LSP-Visual-Studio-Code
+          path: clients/vscode/hlsl-lsp-vscode.vsix
+          if-no-files-found: error
+
+      - name: Attach VS Code VSIX to GitHub release
+        if: github.event_name == 'release'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload '${{ github.event.release.tag_name }}' `
+            clients/vscode/hlsl-lsp-vscode.vsix `
             --clobber
