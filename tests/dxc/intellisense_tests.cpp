@@ -333,6 +333,54 @@ TEST_CASE("Pinned DXC runtime supports the complete Linux IntelliSense workflow"
     }));
 }
 
+TEST_CASE("DXC references preserve symbol identity across scopes, overloads, and includes",
+          "[dxc][references][integration]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    const auto root = (std::filesystem::current_path() / "references.hlsl").generic_string();
+    const auto include = (std::filesystem::current_path() / "references.hlsli").generic_string();
+    const std::string root_source = "#include \"references.hlsli\"\n"
+                                    "float select(float value) { return value; }\n"
+                                    "float select(int value) { return value; }\n"
+                                    "float4 main() : SV_Target {\n"
+                                    "  float value = select(sharedValue);\n"
+                                    "  { float sharedValue = 2.0; value += sharedValue; }\n"
+                                    "  return value.xxxx;\n"
+                                    "}\n";
+    const std::string include_source = "static const float sharedValue = 1.0;\n";
+    auto translation_unit =
+        intellisense.parse(root, {{root, root_source}, {include, include_source}});
+    REQUIRE(translation_unit.diagnostics().empty());
+
+    const auto global = translation_unit.references_at(root, 5, 24);
+    REQUIRE(global.size() == 2);
+    CHECK(global[0].location.path == root);
+    CHECK(global[0].location.line == 5);
+    CHECK(global[1].location.path == include);
+
+    const auto local = translation_unit.references_at(root, 6, 44);
+    REQUIRE(local.size() == 2);
+    CHECK(local[0].location.line == 6);
+    CHECK(local[1].location.line == 6);
+
+    const auto overload = translation_unit.references_at(root, 5, 17);
+    REQUIRE(overload.size() == 2);
+    CHECK(overload[0].location.line == 2);
+    CHECK(overload[1].location.line == 5);
+}
+
+TEST_CASE("DXC reference API does not expose macro definitions and expansions",
+          "[dxc][references][macros]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    const auto root = (std::filesystem::current_path() / "macro-references.hlsl").generic_string();
+    const std::string source = "#define EXPAND(value) ((value) + 1.0)\n"
+                               "float4 main() : SV_Target { return EXPAND(2.0).xxxx; }\n";
+    auto translation_unit = intellisense.parse(root, {{root, source}});
+    REQUIRE(translation_unit.diagnostics().empty());
+
+    const auto references = translation_unit.references_at(root, 2, 36);
+    CHECK(references.empty());
+}
+
 TEST_CASE("DXC IntelliSense exposes hover and overload signatures for HLSL 2021",
           "[dxc][hover][signature-help][integration]") {
     hlsl_intellisense::dxc::Intellisense intellisense;

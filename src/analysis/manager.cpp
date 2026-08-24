@@ -580,6 +580,17 @@ Manager::definition(std::string root_identity, std::int64_t version, std::string
         });
 }
 
+std::vector<dxc::Reference> Manager::references(std::string root_identity, std::int64_t version,
+                                                std::string path, std::uint32_t line,
+                                                std::uint32_t column,
+                                                const json_rpc::CancellationToken& cancellation) {
+    return implementation_->query<std::vector<dxc::Reference>>(
+        std::move(root_identity), version, cancellation,
+        [requested_path = std::move(path), line, column](Impl::Entry& entry) {
+            return entry.translation_unit.references_at(requested_path, line, column);
+        });
+}
+
 std::optional<dxc::Hover> Manager::hover(std::string root_identity, std::int64_t version,
                                          std::string path, std::uint32_t line, std::uint32_t column,
                                          const json_rpc::CancellationToken& cancellation) {
