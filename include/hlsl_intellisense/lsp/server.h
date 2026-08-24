@@ -24,6 +24,8 @@ namespace hlsl_intellisense::lsp {
 struct ServerOptions {
     bool semantic_tokens{true};
     bool background_analysis{};
+    bool protocol_trace{};
+    bool trace_source{};
     std::size_t request_worker_count{4};
     std::size_t request_queue_capacity{64};
     analysis::AnalysisOptions analysis{};

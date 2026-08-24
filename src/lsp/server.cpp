@@ -7,6 +7,7 @@
 #include <hlsl_intellisense/workspace/text_position.h>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <condition_variable>
 #include <cstdint>
@@ -1281,7 +1282,7 @@ Json Server::initialize(const std::optional<Json>& params) {
             {"range", false}};
     }
     return {{"capabilities", std::move(capabilities)},
-            {"serverInfo", {{"name", "HLSL-LSP"}, {"version", "0.4.0"}}}};
+            {"serverInfo", {{"name", "HLSL-LSP"}, {"version", HLSL_LSP_VERSION}}}};
 }
 
 Json Server::shutdown(const std::optional<Json>& params) {
@@ -2368,6 +2369,47 @@ void Server::log(std::string_view message) const {
 
 namespace {
 
+Json summarize_protocol_payload(const Json& value, std::size_t payload_size) {
+    if (!value.is_object()) {
+        return "<redacted " + std::to_string(payload_size) + " byte payload>";
+    }
+
+    Json summary = Json::object();
+    if (const auto jsonrpc = value.find("jsonrpc");
+        jsonrpc != value.end() && jsonrpc->is_string()) {
+        summary["jsonrpc"] = *jsonrpc;
+    }
+    if (const auto method = value.find("method"); method != value.end() && method->is_string()) {
+        summary["method"] = *method;
+    }
+    if (const auto id = value.find("id"); id != value.end()) {
+        summary["id"] = id->is_number() || id->is_null() ? *id : Json{"<redacted>"};
+    }
+
+    constexpr std::array content_keys{"params", "result", "error"};
+    for (const auto key : content_keys) {
+        if (value.contains(key)) {
+            summary[key] = "<redacted " + std::to_string(payload_size) + " byte protocol payload>";
+        }
+    }
+    return summary;
+}
+
+void trace_payload(std::ostream& errors, std::mutex& mutex, std::string_view direction,
+                   std::string_view payload, bool include_source) {
+    auto value = Json::parse(payload, nullptr, false);
+    std::scoped_lock lock{mutex};
+    if (value.is_discarded()) {
+        errors << "HLSL-LSP trace " << direction << ": <unparseable " << payload.size()
+               << " bytes>\n";
+        return;
+    }
+    if (!include_source) {
+        value = summarize_protocol_payload(value, payload.size());
+    }
+    errors << "HLSL-LSP trace " << direction << ": " << value.dump() << '\n';
+}
+
 class RequestExecutor final {
   public:
     RequestExecutor(std::size_t worker_count, std::size_t capacity) : capacity_{capacity} {
@@ -2465,9 +2507,15 @@ int run(std::istream& input, std::ostream& output, std::ostream& errors, ServerO
         std::mutex output_mutex;
         std::mutex error_mutex;
         json_rpc::FrameWriter writer{output};
-        Server server{[&writer, &output_mutex](const json_rpc::Notification& notification) {
-                          std::scoped_lock lock{output_mutex};
-                          writer.write(json_rpc::serialize(json_rpc::Message{notification}));
+        const auto write_payload = [&](const std::string& payload) {
+            if (options.protocol_trace) {
+                trace_payload(errors, error_mutex, "send", payload, options.trace_source);
+            }
+            std::scoped_lock lock{output_mutex};
+            writer.write(payload);
+        };
+        Server server{[&write_payload](const json_rpc::Notification& notification) {
+                          write_payload(json_rpc::serialize(json_rpc::Message{notification}));
                       },
                       [&errors, &error_mutex](std::string_view message) {
                           std::scoped_lock lock{error_mutex};
@@ -2482,25 +2530,25 @@ int run(std::istream& input, std::ostream& output, std::ostream& errors, ServerO
             if (!payload.has_value()) {
                 break;
             }
+            if (options.protocol_trace) {
+                trace_payload(errors, error_mutex, "receive", *payload, options.trace_source);
+            }
             const auto parsed = json_rpc::parse_message(*payload);
             if (parsed.error.has_value()) {
-                std::scoped_lock lock{output_mutex};
-                writer.write(json_rpc::serialize(json_rpc::DispatchResponse{*parsed.error}));
+                write_payload(json_rpc::serialize(json_rpc::DispatchResponse{*parsed.error}));
                 continue;
             }
             if (const auto* request = std::get_if<json_rpc::Request>(&*parsed.message)) {
                 const auto cancellation = server.begin_request(request->id);
                 if (request->method == "initialize" || request->method == "shutdown") {
                     const auto response = server.handle(*request, cancellation);
-                    std::scoped_lock lock{output_mutex};
-                    writer.write(json_rpc::serialize(response));
+                    write_payload(json_rpc::serialize(response));
                     continue;
                 }
-                const auto accepted = requests.submit(
-                    [&server, &writer, &output_mutex, request = *request, cancellation] {
+                const auto accepted =
+                    requests.submit([&server, &write_payload, request = *request, cancellation] {
                         const auto response = server.handle(request, cancellation);
-                        std::scoped_lock lock{output_mutex};
-                        writer.write(json_rpc::serialize(response));
+                        write_payload(json_rpc::serialize(response));
                     });
                 if (!accepted) {
                     cancellation.cancel();
@@ -2509,8 +2557,7 @@ int run(std::istream& input, std::ostream& output, std::ostream& errors, ServerO
                         .id = request->id,
                         .error = {
                             .code = -32000, .message = "Request queue full", .data = std::nullopt}};
-                    std::scoped_lock lock{output_mutex};
-                    writer.write(json_rpc::serialize(json_rpc::DispatchResponse{response}));
+                    write_payload(json_rpc::serialize(json_rpc::DispatchResponse{response}));
                 }
             } else {
                 static_cast<void>(server.handle(*parsed.message));
