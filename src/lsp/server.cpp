@@ -8,13 +8,16 @@
 
 #include <algorithm>
 #include <cctype>
+#include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <limits>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -313,6 +316,7 @@ void append_document_symbols(Json& output, const std::vector<dxc::Symbol>& symbo
            }).begin() != text.end();
 }
 
+// NOLINTBEGIN(bugprone-easily-swappable-parameters)
 void append_workspace_symbols(Json& output, const std::vector<dxc::Symbol>& symbols,
                               const workspace::SourceSnapshot& snapshot, std::string_view query,
                               std::string_view container) {
@@ -342,6 +346,7 @@ void append_workspace_symbols(Json& output, const std::vector<dxc::Symbol>& symb
         append_workspace_symbols(output, symbol.children, snapshot, query, nested_container);
     }
 }
+// NOLINTEND(bugprone-easily-swappable-parameters)
 
 enum class SemanticTokenType : std::uint8_t {
     namespace_name,
@@ -914,11 +919,21 @@ optional_string_setting(const Json& settings, const Json* hlsl, std::string_view
 } // namespace
 
 Server::Server(NotificationSender sender, Logger logger, ServerOptions options)
-    : sender_{std::move(sender)}, logger_{std::move(logger)}, options_{options} {
+    : sender_{std::move(sender)}, logger_{std::move(logger)}, options_{std::move(options)},
+      analysis_{[this](const auto& snapshot, const auto& diagnostics, std::uint64_t generation) {
+                    analysis_completed(snapshot, diagnostics, generation);
+                },
+                options_.analysis, options_.analysis_hooks,
+                [this](std::string_view message) { log(message); }} {
     if (!sender_) {
         throw std::invalid_argument{"The LSP server requires a notification sender"};
     }
     register_handlers();
+}
+
+Server::~Server() {
+    cancel_all_requests();
+    analysis_.shutdown();
 }
 
 void Server::register_handlers() {
@@ -926,24 +941,32 @@ void Server::register_handlers() {
                                          [this](const auto& params) { return initialize(params); });
     dispatcher_.register_request_handler("shutdown",
                                          [this](const auto& params) { return shutdown(params); });
-    dispatcher_.register_request_handler("textDocument/completion",
-                                         [this](const auto& params) { return completion(params); });
-    dispatcher_.register_request_handler("textDocument/definition",
-                                         [this](const auto& params) { return definition(params); });
-    dispatcher_.register_request_handler("textDocument/hover",
-                                         [this](const auto& params) { return hover(params); });
-    dispatcher_.register_request_handler("textDocument/signatureHelp", [this](const auto& params) {
-        return signature_help(params);
-    });
-    dispatcher_.register_request_handler("textDocument/documentSymbol", [this](const auto& params) {
-        return document_symbols(params);
-    });
     dispatcher_.register_request_handler(
-        "workspace/symbol", [this](const auto& params) { return workspace_symbols(params); });
+        "textDocument/completion",
+        [this](const auto& params, const auto& context) { return completion(params, context); });
+    dispatcher_.register_request_handler(
+        "textDocument/definition",
+        [this](const auto& params, const auto& context) { return definition(params, context); });
+    dispatcher_.register_request_handler(
+        "textDocument/hover",
+        [this](const auto& params, const auto& context) { return hover(params, context); });
+    dispatcher_.register_request_handler("textDocument/signatureHelp",
+                                         [this](const auto& params, const auto& context) {
+                                             return signature_help(params, context);
+                                         });
+    dispatcher_.register_request_handler("textDocument/documentSymbol",
+                                         [this](const auto& params, const auto& context) {
+                                             return document_symbols(params, context);
+                                         });
+    dispatcher_.register_request_handler("workspace/symbol",
+                                         [this](const auto& params, const auto& context) {
+                                             return workspace_symbols(params, context);
+                                         });
     if (options_.semantic_tokens) {
-        dispatcher_.register_request_handler(
-            "textDocument/semanticTokens/full",
-            [this](const auto& params) { return semantic_tokens(params); });
+        dispatcher_.register_request_handler("textDocument/semanticTokens/full",
+                                             [this](const auto& params, const auto& context) {
+                                                 return semantic_tokens(params, context);
+                                             });
     }
     dispatcher_.register_notification_handler("initialized",
                                               [this](const auto& params) { initialized(params); });
@@ -972,33 +995,72 @@ void Server::register_handlers() {
 
 std::optional<json_rpc::DispatchResponse> Server::handle(const json_rpc::Message& message) {
     if (const auto* request = std::get_if<json_rpc::Request>(&message)) {
-        if (state_ == State::uninitialized && request->method != "initialize") {
-            return json_rpc::ErrorResponse{.id = request->id,
+        return handle(*request, dispatcher_.begin_request(request->id));
+    }
+    return dispatcher_.dispatch(message);
+}
+
+json_rpc::DispatchResponse Server::handle(const json_rpc::Request& request,
+                                          const json_rpc::CancellationToken& cancellation) {
+    if (cancellation.is_cancellation_requested()) {
+        dispatcher_.finish_request(request.id, cancellation);
+        return json_rpc::ErrorResponse{.id = request.id,
+                                       .error = {.code = json_rpc::request_cancelled_code,
+                                                 .message = "Request cancelled",
+                                                 .data = std::nullopt}};
+    }
+    {
+        std::scoped_lock lock{state_mutex_};
+        if (state_ == State::uninitialized && request.method != "initialize") {
+            dispatcher_.finish_request(request.id, cancellation);
+            return json_rpc::ErrorResponse{.id = request.id,
                                            .error = {.code = -32002,
                                                      .message = "Server not initialized",
                                                      .data = std::nullopt}};
         }
         if (state_ == State::awaiting_initialized) {
-            return json_rpc::ErrorResponse{.id = request->id,
+            dispatcher_.finish_request(request.id, cancellation);
+            return json_rpc::ErrorResponse{.id = request.id,
                                            .error = {.code = -32002,
                                                      .message = "Server not initialized",
                                                      .data = std::nullopt}};
         }
         if (state_ == State::shutdown) {
-            return json_rpc::ErrorResponse{.id = request->id,
+            dispatcher_.finish_request(request.id, cancellation);
+            return json_rpc::ErrorResponse{.id = request.id,
                                            .error = {.code = json_rpc::invalid_request_code,
                                                      .message = "Server has shut down",
                                                      .data = std::nullopt}};
         }
     }
-    return dispatcher_.dispatch(message);
+    auto response = dispatcher_.dispatch(request, cancellation);
+    dispatcher_.finish_request(request.id, cancellation);
+    return response;
 }
 
-bool Server::exit_requested() const noexcept { return exit_requested_; }
+json_rpc::CancellationToken Server::begin_request(const json_rpc::RequestId& id) const {
+    return dispatcher_.begin_request(id);
+}
+
+void Server::finish_request(const json_rpc::RequestId& id,
+                            const json_rpc::CancellationToken& cancellation) const noexcept {
+    dispatcher_.finish_request(id, cancellation);
+}
+
+void Server::cancel_all_requests() const noexcept { dispatcher_.cancel_all(); }
+
+void Server::wait_for_analysis() { analysis_.wait_idle(); }
+
+analysis::AnalysisMetrics Server::analysis_metrics() const noexcept { return analysis_.metrics(); }
+
+bool Server::exit_requested() const noexcept {
+    return exit_requested_.load(std::memory_order_acquire);
+}
 
 int Server::exit_code() const noexcept { return clean_shutdown_ ? 0 : 1; }
 
 Json Server::initialize(const std::optional<Json>& params) {
+    std::scoped_lock state_lock{state_mutex_};
     if (state_ != State::uninitialized) {
         throw HandlerError{json_rpc::invalid_request_code, "Initialize may only be requested once"};
     }
@@ -1066,6 +1128,7 @@ Json Server::initialize(const std::optional<Json>& params) {
 }
 
 Json Server::shutdown(const std::optional<Json>& params) {
+    std::scoped_lock state_lock{state_mutex_};
     if (params.has_value() && !params->is_null()) {
         invalid_params("Shutdown does not accept parameters");
     }
@@ -1077,7 +1140,8 @@ Json Server::shutdown(const std::optional<Json>& params) {
     return nullptr;
 }
 
-Json Server::completion(const std::optional<Json>& params) {
+Json Server::completion(const std::optional<Json>& params,
+                        const json_rpc::RequestContext& context) {
     require_running();
     const auto& value = object_params(params);
     const auto& text_document = object_member(value, "textDocument");
@@ -1085,6 +1149,7 @@ Json Server::completion(const std::optional<Json>& params) {
     const auto request_position = position(object_member(value, "position"));
 
     workspace::SourceSnapshot snapshot = [&] {
+        std::scoped_lock state_lock{state_mutex_};
         try {
             const auto& state = documents_.document(uri);
             if (!state.open) {
@@ -1096,13 +1161,18 @@ Json Server::completion(const std::optional<Json>& params) {
         }
     }();
 
-    const auto analysis = analyses_.find(snapshot.document_uri().identity());
-    if (analysis == analyses_.end() || analysis->second.version != snapshot.version()) {
-        invalid_params("Completion analysis is stale");
-    }
+    analyze_and_publish(snapshot.uri());
     const auto [line, column] = dxc_position(snapshot.text(), request_position);
     const auto completions =
-        analysis->second.translation_unit.complete(analysis->second.dxc_root_path, line, column);
+        analysis_.complete(snapshot.document_uri().identity(), snapshot.version(), snapshot.path(),
+                           line, column, context.cancellation);
+    {
+        std::scoped_lock state_lock{state_mutex_};
+        if (!documents_.contains(snapshot.uri()) ||
+            documents_.snapshot(snapshot.uri()).version() != snapshot.version()) {
+            throw HandlerError{json_rpc::content_modified_code, "Completion was superseded"};
+        }
+    }
 
     Json items = Json::array();
     for (const auto& completion_item : completions) {
@@ -1113,13 +1183,15 @@ Json Server::completion(const std::optional<Json>& params) {
     return {{"isIncomplete", false}, {"items", std::move(items)}};
 }
 
-Json Server::definition(const std::optional<Json>& params) {
+Json Server::definition(const std::optional<Json>& params,
+                        const json_rpc::RequestContext& context) {
     require_running();
     const auto& value = object_params(params);
     const auto uri = string_member(object_member(value, "textDocument"), "uri");
     const auto request_position = position(object_member(value, "position"));
 
     workspace::SourceSnapshot snapshot = [&] {
+        std::scoped_lock state_lock{state_mutex_};
         try {
             const auto& state = documents_.document(uri);
             if (!state.open) {
@@ -1137,32 +1209,47 @@ Json Server::definition(const std::optional<Json>& params) {
             invalid_params(error.what());
         }
     }();
-    const auto configuration = configuration_for(snapshot, editor_settings_);
-    const auto include_target = workspace::resolve_include_at(snapshot, documents_.open_snapshots(),
-                                                              configuration, utf8_offset);
+    workspace::WorkspaceConfiguration configuration;
+    std::vector<workspace::SourceSnapshot> open_documents;
+    {
+        std::scoped_lock state_lock{state_mutex_};
+        configuration = configuration_for(snapshot, editor_settings_);
+        open_documents = documents_.open_snapshots();
+    }
+    context.cancellation.throw_if_cancellation_requested();
+    const auto include_target =
+        workspace::resolve_include_at(snapshot, open_documents, configuration, utf8_offset);
     if (include_target) {
         const auto target = workspace::DocumentUri::from_path(include_target->string());
         const workspace::Position start{};
         return {{"uri", target.uri()}, {"range", lsp_range({.start = start, .end = start})}};
     }
 
-    const auto analysis = analyses_.find(snapshot.document_uri().identity());
-    if (analysis == analyses_.end() || analysis->second.version != snapshot.version()) {
-        invalid_params("Definition analysis is stale");
-    }
-
+    analyze_and_publish(snapshot.uri());
     const auto [line, column] = dxc_position(snapshot.text(), request_position);
-    const auto definition = analysis->second.translation_unit.definition_at(
-        analysis->second.dxc_root_path, line, column);
+    const auto definition =
+        analysis_.definition(snapshot.document_uri().identity(), snapshot.version(),
+                             snapshot.path(), line, column, context.cancellation);
+    {
+        std::scoped_lock state_lock{state_mutex_};
+        if (!documents_.contains(snapshot.uri()) ||
+            documents_.snapshot(snapshot.uri()).version() != snapshot.version()) {
+            throw HandlerError{json_rpc::content_modified_code, "Definition was superseded"};
+        }
+    }
     if (!definition.has_value()) {
         return nullptr;
     }
 
     const auto target = workspace::DocumentUri::from_path(definition->location.path);
     std::string target_text;
-    if (documents_.contains(target.uri())) {
-        target_text = documents_.snapshot(target.uri()).text();
-    } else {
+    {
+        std::scoped_lock state_lock{state_mutex_};
+        if (documents_.contains(target.uri())) {
+            target_text = documents_.snapshot(target.uri()).text();
+        }
+    }
+    if (target_text.empty()) {
         std::ifstream stream{target.path(), std::ios::binary};
         target_text = {std::istreambuf_iterator<char>{stream}, std::istreambuf_iterator<char>{}};
     }
@@ -1184,13 +1271,14 @@ Json Server::definition(const std::optional<Json>& params) {
     return {{"uri", target.uri()}, {"range", lsp_range({.start = start, .end = end})}};
 }
 
-Json Server::hover(const std::optional<Json>& params) {
+Json Server::hover(const std::optional<Json>& params, const json_rpc::RequestContext& context) {
     require_running();
     const auto& value = object_params(params);
     const auto uri = string_member(object_member(value, "textDocument"), "uri");
     const auto request_position = position(object_member(value, "position"));
 
     workspace::SourceSnapshot snapshot = [&] {
+        std::scoped_lock state_lock{state_mutex_};
         try {
             const auto& state = documents_.document(uri);
             if (!state.open) {
@@ -1201,11 +1289,6 @@ Json Server::hover(const std::optional<Json>& params) {
             invalid_params(error.what());
         }
     }();
-    const auto analysis = analyses_.find(snapshot.document_uri().identity());
-    if (analysis == analyses_.end() || analysis->second.version != snapshot.version()) {
-        invalid_params("Hover analysis is stale");
-    }
-
     const auto request_offset = [&] {
         try {
             return workspace::utf8_offset_at(snapshot.text(), request_position);
@@ -1221,9 +1304,17 @@ Json Server::hover(const std::optional<Json>& params) {
         return nullptr;
     }
 
+    analyze_and_publish(snapshot.uri());
     const auto [line, column] = dxc_position(snapshot.text(), request_position);
-    const auto information =
-        analysis->second.translation_unit.hover_at(analysis->second.dxc_root_path, line, column);
+    const auto information = analysis_.hover(snapshot.document_uri().identity(), snapshot.version(),
+                                             snapshot.path(), line, column, context.cancellation);
+    {
+        std::scoped_lock state_lock{state_mutex_};
+        if (!documents_.contains(snapshot.uri()) ||
+            documents_.snapshot(snapshot.uri()).version() != snapshot.version()) {
+            throw HandlerError{json_rpc::content_modified_code, "Hover was superseded"};
+        }
+    }
     if (!information.has_value()) {
         return nullptr;
     }
@@ -1269,13 +1360,15 @@ Json Server::hover(const std::optional<Json>& params) {
     return result;
 }
 
-Json Server::signature_help(const std::optional<Json>& params) {
+Json Server::signature_help(const std::optional<Json>& params,
+                            const json_rpc::RequestContext& context) {
     require_running();
     const auto& value = object_params(params);
     const auto uri = string_member(object_member(value, "textDocument"), "uri");
     const auto request_position = position(object_member(value, "position"));
 
     workspace::SourceSnapshot snapshot = [&] {
+        std::scoped_lock state_lock{state_mutex_};
         try {
             const auto& state = documents_.document(uri);
             if (!state.open) {
@@ -1286,11 +1379,6 @@ Json Server::signature_help(const std::optional<Json>& params) {
             invalid_params(error.what());
         }
     }();
-    const auto analysis = analyses_.find(snapshot.document_uri().identity());
-    if (analysis == analyses_.end() || analysis->second.version != snapshot.version()) {
-        invalid_params("Signature help analysis is stale");
-    }
-
     const auto cursor_offset = [&] {
         try {
             return workspace::utf8_offset_at(snapshot.text(), request_position);
@@ -1298,15 +1386,23 @@ Json Server::signature_help(const std::optional<Json>& params) {
             invalid_params(error.what());
         }
     }();
-    const auto context = call_context(snapshot.text(), cursor_offset);
-    if (!context.has_value()) {
+    const auto call = call_context(snapshot.text(), cursor_offset);
+    if (!call.has_value()) {
         return nullptr;
     }
-    const auto callee_position =
-        workspace::lsp_position_at(snapshot.text(), context->callee_offset);
+    const auto callee_position = workspace::lsp_position_at(snapshot.text(), call->callee_offset);
+    analyze_and_publish(snapshot.uri());
     const auto [line, column] = dxc_position(snapshot.text(), callee_position);
-    const auto signatures = analysis->second.translation_unit.signatures_at(
-        analysis->second.dxc_root_path, line, column);
+    const auto signatures =
+        analysis_.signatures(snapshot.document_uri().identity(), snapshot.version(),
+                             snapshot.path(), line, column, context.cancellation);
+    {
+        std::scoped_lock state_lock{state_mutex_};
+        if (!documents_.contains(snapshot.uri()) ||
+            documents_.snapshot(snapshot.uri()).version() != snapshot.version()) {
+            throw HandlerError{json_rpc::content_modified_code, "Signature help was superseded"};
+        }
+    }
     if (signatures.empty()) {
         return nullptr;
     }
@@ -1320,7 +1416,7 @@ Json Server::signature_help(const std::optional<Json>& params) {
         Json item{{"label", signature.label}, {"parameters", std::move(parameters)}};
         if (!signature.parameters.empty()) {
             item["activeParameter"] =
-                (std::min)(context->active_parameter, signature.parameters.size() - 1);
+                (std::min)(call->active_parameter, signature.parameters.size() - 1);
         }
         items.push_back(std::move(item));
     }
@@ -1328,15 +1424,17 @@ Json Server::signature_help(const std::optional<Json>& params) {
     Json result{{"signatures", std::move(items)}, {"activeSignature", 0}};
     if (!signatures.front().parameters.empty()) {
         result["activeParameter"] =
-            (std::min)(context->active_parameter, signatures.front().parameters.size() - 1);
+            (std::min)(call->active_parameter, signatures.front().parameters.size() - 1);
     }
     return result;
 }
 
-Json Server::document_symbols(const std::optional<Json>& params) {
+Json Server::document_symbols(const std::optional<Json>& params,
+                              const json_rpc::RequestContext& context) {
     require_running();
     const auto uri = string_member(object_member(object_params(params), "textDocument"), "uri");
     workspace::SourceSnapshot snapshot = [&] {
+        std::scoped_lock state_lock{state_mutex_};
         try {
             const auto& state = documents_.document(uri);
             if (!state.open) {
@@ -1348,40 +1446,63 @@ Json Server::document_symbols(const std::optional<Json>& params) {
         }
     }();
 
-    const auto analysis = analyses_.find(snapshot.document_uri().identity());
-    if (analysis == analyses_.end() || analysis->second.version != snapshot.version()) {
-        invalid_params("Document symbol analysis is stale");
-    }
-
     Json result = Json::array();
-    append_document_symbols(result, analysis->second.translation_unit.symbols(), snapshot);
+    analyze_and_publish(snapshot.uri());
+    const auto symbols = analysis_.symbols(snapshot.document_uri().identity(), snapshot.version(),
+                                           context.cancellation);
+    {
+        std::scoped_lock state_lock{state_mutex_};
+        if (!documents_.contains(snapshot.uri()) ||
+            documents_.snapshot(snapshot.uri()).version() != snapshot.version()) {
+            throw HandlerError{json_rpc::content_modified_code, "Document symbols were superseded"};
+        }
+    }
+    append_document_symbols(result, symbols, snapshot);
     return result;
 }
 
-Json Server::workspace_symbols(const std::optional<Json>& params) {
+Json Server::workspace_symbols(const std::optional<Json>& params,
+                               const json_rpc::RequestContext& context) {
     require_running();
     const auto query = string_member(object_params(params), "query");
     Json result = Json::array();
-    for (const auto& [identity, analysis] : analyses_) {
-        if (!documents_.contains(analysis.root_uri)) {
+    for (const auto& root : analysis_.roots()) {
+        workspace::SourceSnapshot snapshot = [&]() -> workspace::SourceSnapshot {
+            std::scoped_lock state_lock{state_mutex_};
+            if (!documents_.contains(root.root_uri)) {
+                throw HandlerError{json_rpc::content_modified_code,
+                                   "Workspace symbols were superseded"};
+            }
+            return documents_.snapshot(root.root_uri);
+        }();
+        if (snapshot.document_uri().identity() != root.root_identity ||
+            root.version != snapshot.version()) {
             continue;
         }
-        const auto snapshot = documents_.snapshot(analysis.root_uri);
-        if (snapshot.document_uri().identity() != identity ||
-            analysis.version != snapshot.version()) {
-            continue;
+        analyze_and_publish(snapshot.uri());
+        const auto symbols =
+            analysis_.symbols(root.root_identity, root.version, context.cancellation);
+        {
+            std::scoped_lock state_lock{state_mutex_};
+            if (!documents_.contains(snapshot.uri()) ||
+                documents_.snapshot(snapshot.uri()).version() != snapshot.version()) {
+                throw HandlerError{json_rpc::content_modified_code,
+                                   "Workspace symbols were superseded"};
+            }
         }
-        append_workspace_symbols(result, analysis.translation_unit.symbols(), snapshot, query, {});
+        append_workspace_symbols(result, symbols, snapshot, query, {});
     }
     return result;
 }
 
-Json Server::semantic_tokens(const std::optional<Json>& params) {
+Json Server::semantic_tokens(const std::optional<Json>& params,
+                             const json_rpc::RequestContext& context) {
     require_running();
     const auto& value = object_params(params);
     const auto uri = string_member(object_member(value, "textDocument"), "uri");
 
     workspace::SourceSnapshot snapshot = [&] {
+        std::scoped_lock state_lock{state_mutex_};
         try {
             const auto& state = documents_.document(uri);
             if (!state.open) {
@@ -1392,16 +1513,20 @@ Json Server::semantic_tokens(const std::optional<Json>& params) {
             invalid_params(error.what());
         }
     }();
-    const auto analysis = analyses_.find(snapshot.document_uri().identity());
-    if (analysis == analyses_.end() || analysis->second.version != snapshot.version()) {
-        invalid_params("Semantic token analysis is stale");
-    }
     if (snapshot.text().size() > std::numeric_limits<std::uint32_t>::max()) {
         invalid_params("Semantic token document is too large");
     }
 
-    const auto dxc_tokens =
-        analysis->second.translation_unit.tokens(analysis->second.dxc_root_path);
+    analyze_and_publish(snapshot.uri());
+    const auto dxc_tokens = analysis_.tokens(snapshot.document_uri().identity(), snapshot.version(),
+                                             snapshot.path(), context.cancellation);
+    {
+        std::scoped_lock state_lock{state_mutex_};
+        if (!documents_.contains(snapshot.uri()) ||
+            documents_.snapshot(snapshot.uri()).version() != snapshot.version()) {
+            throw HandlerError{json_rpc::content_modified_code, "Semantic tokens were superseded"};
+        }
+    }
     std::vector<SemanticToken> tokens;
     tokens.reserve(dxc_tokens.size());
     for (const auto& token : dxc_tokens) {
@@ -1431,6 +1556,7 @@ Json Server::semantic_tokens(const std::optional<Json>& params) {
 }
 
 void Server::initialized(const std::optional<Json>& params) {
+    std::scoped_lock state_lock{state_mutex_};
     if (state_ != State::awaiting_initialized) {
         log("Ignoring initialized notification in an invalid lifecycle state");
         return;
@@ -1447,8 +1573,12 @@ void Server::did_open(const std::optional<Json>& params) {
         require_running();
         const auto& document = object_member(object_params(params), "textDocument");
         const auto uri = string_member(document, "uri");
-        documents_.did_open(uri, string_member(document, "languageId"),
-                            integer_member(document, "version"), string_member(document, "text"));
+        {
+            std::scoped_lock state_lock{state_mutex_};
+            documents_.did_open(uri, string_member(document, "languageId"),
+                                integer_member(document, "version"),
+                                string_member(document, "text"));
+        }
         analyze_affected(uri);
     } catch (const std::exception& error) {
         log(error.what());
@@ -1490,7 +1620,10 @@ void Server::did_change(const std::optional<Json>& params) {
             }
             changes.push_back(std::move(change));
         }
-        documents_.did_change(uri, integer_member(document, "version"), changes);
+        {
+            std::scoped_lock state_lock{state_mutex_};
+            documents_.did_change(uri, integer_member(document, "version"), changes);
+        }
         analyze_affected(uri);
     } catch (const std::exception& error) {
         log(error.what());
@@ -1509,7 +1642,10 @@ void Server::did_save(const std::optional<Json>& params) {
             }
             text = item->get<std::string>();
         }
-        documents_.did_save(uri, std::move(text));
+        {
+            std::scoped_lock state_lock{state_mutex_};
+            documents_.did_save(uri, std::move(text));
+        }
         analyze_affected(uri);
     } catch (const std::exception& error) {
         log(error.what());
@@ -1520,17 +1656,19 @@ void Server::did_close(const std::optional<Json>& params) {
     try {
         require_running();
         const auto uri = string_member(object_member(object_params(params), "textDocument"), "uri");
-        const auto snapshot = documents_.snapshot(uri);
-        std::vector<std::string> affected_roots;
-        for (const auto& [root_identity, analysis] : analyses_) {
-            if (root_identity != snapshot.document_uri().identity() &&
-                (analysis.has_dynamic_includes ||
-                 analysis.dependency_identities.contains(snapshot.document_uri().identity()))) {
-                affected_roots.push_back(analysis.root_uri);
-            }
+        workspace::SourceSnapshot snapshot = [&] {
+            std::scoped_lock state_lock{state_mutex_};
+            return documents_.snapshot(uri);
+        }();
+        const std::unordered_set changed{snapshot.document_uri().identity()};
+        auto affected_roots =
+            analysis_.dependent_root_uris(changed, snapshot.document_uri().identity());
+        {
+            std::scoped_lock state_lock{state_mutex_};
+            documents_.did_close(uri);
+            ++analysis_generations_[snapshot.document_uri().identity()];
         }
-        documents_.did_close(uri);
-        analyses_.erase(snapshot.document_uri().identity());
+        analysis_.erase(snapshot.document_uri().identity());
         for (const auto& root_uri : affected_roots) {
             analyze_and_publish(root_uri);
         }
@@ -1547,10 +1685,13 @@ void Server::did_change_configuration(const std::optional<Json>& params) {
         require_running();
         const auto candidate =
             configuration_overrides(object_member(object_params(params), "settings"));
-        for (const auto& document : documents_.open_snapshots()) {
-            static_cast<void>(configuration_for(document, candidate));
+        {
+            std::scoped_lock state_lock{state_mutex_};
+            for (const auto& document : documents_.open_snapshots()) {
+                static_cast<void>(configuration_for(document, candidate));
+            }
+            editor_settings_ = candidate;
         }
-        editor_settings_ = candidate;
         reanalyze_all();
     } catch (const std::exception& error) {
         log(error.what());
@@ -1564,7 +1705,10 @@ void Server::did_change_client_defaults(const std::optional<Json>& params) {
         if (!defaults.language_version) {
             invalid_params("hlsl.languageVersion must be provided");
         }
-        client_default_language_version_ = *defaults.language_version;
+        {
+            std::scoped_lock state_lock{state_mutex_};
+            client_default_language_version_ = *defaults.language_version;
+        }
         reanalyze_all();
     } catch (const std::exception& error) {
         log(error.what());
@@ -1580,7 +1724,11 @@ void Server::did_change_workspace_folders(const std::optional<Json>& params) {
         if (!removed.is_array() || !added.is_array()) {
             invalid_params("Workspace folder changes must contain added and removed arrays");
         }
-        auto workspace_folders = workspace_folders_;
+        std::unordered_map<std::string, std::filesystem::path> workspace_folders;
+        {
+            std::scoped_lock state_lock{state_mutex_};
+            workspace_folders = workspace_folders_;
+        }
         for (const auto& folder : removed) {
             workspace_folders.erase(workspace_folder_identity(folder));
         }
@@ -1588,7 +1736,10 @@ void Server::did_change_workspace_folders(const std::optional<Json>& params) {
             const auto [identity, path] = workspace_folder(folder);
             workspace_folders.insert_or_assign(identity, path);
         }
-        workspace_folders_ = std::move(workspace_folders);
+        {
+            std::scoped_lock state_lock{state_mutex_};
+            workspace_folders_ = std::move(workspace_folders);
+        }
         reanalyze_all();
     } catch (const std::exception& error) {
         log(error.what());
@@ -1626,17 +1777,12 @@ void Server::did_change_watched_files(const std::optional<Json>& params) {
             }
         }
 
-        std::vector<std::string> affected_roots;
+        analysis_.invalidate_include_metadata(changed_identities);
+        std::vector<std::string> affected_roots = analysis_.dependent_root_uris(changed_identities);
         std::unordered_set<std::string> affected_root_identities;
-        for (const auto& [root_identity, analysis] : analyses_) {
-            const auto affected =
-                analysis.has_dynamic_includes ||
-                std::ranges::any_of(changed_identities, [&analysis](const auto& identity) {
-                    return analysis.dependency_identities.contains(identity);
-                });
-            if (affected && !changed_identities.contains(root_identity) &&
-                affected_root_identities.emplace(root_identity).second) {
-                affected_roots.push_back(analysis.root_uri);
+        for (const auto& root : analysis_.roots()) {
+            if (std::ranges::find(affected_roots, root.root_uri) != affected_roots.end()) {
+                affected_root_identities.insert(root.root_identity);
             }
         }
 
@@ -1659,10 +1805,14 @@ void Server::did_change_watched_files(const std::optional<Json>& params) {
                                identity[directory.size()] == separator;
                     });
             };
-        for (const auto& document : documents_.open_snapshots()) {
+        std::vector<workspace::SourceSnapshot> open_documents;
+        {
+            std::scoped_lock state_lock{state_mutex_};
+            open_documents = documents_.open_snapshots();
+        }
+        for (const auto& document : open_documents) {
             const auto& identity = document.document_uri().identity();
             if (in_changed_configuration_scope(identity)) {
-                analyses_.erase(identity);
                 if (affected_root_identities.emplace(identity).second) {
                     affected_roots.push_back(document.uri());
                 }
@@ -1680,19 +1830,18 @@ void Server::exit(const std::optional<Json>& params) {
     if (params.has_value() && !params->is_null()) {
         log("Exit notification does not accept parameters");
     }
-    exit_requested_ = true;
+    exit_requested_.store(true, std::memory_order_release);
 }
 
 void Server::analyze_affected(std::string_view uri) {
-    const auto changed = documents_.snapshot(uri);
-    std::vector<std::string> affected_roots;
-    for (const auto& [root_identity, analysis] : analyses_) {
-        if (root_identity != changed.document_uri().identity() &&
-            (analysis.has_dynamic_includes ||
-             analysis.dependency_identities.contains(changed.document_uri().identity()))) {
-            affected_roots.push_back(analysis.root_uri);
-        }
-    }
+    const auto changed = [&] {
+        std::scoped_lock state_lock{state_mutex_};
+        return documents_.snapshot(uri);
+    }();
+    const std::unordered_set changed_identities{changed.document_uri().identity()};
+    analysis_.invalidate_include_metadata(changed_identities);
+    auto affected_roots =
+        analysis_.dependent_root_uris(changed_identities, changed.document_uri().identity());
 
     analyze_and_publish(uri);
     for (const auto& root_uri : affected_roots) {
@@ -1701,40 +1850,24 @@ void Server::analyze_affected(std::string_view uri) {
 }
 
 void Server::analyze_and_publish(std::string_view uri) {
-    const auto snapshot = documents_.snapshot(uri);
-    const auto identity = snapshot.document_uri().identity();
-    auto analysis = analyses_.find(identity);
-    const auto open_documents = documents_.open_snapshots();
-    auto configuration = configuration_for(snapshot, editor_settings_);
-    auto resolved = workspace::resolve_includes(snapshot, open_documents, configuration);
-    const auto dxc_root_path = resolved.sources.front().path;
-    if (analysis == analyses_.end()) {
-        auto translation_unit = intellisense_.parse(dxc_root_path, std::move(resolved.sources),
-                                                    configuration.compiler_options());
-        analysis =
-            analyses_
-                .emplace(identity,
-                         Analysis{snapshot.version(), snapshot.uri(), dxc_root_path,
-                                  std::move(resolved.dependency_identities),
-                                  resolved.has_dynamic_includes, std::move(translation_unit)})
-                .first;
-    } else {
-        if (!resolved.dependency_identities.empty() ||
-            !analysis->second.dependency_identities.empty()) {
-            analysis->second.translation_unit = intellisense_.parse(
-                dxc_root_path, std::move(resolved.sources), configuration.compiler_options());
-        } else {
-            analysis->second.translation_unit.reparse(std::move(resolved.sources));
+    analysis::AnalysisInput input = [&] {
+        std::scoped_lock state_lock{state_mutex_};
+        const auto& state = documents_.document(uri);
+        if (!state.open) {
+            throw HandlerError{json_rpc::content_modified_code,
+                               "Document was closed before analysis"};
         }
-        analysis->second.version = snapshot.version();
-        analysis->second.dxc_root_path = dxc_root_path;
-        analysis->second.dependency_identities = std::move(resolved.dependency_identities);
-        analysis->second.has_dynamic_includes = resolved.has_dynamic_includes;
-    }
-
-    const auto latest = documents_.snapshot(uri);
-    if (latest.version() == analysis->second.version) {
-        publish_diagnostics(latest, analysis->second.translation_unit.diagnostics());
+        auto snapshot = documents_.snapshot(uri);
+        const auto generation = ++analysis_generations_[snapshot.document_uri().identity()];
+        return analysis::AnalysisInput{.root = snapshot,
+                                       .open_documents = documents_.open_snapshots(),
+                                       .configuration =
+                                           configuration_for(snapshot, editor_settings_),
+                                       .generation = generation};
+    }();
+    analysis_.analyze(std::move(input));
+    if (!options_.background_analysis) {
+        analysis_.wait_idle();
     }
 }
 
@@ -1781,10 +1914,28 @@ std::filesystem::path Server::configuration_base_directory(std::string_view shad
 }
 
 void Server::reanalyze_all() {
-    const auto open_documents = documents_.open_snapshots();
-    analyses_.clear();
+    const auto open_documents = [&] {
+        std::scoped_lock state_lock{state_mutex_};
+        return documents_.open_snapshots();
+    }();
     for (const auto& document : open_documents) {
         analyze_and_publish(document.uri());
+    }
+}
+
+void Server::analysis_completed(const workspace::SourceSnapshot& snapshot,
+                                const std::vector<dxc::Diagnostic>& diagnostics,
+                                std::uint64_t generation) {
+    std::scoped_lock state_lock{state_mutex_};
+    if (!documents_.contains(snapshot.uri())) {
+        return;
+    }
+    const auto& state = documents_.document(snapshot.uri());
+    const auto expected = analysis_generations_.find(snapshot.document_uri().identity());
+    const auto latest = documents_.snapshot(snapshot.uri());
+    if (state.open && expected != analysis_generations_.end() && expected->second == generation &&
+        latest.version() == snapshot.version()) {
+        publish_diagnostics(latest, diagnostics);
     }
 }
 
@@ -1808,6 +1959,7 @@ void Server::publish_diagnostics(const workspace::SourceSnapshot& snapshot,
 }
 
 void Server::require_running() const {
+    std::scoped_lock state_lock{state_mutex_};
     if (state_ != State::running) {
         throw HandlerError{-32002, "Server not initialized"};
     }
@@ -1819,16 +1971,115 @@ void Server::log(std::string_view message) const {
     }
 }
 
+namespace {
+
+class RequestExecutor final {
+  public:
+    RequestExecutor(std::size_t worker_count, std::size_t capacity) : capacity_{capacity} {
+        if (worker_count == 0 || capacity == 0) {
+            throw std::invalid_argument{"Request executor limits must be positive"};
+        }
+        workers_.reserve(worker_count);
+        for (std::size_t index = 0; index < worker_count; ++index) {
+            static_cast<void>(index);
+            workers_.emplace_back([this] { worker_loop(); });
+        }
+    }
+
+    RequestExecutor(const RequestExecutor&) = delete;
+    RequestExecutor& operator=(const RequestExecutor&) = delete;
+    ~RequestExecutor() { shutdown(); }
+
+    [[nodiscard]] bool submit(std::function<void()> task) {
+        if (!task) {
+            throw std::invalid_argument{"Request task must be callable"};
+        }
+        {
+            std::scoped_lock lock{mutex_};
+            if (stopping_ || queue_.size() >= capacity_) {
+                return false;
+            }
+            queue_.push_back(std::move(task));
+        }
+        ready_.notify_one();
+        return true;
+    }
+
+    void shutdown() {
+        {
+            std::scoped_lock lock{mutex_};
+            if (stopping_) {
+                return;
+            }
+            stopping_ = true;
+        }
+        ready_.notify_all();
+        workers_.clear();
+    }
+
+    void rethrow_if_failed() {
+        std::scoped_lock lock{failure_mutex_};
+        if (failure_) {
+            std::rethrow_exception(failure_);
+        }
+    }
+
+  private:
+    void worker_loop() {
+        for (;;) {
+            std::function<void()> task;
+            {
+                std::unique_lock lock{mutex_};
+                ready_.wait(lock, [this] { return stopping_ || !queue_.empty(); });
+                if (queue_.empty()) {
+                    if (stopping_) {
+                        return;
+                    }
+                    continue;
+                }
+                task = std::move(queue_.front());
+                queue_.pop_front();
+            }
+            try {
+                task();
+            } catch (...) {
+                std::scoped_lock lock{failure_mutex_};
+                if (!failure_) {
+                    failure_ = std::current_exception();
+                }
+            }
+        }
+    }
+
+    std::size_t capacity_;
+    std::mutex mutex_;
+    std::condition_variable ready_;
+    std::deque<std::function<void()>> queue_;
+    std::vector<std::jthread> workers_;
+    std::mutex failure_mutex_;
+    std::exception_ptr failure_;
+    bool stopping_{};
+};
+
+} // namespace
+
 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
 int run(std::istream& input, std::ostream& output, std::ostream& errors, ServerOptions options) {
     try {
+        options.background_analysis = true;
+        std::mutex output_mutex;
+        std::mutex error_mutex;
         json_rpc::FrameWriter writer{output};
-        Server server{
-            [&writer](const json_rpc::Notification& notification) {
-                writer.write(json_rpc::serialize(json_rpc::Message{notification}));
-            },
-            [&errors](std::string_view message) { errors << "HLSL-LSP: " << message << '\n'; },
-            options};
+        Server server{[&writer, &output_mutex](const json_rpc::Notification& notification) {
+                          std::scoped_lock lock{output_mutex};
+                          writer.write(json_rpc::serialize(json_rpc::Message{notification}));
+                      },
+                      [&errors, &error_mutex](std::string_view message) {
+                          std::scoped_lock lock{error_mutex};
+                          errors << "HLSL-LSP: " << message << '\n';
+                      },
+                      options};
+        RequestExecutor requests{options.request_worker_count, options.request_queue_capacity};
         json_rpc::FrameReader reader{input};
 
         while (!server.exit_requested()) {
@@ -1838,13 +2089,42 @@ int run(std::istream& input, std::ostream& output, std::ostream& errors, ServerO
             }
             const auto parsed = json_rpc::parse_message(*payload);
             if (parsed.error.has_value()) {
+                std::scoped_lock lock{output_mutex};
                 writer.write(json_rpc::serialize(json_rpc::DispatchResponse{*parsed.error}));
                 continue;
             }
-            if (const auto response = server.handle(*parsed.message); response.has_value()) {
-                writer.write(json_rpc::serialize(*response));
+            if (const auto* request = std::get_if<json_rpc::Request>(&*parsed.message)) {
+                const auto cancellation = server.begin_request(request->id);
+                if (request->method == "initialize" || request->method == "shutdown") {
+                    const auto response = server.handle(*request, cancellation);
+                    std::scoped_lock lock{output_mutex};
+                    writer.write(json_rpc::serialize(response));
+                    continue;
+                }
+                const auto accepted = requests.submit(
+                    [&server, &writer, &output_mutex, request = *request, cancellation] {
+                        const auto response = server.handle(request, cancellation);
+                        std::scoped_lock lock{output_mutex};
+                        writer.write(json_rpc::serialize(response));
+                    });
+                if (!accepted) {
+                    cancellation.cancel();
+                    server.finish_request(request->id, cancellation);
+                    const json_rpc::ErrorResponse response{
+                        .id = request->id,
+                        .error = {
+                            .code = -32000, .message = "Request queue full", .data = std::nullopt}};
+                    std::scoped_lock lock{output_mutex};
+                    writer.write(json_rpc::serialize(json_rpc::DispatchResponse{response}));
+                }
+            } else {
+                static_cast<void>(server.handle(*parsed.message));
             }
         }
+        server.cancel_all_requests();
+        requests.shutdown();
+        requests.rethrow_if_failed();
+        server.wait_for_analysis();
         return server.exit_requested() ? server.exit_code() : 0;
     } catch (const std::exception& error) {
         errors << "HLSL-LSP: " << error.what() << '\n';

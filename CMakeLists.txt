@@ -90,11 +90,16 @@ hlsl_enable_clang_tidy(hlsl_dxc)
 add_library(hlsl_lsp STATIC)
 target_sources(hlsl_lsp
     PRIVATE
+        src/analysis/manager.cpp
+        src/analysis/scheduler.cpp
         src/lsp/server.cpp
     PUBLIC
         FILE_SET HEADERS
         BASE_DIRS include
-        FILES include/hlsl_intellisense/lsp/server.h)
+        FILES
+            include/hlsl_intellisense/analysis/manager.h
+            include/hlsl_intellisense/analysis/scheduler.h
+            include/hlsl_intellisense/lsp/server.h)
 target_link_libraries(hlsl_lsp
     PUBLIC
         hlsl_dxc
@@ -142,6 +147,8 @@ if(BUILD_TESTING)
     hlsl_copy_dxc_runtime(hlsl-intellisense-tests)
 
     add_executable(hlsl-lsp-tests
+        tests/analysis/manager_tests.cpp
+        tests/analysis/scheduler_tests.cpp
         tests/lsp/server_tests.cpp)
     target_link_libraries(hlsl-lsp-tests PRIVATE
         Catch2::Catch2WithMain
@@ -172,12 +179,24 @@ if(BUILD_TESTING)
         hlsl_project_options)
     hlsl_enable_clang_tidy(hlsl-workspace-tests)
 
+    add_executable(hlsl-analysis-benchmark
+        benchmarks/analysis_benchmark.cpp)
+    target_link_libraries(hlsl-analysis-benchmark PRIVATE
+        hlsl_lsp
+        hlsl_project_options)
+    target_compile_definitions(hlsl-analysis-benchmark PRIVATE
+        HLSL_BENCHMARK_SHADER_DIR="${PROJECT_SOURCE_DIR}/benchmarks/shaders")
+    hlsl_enable_clang_tidy(hlsl-analysis-benchmark)
+    hlsl_copy_dxc_runtime(hlsl-analysis-benchmark)
+
     list(APPEND CMAKE_MODULE_PATH "${catch2_SOURCE_DIR}/extras")
     include(Catch)
     catch_discover_tests(hlsl-intellisense-tests)
     catch_discover_tests(hlsl-json-rpc-tests)
     catch_discover_tests(hlsl-workspace-tests)
     catch_discover_tests(hlsl-lsp-tests)
+    add_test(NAME analysis-structural-benchmark
+        COMMAND hlsl-analysis-benchmark)
 endif()
 
 hlsl_add_format_targets()

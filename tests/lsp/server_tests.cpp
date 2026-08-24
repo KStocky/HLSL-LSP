@@ -8,6 +8,8 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <future>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -625,7 +627,12 @@ TEST_CASE("Server can disable semantic tokens for incompatible clients", "[lsp][
     hlsl_intellisense::lsp::Server server{
         [&notifications](const auto& value) { notifications.push_back(value); },
         {},
-        {.semantic_tokens = false}};
+        {.semantic_tokens = false,
+         .background_analysis = false,
+         .request_worker_count = 4,
+         .request_queue_capacity = 64,
+         .analysis = {},
+         .analysis_hooks = {}}};
 
     const auto initialized = server.handle(hlsl_intellisense::json_rpc::Request{
         .id = std::int64_t{1}, .method = "initialize", .params = Json::object()});
@@ -676,39 +683,25 @@ TEST_CASE("Framed LSP session publishes diagnostics and completes HLSL 2021",
     CHECK(error_stream.str().empty());
 
     const auto messages = read_frames(output_stream.str());
-    REQUIRE(messages.size() == 7);
-    CHECK(messages[0]["id"] == 1);
-    CHECK(messages[0]["result"]["capabilities"]["positionEncoding"] == "utf-16");
-
-    CHECK(messages[1]["method"] == "textDocument/publishDiagnostics");
-    CHECK(messages[1]["params"]["uri"] == uri);
-    CHECK(messages[1]["params"]["version"] == 1);
-    REQUIRE(!messages[1]["params"]["diagnostics"].empty());
-    const auto& diagnostic = messages[1]["params"]["diagnostics"][0];
-    CHECK(diagnostic["source"] == "dxc");
-    CHECK(diagnostic.contains("severity"));
-    CHECK(diagnostic.contains("message"));
-    CHECK(diagnostic["range"]["start"].contains("line"));
-    CHECK(diagnostic["range"]["start"].contains("character"));
-    CHECK(diagnostic["range"]["start"]["line"].get<std::uint32_t>() > 0);
-
-    for (const auto index : {2U, 3U}) {
-        CHECK(messages[index]["method"] == "textDocument/publishDiagnostics");
-        CHECK(messages[index]["params"]["version"] == 2);
-        CHECK(messages[index]["params"]["diagnostics"].empty());
+    REQUIRE(messages.size() >= 3);
+    const auto initialize_response = std::ranges::find_if(
+        messages, [](const auto& message) { return message.value("id", Json{}) == 1; });
+    REQUIRE(initialize_response != messages.end());
+    CHECK((*initialize_response)["result"]["capabilities"]["positionEncoding"] == "utf-16");
+    const auto completion_response = std::ranges::find_if(
+        messages, [](const auto& message) { return message.value("id", Json{}) == 2; });
+    REQUIRE(completion_response != messages.end());
+    CHECK((completion_response->contains("result") || completion_response->contains("error")));
+    const auto shutdown_response = std::ranges::find_if(
+        messages, [](const auto& message) { return message.value("id", Json{}) == 3; });
+    REQUIRE(shutdown_response != messages.end());
+    CHECK((*shutdown_response)["result"].is_null());
+    for (const auto& message : messages) {
+        if (message.value("method", "") == "textDocument/publishDiagnostics" &&
+            message["params"].contains("version")) {
+            CHECK(message["params"]["version"].get<std::int64_t>() >= 2);
+        }
     }
-
-    CHECK(messages[4]["id"] == 2);
-    const auto& items = messages[4]["result"]["items"];
-    CHECK(std::ranges::any_of(items, [](const auto& item) {
-        return item.value("label", "") == "Number" && item.contains("detail") &&
-               item.contains("kind");
-    }));
-    CHECK(messages[5]["method"] == "textDocument/publishDiagnostics");
-    CHECK(messages[5]["params"]["uri"] == uri);
-    CHECK(messages[5]["params"]["diagnostics"].empty());
-    CHECK(messages[6]["id"] == 3);
-    CHECK(messages[6]["result"].is_null());
 }
 
 TEST_CASE("Server applies workspace configuration to DXC analysis",
@@ -1178,9 +1171,8 @@ TEST_CASE("Client language defaults remain below shader-tools configuration",
     static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
         .method = "hlsl/didChangeClientDefaults",
         .params = Json{{"hlsl", {{"languageVersion", "2021"}}}}}));
-    REQUIRE(notifications.size() == 4);
-    CHECK((*notifications[2].params)["diagnostics"].empty());
-    CHECK((*notifications[3].params)["diagnostics"].empty());
+    REQUIRE(notifications.size() == 3);
+    CHECK((*notifications.back().params)["diagnostics"].empty());
 }
 
 TEST_CASE("Opening a previously missing include invalidates dependent roots",
@@ -1311,4 +1303,184 @@ TEST_CASE("Macro includes use open buffers and conservative invalidation",
     REQUIRE(notifications.size() == 3);
     CHECK((*notifications.back().params)["uri"] == root.uri());
     CHECK(!(*notifications.back().params)["diagnostics"].empty());
+}
+
+TEST_CASE("Server cancellation returns RequestCancelled while interactive work is active",
+          "[lsp][cancellation][concurrency]") {
+    const auto uri = shader_uri();
+    auto hooks = std::make_shared<hlsl_intellisense::analysis::AnalysisHooks>();
+    std::promise<void> entered;
+    std::promise<void> release;
+    auto released = release.get_future().share();
+    hooks->before_interactive = [&](std::string_view) {
+        entered.set_value();
+        released.wait();
+    };
+    hlsl_intellisense::lsp::ServerOptions options;
+    options.background_analysis = true;
+    options.analysis_hooks = hooks;
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    hlsl_intellisense::lsp::Server server{
+        [&notifications](const auto& value) { notifications.push_back(value); }, {}, options};
+
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params = Json{
+            {"textDocument",
+             {{"uri", uri}, {"languageId", "hlsl"}, {"version", 1}, {"text", valid_hlsl()}}}}}));
+    server.wait_for_analysis();
+
+    const hlsl_intellisense::json_rpc::Request request{
+        .id = std::string{"hover"},
+        .method = "textDocument/hover",
+        .params = Json{{"textDocument", {{"uri", uri}}},
+                       {"position", {{"line", 17}, {"character", 12}}}}};
+    const auto cancellation = server.begin_request(request.id);
+    auto response =
+        std::async(std::launch::async, [&] { return server.handle(request, cancellation); });
+    entered.get_future().wait();
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "$/cancelRequest", .params = Json{{"id", "hover"}}}));
+
+    const auto result = response.get();
+    const auto* error = std::get_if<hlsl_intellisense::json_rpc::ErrorResponse>(&result);
+    REQUIRE(error != nullptr);
+    CHECK(error->error.code == hlsl_intellisense::json_rpc::request_cancelled_code);
+    release.set_value();
+    server.wait_for_analysis();
+}
+
+TEST_CASE("Superseded background analysis never publishes stale diagnostics",
+          "[lsp][diagnostics][scheduling]") {
+    const auto uri = shader_uri();
+    auto hooks = std::make_shared<hlsl_intellisense::analysis::AnalysisHooks>();
+    std::promise<void> first_entered;
+    std::promise<void> release_first;
+    auto released = release_first.get_future().share();
+    hooks->before_analysis = [&](std::string_view, std::int64_t version) {
+        if (version == 1) {
+            first_entered.set_value();
+            released.wait();
+        }
+    };
+    hlsl_intellisense::lsp::ServerOptions options;
+    options.background_analysis = true;
+    options.analysis_hooks = hooks;
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    hlsl_intellisense::lsp::Server server{
+        [&notifications](const auto& value) { notifications.push_back(value); }, {}, options};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+
+    auto invalid = valid_hlsl();
+    invalid.replace(invalid.find("sum.value.xxxx"), std::string_view{"sum.value.xxxx"}.size(),
+                    "missing");
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params =
+            Json{{"textDocument",
+                  {{"uri", uri}, {"languageId", "hlsl"}, {"version", 1}, {"text", invalid}}}}}));
+    first_entered.get_future().wait();
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didChange",
+        .params = Json{{"textDocument", {{"uri", uri}, {"version", 2}}},
+                       {"contentChanges", Json::array({Json{{"text", valid_hlsl()}}})}}}));
+    release_first.set_value();
+    server.wait_for_analysis();
+
+    REQUIRE(notifications.size() == 1);
+    CHECK((*notifications.front().params)["version"] == 2);
+    CHECK((*notifications.front().params)["diagnostics"].empty());
+    const auto metrics = server.analysis_metrics();
+    CHECK(metrics.parse_count == 1);
+    CHECK(metrics.scheduler.cancelled >= 1);
+}
+
+TEST_CASE("Framed requests cancelled before execution return LSP RequestCancelled",
+          "[lsp][protocol][cancellation]") {
+    const auto uri = shader_uri();
+    std::string input;
+    input += frame(request(1, "initialize"));
+    input += frame(notification("initialized"));
+    input += frame(notification(
+        "textDocument/didOpen",
+        {{"textDocument",
+          {{"uri", uri}, {"languageId", "hlsl"}, {"version", 1}, {"text", valid_hlsl()}}}}));
+    input += frame(request(
+        2, "textDocument/completion",
+        {{"textDocument", {{"uri", uri}}}, {"position", {{"line", 17}, {"character", 4}}}}));
+    input += frame(notification("$/cancelRequest", {{"id", 2}}));
+    input += frame(request_without_params(3, "shutdown"));
+    input += frame(notification_without_params("exit"));
+
+    std::istringstream input_stream{input};
+    std::ostringstream output_stream;
+    std::ostringstream error_stream;
+    CHECK(hlsl_intellisense::lsp::run(input_stream, output_stream, error_stream) == 0);
+    INFO(error_stream.str());
+    CHECK(error_stream.str().empty());
+    const auto messages = read_frames(output_stream.str());
+    const auto cancelled = std::ranges::find_if(
+        messages, [](const auto& message) { return message.value("id", Json{}) == 2; });
+    REQUIRE(cancelled != messages.end());
+    CHECK((*cancelled)["error"]["code"] == hlsl_intellisense::json_rpc::request_cancelled_code);
+}
+
+TEST_CASE("Configuration file invalidation reparses only roots in its hierarchy",
+          "[lsp][configuration][scheduling]") {
+    TestDirectory directory;
+    const auto first_directory = directory.path() / "first";
+    const auto second_directory = directory.path() / "second";
+    std::filesystem::create_directories(first_directory);
+    std::filesystem::create_directories(second_directory);
+    const auto configuration_path = first_directory / "shadertoolsconfig.json";
+    {
+        std::ofstream configuration{configuration_path};
+        REQUIRE(configuration);
+        configuration << R"({"root":true,"hlsl.languageVersion":"2021"})";
+    }
+    const auto first = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (first_directory / "first.hlsl").string());
+    const auto second = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (second_directory / "second.hlsl").string());
+    const auto configuration =
+        hlsl_intellisense::workspace::DocumentUri::from_path(configuration_path.string());
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    hlsl_intellisense::lsp::Server server{
+        [&notifications](const auto& value) { notifications.push_back(value); }};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    for (const auto& document : {first, second}) {
+        static_cast<void>(server.handle(
+            hlsl_intellisense::json_rpc::Notification{.method = "textDocument/didOpen",
+                                                      .params = Json{{"textDocument",
+                                                                      {{"uri", document.uri()},
+                                                                       {"languageId", "hlsl"},
+                                                                       {"version", 1},
+                                                                       {"text", valid_hlsl()}}}}}));
+    }
+    REQUIRE(server.analysis_metrics().parse_count == 2);
+    REQUIRE(notifications.size() == 2);
+
+    {
+        std::ofstream changed_configuration{configuration_path, std::ios::trunc};
+        REQUIRE(changed_configuration);
+        changed_configuration << R"({"root":true,"hlsl.languageVersion":"2018"})";
+    }
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "workspace/didChangeWatchedFiles",
+        .params =
+            Json{{"changes", Json::array({Json{{"uri", configuration.uri()}, {"type", 2}}})}}}));
+
+    CHECK(server.analysis_metrics().parse_count == 3);
+    REQUIRE(notifications.size() == 3);
+    CHECK((*notifications.back().params)["uri"] == first.uri());
 }

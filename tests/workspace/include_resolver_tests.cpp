@@ -155,10 +155,10 @@ TEST_CASE("Include navigation resolves quoted, search-path, and virtual includes
     configuration.additional_include_directories.push_back(tree.path("includes"));
     configuration.virtual_directory_mappings.emplace("/Engine", tree.path("Engine"));
 
-    const auto local = workspace::resolve_include_at(
-        root, open_documents, configuration, text.find("local.hlsli") + 2);
-    const auto shared = workspace::resolve_include_at(
-        root, open_documents, configuration, text.find("shared.hlsli") + 2);
+    const auto local = workspace::resolve_include_at(root, open_documents, configuration,
+                                                     text.find("local.hlsli") + 2);
+    const auto shared = workspace::resolve_include_at(root, open_documents, configuration,
+                                                      text.find("shared.hlsli") + 2);
     const auto virtual_include = workspace::resolve_include_at(
         root, open_documents, configuration, text.find("/Engine/Common.hlsli") + 2);
 
@@ -170,6 +170,41 @@ TEST_CASE("Include navigation resolves quoted, search-path, and virtual includes
     REQUIRE(virtual_include.has_value());
     CHECK(*virtual_include ==
           std::filesystem::absolute(tree.path("Engine/Common.hlsli")).lexically_normal());
-    CHECK_FALSE(workspace::resolve_include_at(root, open_documents, configuration,
-                                              text.find("#include")));
+    CHECK_FALSE(
+        workspace::resolve_include_at(root, open_documents, configuration, text.find("#include")));
+}
+
+TEST_CASE("Include metadata cache has deterministic LRU count and memory bounds",
+          "[workspace][includes][cache]") {
+    hlsl_intellisense::workspace::IncludeMetadataCache cache{
+        {.max_entries = 2, .max_estimated_bytes = 4096}};
+    const std::string first_text = "#include \"first.hlsli\"\n";
+    const std::string second_text = "#include \"second.hlsli\"\n";
+    const std::string third_text = "#include \"third.hlsli\"\n";
+
+    CHECK(cache.get("first", first_text).directives.front().path == "first.hlsli");
+    CHECK(cache.get("second", second_text).directives.front().path == "second.hlsli");
+    static_cast<void>(cache.get("first", first_text));
+    static_cast<void>(cache.get("third", third_text));
+    auto metrics = cache.metrics();
+    CHECK(metrics.entries == 2);
+    CHECK(metrics.estimated_bytes <= 4096);
+    CHECK(metrics.hits == 1);
+    CHECK(metrics.misses == 3);
+    CHECK(metrics.evictions == 1);
+
+    static_cast<void>(cache.get("second", second_text));
+    metrics = cache.metrics();
+    CHECK(metrics.misses == 4);
+    CHECK(metrics.evictions == 2);
+    CHECK(metrics.entries == 2);
+
+    cache.invalidate("first");
+    CHECK(cache.metrics().entries <= 2);
+
+    hlsl_intellisense::workspace::IncludeMetadataCache byte_limited{
+        {.max_entries = 4, .max_estimated_bytes = 128}};
+    static_cast<void>(byte_limited.get("oversized", std::string(1024, 'x')));
+    CHECK(byte_limited.metrics().entries == 0);
+    CHECK(byte_limited.metrics().estimated_bytes == 0);
 }
