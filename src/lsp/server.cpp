@@ -1226,24 +1226,68 @@ void Server::did_change_watched_files(const std::optional<Json>& params) {
         }
 
         std::unordered_set<std::string> changed_identities;
+        std::vector<std::string> changed_configuration_directories;
         for (const auto& change : changes) {
             try {
-                changed_identities.insert(
-                    workspace::DocumentUri::from_uri(string_member(change, "uri")).identity());
+                const auto changed = workspace::DocumentUri::from_uri(string_member(change, "uri"));
+                changed_identities.insert(changed.identity());
+                auto filename = std::filesystem::path{changed.path()}.filename().string();
+#ifdef _WIN32
+                std::ranges::transform(filename, filename.begin(), [](char value) {
+                    return static_cast<char>(std::tolower(static_cast<unsigned char>(value)));
+                });
+#endif
+                if (filename == workspace::configuration_file_name) {
+                    changed_configuration_directories.push_back(
+                        workspace::DocumentUri::from_path(
+                            std::filesystem::path{changed.path()}.parent_path().string())
+                            .identity());
+                }
             } catch (const workspace::DocumentError& error) {
                 invalid_params(error.what());
             }
         }
 
         std::vector<std::string> affected_roots;
+        std::unordered_set<std::string> affected_root_identities;
         for (const auto& [root_identity, analysis] : analyses_) {
             const auto affected =
                 analysis.has_dynamic_includes ||
                 std::ranges::any_of(changed_identities, [&analysis](const auto& identity) {
                     return analysis.dependency_identities.contains(identity);
                 });
-            if (affected && !changed_identities.contains(root_identity)) {
+            if (affected && !changed_identities.contains(root_identity) &&
+                affected_root_identities.emplace(root_identity).second) {
                 affected_roots.push_back(analysis.root_uri);
+            }
+        }
+
+        const auto in_changed_configuration_scope =
+            [&changed_configuration_directories](std::string_view identity) {
+                return std::ranges::any_of(
+                    changed_configuration_directories, [identity](const auto& directory) {
+#ifdef _WIN32
+                        constexpr char separator = '\\';
+#else
+                        constexpr char separator = '/';
+#endif
+                        if (!identity.starts_with(directory)) {
+                            return false;
+                        }
+                        if (!directory.empty() && directory.back() == separator) {
+                            return identity.size() > directory.size();
+                        }
+                        return identity.size() > directory.size() &&
+                               identity[directory.size()] == separator;
+                    });
+            };
+        for (const auto& document : documents_.open_snapshots()) {
+            const auto& identity = document.document_uri().identity();
+            if (in_changed_configuration_scope(identity)) {
+                analyses_.erase(identity);
+                if (affected_root_identities.emplace(identity).second) {
+                    affected_roots.push_back(document.uri());
+                }
             }
         }
         for (const auto& root_uri : affected_roots) {
@@ -1323,7 +1367,7 @@ Server::configuration_for(const workspace::SourceSnapshot& snapshot,
     const auto shader_directory = std::filesystem::path{snapshot.path()}.parent_path();
     std::error_code error;
     if (std::filesystem::is_directory(shader_directory, error)) {
-        configuration = workspace::load_workspace_configuration(shader_directory);
+        configuration = workspace::load_workspace_configuration_for_file(snapshot.path());
     } else if (error && error != std::errc::no_such_file_or_directory) {
         throw std::filesystem::filesystem_error{"Unable to inspect shader directory",
                                                 shader_directory, error};

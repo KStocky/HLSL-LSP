@@ -42,7 +42,8 @@ internal sealed class HlslLanguageClient :
             },
         };
 
-    public IEnumerable<string> FilesToWatch { get; } = Array.Empty<string>();
+    public IEnumerable<string> FilesToWatch { get; } =
+        new[] { "**/shadertoolsconfig.json" };
 
     public bool ShowNotificationOnInitializeFailed => true;
 

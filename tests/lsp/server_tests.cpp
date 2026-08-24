@@ -625,6 +625,65 @@ TEST_CASE("Configuration change notifications reload open shaders",
     CHECK((*notifications.back().params)["diagnostics"].empty());
 }
 
+TEST_CASE("Watched file-group changes reanalyze matching open shaders",
+          "[lsp][configuration][file-groups][integration]") {
+    TestDirectory directory;
+    const auto config_path = directory.path() / "shadertoolsconfig.json";
+    {
+        std::ofstream config{config_path};
+        REQUIRE(config);
+        config << R"({
+            "root": true,
+            "hlsl.fileGroups": [{
+                "files": ["pixel-*.hlsl"],
+                "hlsl.preprocessorDefinitions": {"CONFIGURED": 1}
+            }]
+        })";
+        REQUIRE(config);
+    }
+
+    const auto document = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "compute-main.hlsl").string());
+    const auto config = hlsl_intellisense::workspace::DocumentUri::from_path(config_path.string());
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    hlsl_intellisense::lsp::Server server{
+        [&notifications](const auto& value) { notifications.push_back(value); }};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params = Json{{"textDocument",
+                        {{"uri", document.uri()},
+                         {"languageId", "hlsl"},
+                         {"version", 1},
+                         {"text", "#ifndef CONFIGURED\n#error missing configuration\n#endif\n"
+                                  "[numthreads(1, 1, 1)] void main() {}\n"}}}}}));
+    REQUIRE(notifications.size() == 1);
+    CHECK(!(*notifications.back().params)["diagnostics"].empty());
+
+    {
+        std::ofstream changed{config_path, std::ios::trunc};
+        REQUIRE(changed);
+        changed << R"({
+            "root": true,
+            "hlsl.fileGroups": [{
+                "files": ["compute-*.hlsl"],
+                "hlsl.preprocessorDefinitions": {"CONFIGURED": 1}
+            }]
+        })";
+        REQUIRE(changed);
+    }
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "workspace/didChangeWatchedFiles",
+        .params = Json{{"changes", Json::array({Json{{"uri", config.uri()}, {"type", 2}}})}}}));
+
+    REQUIRE(notifications.size() == 2);
+    CHECK((*notifications.back().params)["uri"] == document.uri());
+    CHECK((*notifications.back().params)["diagnostics"].empty());
+}
+
 TEST_CASE("Typed editor settings override files and resolve from the workspace",
           "[lsp][configuration][integration]") {
     TestDirectory directory;

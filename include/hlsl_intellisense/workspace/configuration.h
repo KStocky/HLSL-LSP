@@ -20,7 +20,8 @@ enum class ConfigurationErrorCode {
     invalid_type,
     invalid_virtual_directory,
     missing_path,
-    path_not_directory
+    path_not_directory,
+    invalid_glob
 };
 
 class ConfigurationError final : public std::runtime_error {
@@ -64,8 +65,13 @@ struct ConfigurationOverrides {
 [[nodiscard]] std::vector<std::filesystem::path>
 discover_configuration_files(const std::filesystem::path& shader_directory);
 
+// Directory-only loading preserves the original API and intentionally cannot select file groups.
 [[nodiscard]] WorkspaceConfiguration
 load_workspace_configuration(const std::filesystem::path& shader_directory);
+
+// File-aware loading applies matching file groups after the normal directory hierarchy.
+[[nodiscard]] WorkspaceConfiguration
+load_workspace_configuration_for_file(const std::filesystem::path& shader_file);
 
 [[nodiscard]] WorkspaceConfiguration
 apply_configuration_overrides(WorkspaceConfiguration configuration,
