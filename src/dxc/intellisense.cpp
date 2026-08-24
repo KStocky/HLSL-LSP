@@ -1211,6 +1211,9 @@ void TranslationUnit::reparse(std::vector<SourceFile> files) {
                                                      static_cast<unsigned>(pointers.size())),
           "Reparse");
 #else
+    // DXC 1.9.2607's native Reparse has been observed to crash on Linux. An
+    // in-process crash cannot be recovered safely, so rebuild with the same
+    // index, arguments, and unsaved buffers instead.
     implementation_->parse_translation_unit();
 #endif
 }

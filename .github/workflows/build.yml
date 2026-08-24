@@ -15,12 +15,15 @@ jobs:
           - name: Windows MSVC
             os: windows-latest
             compiler: msvc
+            build-type: Release
           - name: Windows clang-cl
             os: windows-latest
             compiler: clang-cl
+            build-type: Debug
           - name: Linux Clang
             os: ubuntu-24.04
             compiler: clang
+            build-type: Release
 
     steps:
       - name: Check out HLSL-LSP
@@ -44,28 +47,70 @@ jobs:
             'clang-cl.exe'
           }
           cmake -S . -B out/build/ci -G Ninja `
-            -DCMAKE_BUILD_TYPE=Debug `
+            -DCMAKE_BUILD_TYPE=${{ matrix.build-type }} `
             -DCMAKE_CXX_COMPILER="$compiler" `
             -DBUILD_TESTING=ON
-          cmake --build out/build/ci --config Debug
-          ctest --test-dir out/build/ci --build-config Debug --output-on-failure
+          cmake --build out/build/ci --config ${{ matrix.build-type }}
+          ctest --test-dir out/build/ci `
+            --build-config ${{ matrix.build-type }} --output-on-failure
 
       - name: Configure on Linux
         if: runner.os == 'Linux'
         shell: bash
         run: |
           cmake -S . -B out/build/ci -G Ninja \
-            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build-type }} \
             -DCMAKE_CXX_COMPILER=clang++ \
             -DBUILD_TESTING=ON
 
       - name: Build
         if: runner.os == 'Linux'
-        run: cmake --build out/build/ci --config Debug
+        run: cmake --build out/build/ci --config ${{ matrix.build-type }}
 
       - name: Run Catch2 tests
         if: runner.os == 'Linux'
-        run: ctest --test-dir out/build/ci --build-config Debug --output-on-failure
+        run: >-
+          ctest --test-dir out/build/ci
+          --build-config ${{ matrix.build-type }}
+          --output-on-failure
+
+      - name: Prove Linux DXC IntelliSense runtime
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          env -u LD_LIBRARY_PATH \
+            ./out/build/ci/hlsl-intellisense-tests "[linux-runtime]"
+          cmake --install out/build/ci \
+            --config ${{ matrix.build-type }} \
+            --prefix out/package/linux-x64
+          test -x out/package/linux-x64/hlsl-lsp
+          test -f out/package/linux-x64/libdxcompiler.so
+          readelf -d out/package/linux-x64/hlsl-lsp | grep -F '$ORIGIN'
+          env -u LD_LIBRARY_PATH out/package/linux-x64/hlsl-lsp </dev/null
+
+      - name: Package Windows x64 runtime
+        if: matrix.compiler == 'msvc'
+        shell: pwsh
+        run: |
+          cmake --install out/build/ci `
+            --config ${{ matrix.build-type }} `
+            --prefix out/package/win32-x64
+
+      - name: Upload Windows x64 runtime
+        if: matrix.compiler == 'msvc'
+        uses: actions/upload-artifact@v6
+        with:
+          name: HLSL-LSP-Windows-x64-runtime
+          path: out/package/win32-x64
+          if-no-files-found: error
+
+      - name: Upload Linux x64 runtime
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v6
+        with:
+          name: HLSL-LSP-Linux-x64-runtime
+          path: out/package/linux-x64
+          if-no-files-found: error
 
       - name: Build Visual Studio VSIX
         if: matrix.compiler == 'msvc'
@@ -92,7 +137,8 @@ jobs:
 
   vscode-client:
     name: Visual Studio Code VSIX
-    runs-on: windows-latest
+    needs: build-and-test
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Check out HLSL-LSP
@@ -105,29 +151,29 @@ jobs:
           cache: npm
           cache-dependency-path: clients/vscode/package-lock.json
 
-      - name: Build release server
-        shell: pwsh
-        run: |
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $vs = & $vswhere -latest -products * `
-            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
-            -property installationPath
-          Import-Module "$vs\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
-          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation `
-            -DevCmdArguments '-arch=x64 -host_arch=x64'
+      - name: Download Windows x64 runtime
+        uses: actions/download-artifact@v6
+        with:
+          name: HLSL-LSP-Windows-x64-runtime
+          path: out/runtime/win32-x64
 
-          cmake -S . -B out/build/vscode-release -G Ninja `
-            -DCMAKE_BUILD_TYPE=Release `
-            "-DCMAKE_CXX_COMPILER=cl.exe" `
-            -DBUILD_TESTING=OFF
-          cmake --build out/build/vscode-release --target hlsl-lsp
+      - name: Download Linux x64 runtime
+        uses: actions/download-artifact@v6
+        with:
+          name: HLSL-LSP-Linux-x64-runtime
+          path: out/runtime/linux-x64
 
       - name: Install and stage VS Code client
         working-directory: clients/vscode
-        shell: pwsh
+        shell: bash
         run: |
           npm ci
-          npm run stage:runtime -- --server-dir ..\..\out\build\vscode-release
+          npm run stage:runtime -- \
+            --platform win32-x64 \
+            --server-dir ../../out/runtime/win32-x64
+          npm run stage:runtime -- \
+            --platform linux-x64 \
+            --server-dir ../../out/runtime/linux-x64
 
       - name: Check and test VS Code client
         working-directory: clients/vscode
@@ -135,11 +181,18 @@ jobs:
 
       - name: Run extension-host smoke tests
         working-directory: clients/vscode
-        run: npm run test:integration -- --server-path server\win32-x64\hlsl-lsp.exe
+        run: xvfb-run -a npm run test:integration -- --bundled
 
       - name: Package VS Code VSIX
         working-directory: clients/vscode
         run: npm run package
+
+      - name: Verify packaged Linux executable mode
+        working-directory: clients/vscode
+        shell: bash
+        run: |
+          zipinfo -l hlsl-lsp-vscode.vsix |
+            grep -E '^-rwx.*extension/server/linux-x64/hlsl-lsp$'
 
       - name: Upload Visual Studio Code VSIX
         uses: actions/upload-artifact@v6

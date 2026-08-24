@@ -107,6 +107,29 @@ async function validateWindowsRuntime(
   return runtimeFiles;
 }
 
+async function validateLinuxRuntime(
+  fileSystem: RuntimeFileSystem,
+  executablePath: string,
+): Promise<readonly string[]> {
+  const runtime = path.join(path.dirname(executablePath), "libdxcompiler.so");
+  await requireFile(fileSystem, runtime, "The DXC runtime");
+  return [runtime];
+}
+
+async function validateRuntimeFiles(
+  fileSystem: RuntimeFileSystem,
+  executablePath: string,
+  platform: NodeJS.Platform,
+): Promise<readonly string[]> {
+  if (platform === "win32") {
+    return validateWindowsRuntime(fileSystem, executablePath);
+  }
+  if (platform === "linux") {
+    return validateLinuxRuntime(fileSystem, executablePath);
+  }
+  return [];
+}
+
 export async function resolveServerRuntime(
   configuredPath: string | undefined,
   environment: RuntimeEnvironment,
@@ -120,10 +143,12 @@ export async function resolveServerRuntime(
       environment.workspaceFolders,
     );
     await validateExecutable(fileSystem, command, environment.platform);
+    // External Linux servers may resolve DXC through RUNPATH or the system
+    // loader. Bundled runtimes remain strictly validated below.
     const runtimeFiles =
-      environment.platform === "win32"
-        ? await validateWindowsRuntime(fileSystem, command)
-        : [];
+      environment.platform === "linux"
+        ? []
+        : await validateRuntimeFiles(fileSystem, command, environment.platform);
     return {
       command,
       workingDirectory: path.dirname(command),
@@ -132,25 +157,32 @@ export async function resolveServerRuntime(
     };
   }
 
-  if (environment.platform !== "win32" || environment.architecture !== "x64") {
+  const bundledPlatform =
+    environment.architecture === "x64" &&
+    (environment.platform === "win32" || environment.platform === "linux");
+  if (!bundledPlatform) {
     const platform = `${environment.platform}-${environment.architecture}`;
-    const detail =
-      environment.platform === "linux"
-        ? "Linux currently requires an externally built server with libdxcompiler.so available to the dynamic loader."
-        : `No bundled HLSL-LSP server is published for ${platform}.`;
     throw new RuntimeResolutionError(
-      `${detail} Configure hlsl.server.path; no fallback server was started.`,
+      `No bundled HLSL-LSP server is published for ${platform}. Configure hlsl.server.path; no fallback server was started.`,
     );
   }
 
+  const platformDirectory =
+    environment.platform === "win32" ? "win32-x64" : "linux-x64";
   const workingDirectory = path.join(
     environment.extensionPath,
     "server",
-    "win32-x64",
+    platformDirectory,
   );
-  const command = path.join(workingDirectory, "hlsl-lsp.exe");
+  const executable =
+    environment.platform === "win32" ? "hlsl-lsp.exe" : "hlsl-lsp";
+  const command = path.join(workingDirectory, executable);
   await validateExecutable(fileSystem, command, environment.platform);
-  const runtimeFiles = await validateWindowsRuntime(fileSystem, command);
+  const runtimeFiles = await validateRuntimeFiles(
+    fileSystem,
+    command,
+    environment.platform,
+  );
   return {
     command,
     workingDirectory,

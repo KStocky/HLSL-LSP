@@ -143,38 +143,42 @@ then install it from the command line:
 code --install-extension hlsl-lsp-vscode.vsix
 ```
 
-The VSIX bundles the Windows x64 server and matching DXC runtime. It activates
-for `.hlsl`, `.hlsli`, and `.usf`; other extensions can use the `hlsl` language
-through VS Code's `files.associations` setting.
+The VSIX bundles Windows x64 and Linux x64 servers with their matching DXC
+runtimes. It activates for `.hlsl`, `.hlsli`, and `.usf`; other extensions can
+use the `hlsl` language through VS Code's `files.associations` setting.
 
-To package from source after building the Windows Release server:
+The build and release workflows package both platforms on Linux so the Linux
+executable mode is preserved. For the complete local staging commands, see the
+client README. A Windows-only development package can still be produced with:
 
 ```powershell
 cd clients\vscode
 npm ci
-npm run stage:runtime -- --server-dir ..\..\out\build\windows-msvc\Release
+npm run stage:runtime -- --platform win32-x64 `
+  --server-dir ..\..\out\build\windows-msvc\Release
 npm run check
 npm run package
 ```
 
-The bundled client currently supports Windows x64. Linux users can build the
-server separately, make `libdxcompiler.so` discoverable by the dynamic loader,
-and set `hlsl.server.path`; the extension does not silently fall back when a
-configured or bundled runtime is unavailable. See
+The bundled client supports Windows x64 and glibc-based Linux x64. The
+extension does not silently fall back when a configured or bundled runtime is
+unavailable. See
 [`clients/vscode/README.md`](clients/vscode/README.md) for configuration,
 testing, path behavior, and current platform limitations.
 
 ## Development requirements
 
-- Windows
-- Visual Studio 2026 with the MSVC C++ workload
-- LLVM with `clang-cl`, `clang-format`, and `clang-tidy`
+- Windows with Visual Studio 2026 and the MSVC C++ workload, or Linux x64 with
+  Clang, Ninja, and glibc 2.38 or newer
+- LLVM with `clang-format` and `clang-tidy` (`clang-cl` for that Windows preset)
 - CMake 3.28 or newer
 - Internet access for CMake's first configuration
 
-CMake downloads the pinned official Microsoft DXC `1.9.2607.13` package,
-including matching headers and runtime binaries. Downloads are checksum
-verified and cached in the build directory.
+CMake downloads checksum-verified official Microsoft DXC packages. Windows
+uses `Microsoft.Direct3D.DXC` `1.9.2607.13`; Linux x64 uses the corresponding
+official DXC `v1.9.2607` release and pinned compatibility header. See
+[`docs/linux.md`](docs/linux.md) for artifact hashes, ABI requirements,
+licensing, installation, runtime loading, and the safe reparse limitation.
 
 To use a custom DXC build instead, set both `DXC_INCLUDE_DIR` and
 `DXC_RUNTIME_DIR`. `DXC_INCLUDE_DIR` must directly contain `dxcisense.h`.
@@ -195,6 +199,17 @@ ctest --preset windows-msvc-debug
 cmake --preset windows-clangcl
 cmake --build --preset windows-clangcl-debug
 ctest --preset windows-clangcl-debug
+```
+
+On Linux x64:
+
+```console
+cmake --preset linux-clang
+cmake --build --preset linux-clang-debug
+ctest --preset linux-clang-debug
+cmake --build --preset linux-clang-release --target hlsl-lsp
+cmake --install out/build/linux-clang --config Release \
+  --prefix out/package/linux-x64
 ```
 
 All C++ tests use Catch2. First-party targets use C++23 and warnings as errors:

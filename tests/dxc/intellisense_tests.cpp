@@ -272,6 +272,67 @@ TEST_CASE("DXC IntelliSense consumes unsaved include buffers", "[dxc][includes][
     std::filesystem::remove_all(directory);
 }
 
+TEST_CASE("Pinned DXC runtime supports the complete Linux IntelliSense workflow",
+          "[dxc][linux-runtime][integration]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    const auto directory = std::filesystem::current_path() / "linux-runtime";
+    const auto root = (directory / "root.hlsl").generic_string();
+    const auto dependency = (directory / "dependency.hlsli").generic_string();
+    const std::string root_source = "#include \"dependency.hlsli\"\n"
+                                    "float4 main() : SV_Target {\n"
+                                    "    float result = shade(1.0, 2.0);\n"
+                                    "    return result.xxxx;\n"
+                                    "}\n";
+    const std::string dependency_source =
+        "float shade(float value, float bias) { return value + bias; }\n";
+
+    auto translation_unit =
+        intellisense.parse(root, {{root, root_source}, {dependency, dependency_source}});
+
+    REQUIRE(translation_unit.diagnostics().empty());
+    const auto completions = translation_unit.complete(root, 4, 1);
+    CHECK(std::ranges::any_of(completions,
+                              [](const auto& completion) { return completion.label == "shade"; }));
+    const auto definition = translation_unit.definition_at(root, 3, 21);
+    REQUIRE(definition.has_value());
+    CHECK(definition->name == "shade");
+    CHECK(definition->location.path == dependency);
+    const auto hover = translation_unit.hover_at(root, 3, 21);
+    REQUIRE(hover.has_value());
+    CHECK(hover->name == "shade");
+    const auto signatures = translation_unit.signatures_at(root, 3, 21);
+    REQUIRE(signatures.size() == 1);
+    CHECK(signatures[0].label == "float shade(float value, float bias)");
+
+    const std::string updated_root_source = "#include \"dependency.hlsli\"\n"
+                                            "float4 main() : SV_Target {\n"
+                                            "    float result = updatedShade(1.0);\n"
+                                            "    return result.xxxx;\n"
+                                            "}\n";
+    const std::string updated_dependency_source =
+        "float updatedShade(float value) { return value; }\n";
+    translation_unit.reparse(
+        {{root, updated_root_source}, {dependency, updated_dependency_source}});
+
+    REQUIRE(translation_unit.diagnostics().empty());
+    const auto updated_definition = translation_unit.definition_at(root, 3, 21);
+    REQUIRE(updated_definition.has_value());
+    CHECK(updated_definition->name == "updatedShade");
+    const auto updated_hover = translation_unit.hover_at(root, 3, 21);
+    REQUIRE(updated_hover.has_value());
+    CHECK(updated_hover->name == "updatedShade");
+    const auto updated_signatures = translation_unit.signatures_at(root, 3, 21);
+    REQUIRE(updated_signatures.size() == 1);
+    CHECK(updated_signatures[0].label == "float updatedShade(float value)");
+
+    translation_unit.reparse(
+        {{root, updated_root_source}, {dependency, "// updatedShade removed\n"}});
+    CHECK(std::ranges::any_of(translation_unit.diagnostics(), [](const auto& diagnostic) {
+        return diagnostic.severity == hlsl_intellisense::dxc::DiagnosticSeverity::error &&
+               diagnostic.message.find("updatedShade") != std::string::npos;
+    }));
+}
+
 TEST_CASE("DXC IntelliSense exposes hover and overload signatures for HLSL 2021",
           "[dxc][hover][signature-help][integration]") {
     hlsl_intellisense::dxc::Intellisense intellisense;

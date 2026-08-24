@@ -702,7 +702,8 @@ callee_at(std::string_view text, const std::vector<bool>& code, std::size_t open
         } else if (character == '[' || character == '{' ||
                    (character == '<' && ((!delimiters.empty() && delimiters.back().value == '<') ||
                                          template_open(text, lexical.code, offset)))) {
-            delimiters.push_back({.value = character});
+            delimiters.push_back(
+                {.value = character, .callee = std::nullopt, .active_parameter = 0});
         } else if (character == ')' || character == ']' || character == '}' || character == '>') {
             const auto expected =
                 character == ')' ? '(' : (character == ']' ? '[' : (character == '}' ? '{' : '<'));
