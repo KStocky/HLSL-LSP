@@ -14,6 +14,7 @@ with:
 - Workspace symbol support for Visual Studio's All-In-One Search
 - Hierarchical `shadertoolsconfig.json` compiler configuration
 - Transitive, virtual, open-buffer, and dependency-aware include handling
+- Bounded, cancellable, version-coalesced background analysis
 - Visual Studio 2026 and Visual Studio Code clients under `clients/`
 
 The Visual Studio extension serves a similar purpose to
@@ -215,6 +216,70 @@ cmake --install out/build/linux-clang --config Release \
 All C++ tests use Catch2. First-party targets use C++23 and warnings as errors:
 `/W4 /WX` with MSVC-compatible frontends and
 `-Wall -Wextra -Wpedantic -Werror` with Linux Clang.
+
+### Analysis scheduling, caching, and cancellation
+
+Analysis notifications enqueue work instead of parsing on the protocol-input
+thread. Two workers and a 64-item queue are used by default. A stable root-path
+hash assigns each root to one worker; that worker creates, uses, reparses, and
+destroys the root's DXC index and translation unit. Calls for one translation
+unit are therefore serialized, while unrelated roots can run concurrently.
+Superseded queued versions are coalesced and running obsolete work is prevented
+from publishing diagnostics. Diagnostics and interactive results are checked
+against the current document version before publication or return.
+
+The translation-unit LRU defaults to 16 entries and a 256 MiB estimated budget.
+The estimate is deliberately conservative rather than a claim about DXC's
+unobservable COM heap: it charges 4 MiB per DXC translation unit plus retained
+source text, paths, dependency strings, keys, and their C++ container storage.
+The parsed-include-metadata LRU defaults to 512 entries and 8 MiB; its estimate
+charges the retained source text, identities, directives, strings, and
+containers. Limits are divided deterministically among workers. Entries are
+evicted only by their owning idle worker and never while a DXC call is using
+them.
+
+`$/cancelRequest` is supported for integer and string request IDs. Queued work
+returns LSP `RequestCancelled` (`-32800`) promptly. DXC exposes no safe
+interrupt primitive for an in-flight COM call, so cancellation can return to
+the client while that call finishes on its owning worker; its result is
+suppressed and the translation unit is not accessed concurrently or destroyed
+early. Shutdown cancels queued and active work, waits for any such DXC call,
+then destroys DXC state on the same worker.
+
+Defaults can be tuned with positive integer command-line arguments:
+
+```text
+--analysis-workers 2
+--analysis-queue-capacity 64
+--request-workers 4
+--request-queue-capacity 64
+--translation-unit-count 16
+--translation-unit-memory-mb 256
+--include-cache-count 512
+--include-cache-memory-mb 8
+```
+
+Queue, entry, and memory capacities must be at least the analysis worker count.
+The translation-unit memory budget must also provide at least the 4 MiB opaque
+estimate per worker. A single analysis whose estimate exceeds its worker's
+share can publish diagnostics but is not retained; interactive requests for
+such a document are cancelled rather than exceeding the configured bound.
+Literal include dependencies are tracked per root, so include and configuration
+file changes do not reparse unrelated completed roots. Macro-computed includes
+and roots whose first analysis is still pending conservatively depend on all
+open documents until DXC analysis establishes precise metadata.
+
+The checked-in representative shader benchmark reports cold parse, warm cache,
+reparse, completion, hit/miss/eviction, and estimated-memory metrics:
+
+```powershell
+cmake --build --preset windows-msvc-debug --target hlsl-analysis-benchmark
+out\build\windows-msvc\Debug\hlsl-analysis-benchmark.exe
+```
+
+CI runs the same utility as `analysis-structural-benchmark`. It asserts cache
+and scheduling structure only; wall-clock values are reported and never used
+as flaky pass/fail thresholds.
 
 ## Configuration
 

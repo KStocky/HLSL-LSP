@@ -2,7 +2,10 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <condition_variable>
 #include <cstdint>
+#include <future>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <variant>
@@ -78,4 +81,59 @@ TEST_CASE("Unknown notifications are ignored", "[json-rpc][dispatcher]") {
         json_rpc::Notification{.method = "unknown", .params = std::nullopt}};
 
     CHECK(!dispatcher.dispatch(notification).has_value());
+}
+
+TEST_CASE("Dispatcher cancellation is tracked before and during request execution",
+          "[json-rpc][dispatcher][cancellation]") {
+    json_rpc::Dispatcher dispatcher;
+    std::mutex mutex;
+    std::condition_variable entered;
+    std::condition_variable release;
+    bool handler_entered{};
+    bool handler_released{};
+    dispatcher.register_request_handler(
+        "blocked",
+        [&](const std::optional<json_rpc::Json>&,
+            const json_rpc::RequestContext& context) -> json_rpc::Json {
+            {
+                std::scoped_lock lock{mutex};
+                handler_entered = true;
+            }
+            entered.notify_one();
+            std::unique_lock lock{mutex};
+            release.wait(lock, [&] { return handler_released; });
+            context.cancellation.throw_if_cancellation_requested();
+            return true;
+        });
+
+    const json_rpc::Request request{
+        .id = std::string{"request"}, .method = "blocked", .params = std::nullopt};
+    const auto cancellation = dispatcher.begin_request(request.id);
+    auto response =
+        std::async(std::launch::async, [&] { return dispatcher.dispatch(request, cancellation); });
+    {
+        std::unique_lock lock{mutex};
+        entered.wait(lock, [&] { return handler_entered; });
+    }
+    dispatcher.dispatch(json_rpc::Notification{.method = "$/cancelRequest",
+                                               .params = json_rpc::Json{{"id", "request"}}});
+    {
+        std::scoped_lock lock{mutex};
+        handler_released = true;
+    }
+    release.notify_one();
+
+    const auto result = response.get();
+    CHECK(std::get<json_rpc::ErrorResponse>(result).error.code == json_rpc::request_cancelled_code);
+    dispatcher.finish_request(request.id, cancellation);
+
+    const json_rpc::Request queued{
+        .id = std::int64_t{9}, .method = "blocked", .params = std::nullopt};
+    const auto queued_cancellation = dispatcher.begin_request(queued.id);
+    dispatcher.dispatch(
+        json_rpc::Notification{.method = "$/cancelRequest", .params = json_rpc::Json{{"id", 9}}});
+    const auto queued_result = dispatcher.dispatch(queued, queued_cancellation);
+    CHECK(std::get<json_rpc::ErrorResponse>(queued_result).error.code ==
+          json_rpc::request_cancelled_code);
+    dispatcher.finish_request(queued.id, queued_cancellation);
 }

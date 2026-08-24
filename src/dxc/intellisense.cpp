@@ -714,6 +714,7 @@ struct IdentifierExtent {
         if (child_count < page_size) {
             return true;
         }
+        // NOLINTNEXTLINE(readability-redundant-parentheses)
         if (skip > (std::numeric_limits<unsigned>::max)() - page_size) {
             return false;
         }

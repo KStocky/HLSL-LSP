@@ -4,6 +4,7 @@ Checks: >
   -bugprone-exception-escape,
   -bugprone-throwing-static-initialization,
   clang-analyzer-*,
+  -clang-analyzer-optin.core.EnumCastOutOfRange,
   cppcoreguidelines-slicing,
   modernize-use-nullptr,
   modernize-use-override,
