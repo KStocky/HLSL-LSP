@@ -9,11 +9,18 @@ function argument(name) {
 }
 
 const root = path.resolve(import.meta.dirname, "..");
-const serverPath = path.resolve(
-  argument("--server-path") ??
-    process.env.HLSL_LSP_TEST_SERVER ??
-    path.join(root, "server", "win32-x64", "hlsl-lsp.exe"),
+const bundledServer = process.argv.includes("--bundled");
+const configuredServer =
+  argument("--server-path") ?? process.env.HLSL_LSP_TEST_SERVER;
+const defaultServer = path.join(
+  root,
+  "server",
+  process.platform === "linux" ? "linux-x64" : "win32-x64",
+  process.platform === "linux" ? "hlsl-lsp" : "hlsl-lsp.exe",
 );
+const serverPath = bundledServer
+  ? undefined
+  : path.resolve(configuredServer ?? defaultServer);
 const testData = path.join(root, ".test-data");
 const userData = path.join(testData, "user-data");
 const extensions = path.join(testData, "extensions");
@@ -31,9 +38,8 @@ try {
     vscodeExecutablePath,
     extensionDevelopmentPath: root,
     extensionTestsPath: path.join(root, "dist", "test", "integration", "index"),
-    extensionTestsEnv: {
-      HLSL_LSP_TEST_SERVER: serverPath,
-    },
+    extensionTestsEnv:
+      serverPath === undefined ? {} : { HLSL_LSP_TEST_SERVER: serverPath },
     launchArgs: [
       path.join(root, "test", "fixture"),
       "--disable-extensions",

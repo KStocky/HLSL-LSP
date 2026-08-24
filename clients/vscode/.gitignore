@@ -4,3 +4,4 @@ node_modules/
 .vscode-test/
 hlsl-lsp-vscode.vsix
 server/win32-x64/
+server/linux-x64/

@@ -4,11 +4,12 @@ Microsoft DirectX Shader Compiler (DXC) 1.9.2607.13
 ---------------------------------------------------
 
 The Windows VSIX contains dxcompiler.dll and dxil.dll from the official
-Microsoft.Direct3D.DXC 1.9.2607.13 NuGet package acquired and checksum-verified
-by cmake/Dxc.cmake. The ReleaseNotes.md included in that downloaded package
-states that LICENSE-LLVM.txt applies to all package files other than
-d3d12shader.h. A verbatim copy of that license is included at
-licenses/dxc/LICENSE-LLVM.txt.
+Microsoft.Direct3D.DXC 1.9.2607.13 NuGet package. The Linux VSIX contains
+libdxcompiler.so from Microsoft's official DXC v1.9.2607 release asset
+linux_dxc_2026_07_29.x86_x64.tar.gz. cmake/Dxc.cmake pins SHA-256 checksums for
+both downloads. The NuGet ReleaseNotes.md states that LICENSE-LLVM.txt applies
+to all package files other than d3d12shader.h, which is not bundled. A verbatim
+copy of that license is included at licenses/dxc/LICENSE-LLVM.txt.
 
 Production npm packages
 -----------------------

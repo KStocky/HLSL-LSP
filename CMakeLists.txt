@@ -111,6 +111,26 @@ target_link_libraries(hlsl-lsp PRIVATE
 hlsl_enable_clang_tidy(hlsl-lsp)
 hlsl_copy_dxc_runtime(hlsl-lsp)
 
+install(TARGETS hlsl-lsp
+    RUNTIME DESTINATION "."
+    COMPONENT Runtime)
+install(FILES ${HLSL_DXC_RUNTIME_FILES}
+    DESTINATION "."
+    COMPONENT Runtime)
+install(FILES "${PROJECT_SOURCE_DIR}/LICENSE"
+    DESTINATION "licenses/hlsl-lsp"
+    COMPONENT Runtime)
+if(DXC_LICENSE_FILE)
+    install(FILES "${DXC_LICENSE_FILE}"
+        DESTINATION "licenses/dxc"
+        COMPONENT Runtime)
+endif()
+if(EXISTS "${nlohmann_json_SOURCE_DIR}/LICENSE.MIT")
+    install(FILES "${nlohmann_json_SOURCE_DIR}/LICENSE.MIT"
+        DESTINATION "licenses/nlohmann-json"
+        COMPONENT Runtime)
+endif()
+
 if(BUILD_TESTING)
     add_executable(hlsl-intellisense-tests
         tests/dxc/intellisense_tests.cpp)

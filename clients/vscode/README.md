@@ -15,7 +15,8 @@ code --install-extension hlsl-lsp-vscode.vsix
 ```
 
 The release VSIX contains the Windows x64 `hlsl-lsp.exe`, `dxcompiler.dll`, and
-`dxil.dll`. Opening an HLSL document starts that bundled server automatically.
+`dxil.dll`, plus the Linux x64 `hlsl-lsp` and `libdxcompiler.so`. Opening an
+HLSL document starts the matching bundled server automatically.
 Additional extensions can be associated with the contributed `hlsl` language
 through VS Code's built-in setting:
 
@@ -28,28 +29,30 @@ through VS Code's built-in setting:
 
 ## Build and package
 
-Requirements are Node.js 22 or newer, npm, and a Windows x64 Release build of
-the server with its matching DXC runtime:
+Requirements are Node.js 22 or newer, npm, and Release runtime bundles for both
+Windows x64 and Linux x64. Stage and package on Linux so the Linux executable's
+mode is retained:
 
-```powershell
-cmake --preset windows-msvc
-cmake --build --preset windows-msvc-release --target hlsl-lsp
-
-cd clients\vscode
+```console
+cd clients/vscode
 npm ci
-npm run stage:runtime -- --server-dir ..\..\out\build\windows-msvc\Release
+npm run stage:runtime -- --platform win32-x64 \
+  --server-dir ../../out/package/win32-x64
+npm run stage:runtime -- --platform linux-x64 \
+  --server-dir ../../out/package/linux-x64
 npm run check
 npm run package
 ```
 
 The result is `clients\vscode\hlsl-lsp-vscode.vsix`. `package-lock.json` pins
-the npm dependency graph, and the staging command fails unless all three
-required Windows runtime files are present.
+the npm dependency graph, and each staging command fails unless all required
+runtime files are present. The build and release workflows produce and combine
+the two CMake-installed bundles.
 
 Run the extension-host smoke test against the staged server with:
 
-```powershell
-npm run test:integration -- --server-path server\win32-x64\hlsl-lsp.exe
+```console
+xvfb-run -a npm run test:integration -- --bundled
 ```
 
 The harness downloads the pinned VS Code 1.96.0 test instance, uses isolated
@@ -63,16 +66,16 @@ editor version.
 `hlsl.server.path` has strict precedence when it is non-empty. Relative paths
 are resolved from the first workspace folder; use an absolute path when no
 folder is open. On Windows, an external server must have matching
-`dxcompiler.dll` and `dxil.dll` files beside it. The extension validates the
-selected executable and runtime and reports activation errors without silently
-trying another server.
+`dxcompiler.dll` and `dxil.dll` files beside it. On Linux, the server may find
+`libdxcompiler.so` through a colocated file, its ELF RUNPATH, or the system
+dynamic loader configuration. The extension validates bundled runtime files
+and reports activation errors without silently trying another server.
 
-The bundled runtime is currently available only for Windows x64. On Linux, set
-`hlsl.server.path` to a separately built executable and ensure
-`libdxcompiler.so` is available to the dynamic loader. No Linux binary is
-currently included in the VSIX. The extension can launch a configured external
-server on other platforms, but this repository's automatic DXC acquisition is
-currently limited to Windows x64 and Linux x64.
+Bundled runtimes are available for Windows x64 and glibc-based Linux x64.
+Ubuntu 24.04 is tested; the Linux runtime requires glibc 2.38,
+`GLIBCXX_3.4.29`, and `libz.so.1`. ARM, 32-bit, and musl Linux are not
+supported. See [`../../docs/linux.md`](../../docs/linux.md) for complete Linux
+requirements and limitations.
 
 One language server is used for the entire VS Code window. In a multi-root
 workspace, the first workspace folder deterministically selects both

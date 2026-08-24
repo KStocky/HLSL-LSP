@@ -34,6 +34,16 @@ jobs:
             "-DCMAKE_CXX_COMPILER=cl.exe" `
             -DBUILD_TESTING=OFF
           cmake --build out/build/release --target hlsl-lsp
+          cmake --install out/build/release `
+            --config Release `
+            --prefix out/package/win32-x64
+
+      - name: Upload Windows x64 runtime
+        uses: actions/upload-artifact@v6
+        with:
+          name: HLSL-LSP-Windows-x64-runtime
+          path: out/package/win32-x64
+          if-no-files-found: error
 
       - name: Build Visual Studio VSIX
         shell: pwsh
@@ -68,9 +78,61 @@ jobs:
             clients/visual-studio/HlslLsp.VisualStudio/bin/Release/net472/HlslLsp.VisualStudio.vsix `
             --clobber
 
+  build-linux-runtime:
+    name: Build Linux x64 runtime
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out HLSL-LSP
+        uses: actions/checkout@v5
+
+      - name: Build and install release server
+        shell: bash
+        run: |
+          cmake -S . -B out/build/release -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DBUILD_TESTING=OFF
+          cmake --build out/build/release --target hlsl-lsp
+          cmake --install out/build/release \
+            --config Release \
+            --prefix out/package/linux-x64
+          test -x out/package/linux-x64/hlsl-lsp
+          test -f out/package/linux-x64/libdxcompiler.so
+          readelf -d out/package/linux-x64/hlsl-lsp | grep -F '$ORIGIN'
+          env -u LD_LIBRARY_PATH out/package/linux-x64/hlsl-lsp </dev/null
+          tar -C out/package -czf out/HLSL-LSP-linux-x64.tar.gz linux-x64
+
+      - name: Upload Linux x64 runtime for packaging
+        uses: actions/upload-artifact@v6
+        with:
+          name: HLSL-LSP-Linux-x64-runtime
+          path: out/package/linux-x64
+          if-no-files-found: error
+
+      - name: Upload Linux x64 archive
+        uses: actions/upload-artifact@v6
+        with:
+          name: HLSL-LSP-Linux-x64
+          path: out/HLSL-LSP-linux-x64.tar.gz
+          if-no-files-found: error
+
+      - name: Attach Linux runtime to GitHub release
+        if: github.event_name == 'release'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload '${{ github.event.release.tag_name }}' \
+            out/HLSL-LSP-linux-x64.tar.gz \
+            --clobber
+
   build-vscode-vsix:
     name: Build Visual Studio Code VSIX
-    runs-on: windows-latest
+    needs:
+      - build-vsix
+      - build-linux-runtime
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Check out HLSL-LSP
@@ -83,29 +145,29 @@ jobs:
           cache: npm
           cache-dependency-path: clients/vscode/package-lock.json
 
-      - name: Build release server
-        shell: pwsh
-        run: |
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $vs = & $vswhere -latest -products * `
-            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
-            -property installationPath
-          Import-Module "$vs\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
-          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation `
-            -DevCmdArguments '-arch=x64 -host_arch=x64'
+      - name: Download Windows x64 runtime
+        uses: actions/download-artifact@v6
+        with:
+          name: HLSL-LSP-Windows-x64-runtime
+          path: out/runtime/win32-x64
 
-          cmake -S . -B out/build/vscode-release -G Ninja `
-            -DCMAKE_BUILD_TYPE=Release `
-            "-DCMAKE_CXX_COMPILER=cl.exe" `
-            -DBUILD_TESTING=OFF
-          cmake --build out/build/vscode-release --target hlsl-lsp
+      - name: Download Linux x64 runtime
+        uses: actions/download-artifact@v6
+        with:
+          name: HLSL-LSP-Linux-x64-runtime
+          path: out/runtime/linux-x64
 
       - name: Install and stage VS Code client
         working-directory: clients/vscode
-        shell: pwsh
+        shell: bash
         run: |
           npm ci
-          npm run stage:runtime -- --server-dir ..\..\out\build\vscode-release
+          npm run stage:runtime -- \
+            --platform win32-x64 \
+            --server-dir ../../out/runtime/win32-x64
+          npm run stage:runtime -- \
+            --platform linux-x64 \
+            --server-dir ../../out/runtime/linux-x64
 
       - name: Check and test VS Code client
         working-directory: clients/vscode
@@ -113,11 +175,18 @@ jobs:
 
       - name: Run extension-host smoke tests
         working-directory: clients/vscode
-        run: npm run test:integration -- --server-path server\win32-x64\hlsl-lsp.exe
+        run: xvfb-run -a npm run test:integration -- --bundled
 
       - name: Package VS Code VSIX
         working-directory: clients/vscode
         run: npm run package
+
+      - name: Verify packaged Linux executable mode
+        working-directory: clients/vscode
+        shell: bash
+        run: |
+          zipinfo -l hlsl-lsp-vscode.vsix |
+            grep -E '^-rwx.*extension/server/linux-x64/hlsl-lsp$'
 
       - name: Upload VS Code VSIX workflow artifact
         uses: actions/upload-artifact@v6
@@ -128,10 +197,10 @@ jobs:
 
       - name: Attach VS Code VSIX to GitHub release
         if: github.event_name == 'release'
-        shell: pwsh
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload '${{ github.event.release.tag_name }}' `
-            clients/vscode/hlsl-lsp-vscode.vsix `
+          gh release upload '${{ github.event.release.tag_name }}' \
+            clients/vscode/hlsl-lsp-vscode.vsix \
             --clobber

@@ -86,21 +86,68 @@ void test("the Windows x64 bundle requires the executable and both DXC files", a
   assert.equal(runtime.source, "bundled");
 });
 
-void test("Linux reports the external-server requirement without falling back", async () => {
+void test("the Linux x64 bundle requires an executable DXC runtime", async () => {
   const fileSystem = new FakeFileSystem();
+  const extensionPath = path.resolve("extension");
+  const directory = path.join(extensionPath, "server", "linux-x64");
+  const command = path.join(directory, "hlsl-lsp");
+  fileSystem.add(command);
+  fileSystem.inaccessible.add(path.normalize(command));
+
   await assert.rejects(
     resolveServerRuntime(undefined, {
       platform: "linux",
       architecture: "x64",
-      extensionPath: path.resolve("extension"),
+      extensionPath,
       workspaceFolders: [],
       fileSystem,
     }),
     (error: unknown) =>
       error instanceof RuntimeResolutionError &&
-      error.message.includes("libdxcompiler.so") &&
-      error.message.includes("no fallback"),
+      error.message.includes("not executable"),
   );
+
+  fileSystem.inaccessible.delete(path.normalize(command));
+  await assert.rejects(
+    resolveServerRuntime(undefined, {
+      platform: "linux",
+      architecture: "x64",
+      extensionPath,
+      workspaceFolders: [],
+      fileSystem,
+    }),
+    /libdxcompiler\.so/,
+  );
+
+  fileSystem.add(path.join(directory, "libdxcompiler.so"));
+  const runtime = await resolveServerRuntime("", {
+    platform: "linux",
+    architecture: "x64",
+    extensionPath,
+    workspaceFolders: [],
+    fileSystem,
+  });
+  assert.equal(runtime.command, command);
+  assert.equal(runtime.source, "bundled");
+  assert.deepEqual(runtime.runtimeFiles, [
+    path.join(directory, "libdxcompiler.so"),
+  ]);
+});
+
+void test("an external Linux server may resolve DXC through its loader", async () => {
+  const fileSystem = new FakeFileSystem();
+  const command = path.resolve("tools", "hlsl-lsp");
+  fileSystem.add(command);
+
+  const runtime = await resolveServerRuntime(command, {
+    platform: "linux",
+    architecture: "x64",
+    extensionPath: path.resolve("extension"),
+    workspaceFolders: [],
+    fileSystem,
+  });
+  assert.equal(runtime.source, "configured");
+  assert.deepEqual(runtime.runtimeFiles, []);
 });
 
 void test("a relative external path requires a workspace", async () => {

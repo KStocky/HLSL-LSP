@@ -6,10 +6,12 @@ Release packaging stages these files into `win32-x64/`:
 - `dxcompiler.dll`
 - `dxil.dll`
 
-The files are generated or downloaded build artifacts and are intentionally not
-stored in Git. `npm run stage:runtime -- --server-dir <directory>` validates
-and stages them before `npm run package`.
+It stages these files into `linux-x64/`:
 
-The platform directory keeps runtime resolution explicit and allows a future
-`linux-x64/` bundle without changing the extension layout. No Linux runtime is
-currently published in the VSIX.
+- `hlsl-lsp`
+- `libdxcompiler.so`
+
+The files are generated or downloaded build artifacts and are intentionally not
+stored in Git. `npm run stage:runtime -- --platform <platform>
+--server-dir <directory>` validates and stages them before `npm run package`.
+Packaging runs on Linux so the Linux executable remains executable.

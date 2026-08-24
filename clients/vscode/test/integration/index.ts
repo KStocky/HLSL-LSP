@@ -44,10 +44,11 @@ function positionInLast(
 
 export async function run(): Promise<void> {
   const serverPath = process.env.HLSL_LSP_TEST_SERVER;
-  assert(serverPath, "HLSL_LSP_TEST_SERVER was not provided");
-  await vscode.workspace
-    .getConfiguration("hlsl")
-    .update("server.path", serverPath, vscode.ConfigurationTarget.Global);
+  if (serverPath !== undefined) {
+    await vscode.workspace
+      .getConfiguration("hlsl")
+      .update("server.path", serverPath, vscode.ConfigurationTarget.Global);
+  }
   await vscode.workspace
     .getConfiguration("hlsl")
     .update(
