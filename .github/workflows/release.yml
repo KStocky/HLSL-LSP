@@ -38,6 +38,16 @@ jobs:
             --config Release `
             --prefix out/package/win32-x64
 
+          cmake -S . -B out/build/release-repro -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            "-DCMAKE_CXX_COMPILER=cl.exe" `
+            -DBUILD_TESTING=OFF
+          cmake --build out/build/release-repro --target hlsl-lsp
+          if ((Get-FileHash out/build/release/hlsl-lsp.exe).Hash -ne `
+              (Get-FileHash out/build/release-repro/hlsl-lsp.exe).Hash) {
+            throw 'Release server build is not reproducible'
+          }
+
       - name: Upload Windows x64 runtime
         uses: actions/upload-artifact@v6
         with:
@@ -59,6 +69,35 @@ jobs:
             /p:HlslLspServerDir="$env:GITHUB_WORKSPACE\out\build\release"
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
+          }
+
+      - name: Normalize Visual Studio VSIX
+        shell: pwsh
+        run: |
+          python tools/normalize_zip.py `
+            clients/visual-studio/HlslLsp.VisualStudio/bin/Release/net472/HlslLsp.VisualStudio.vsix
+
+          Copy-Item `
+            clients/visual-studio/HlslLsp.VisualStudio/bin/Release/net472/HlslLsp.VisualStudio.vsix `
+            out/HlslLsp.VisualStudio.first.vsix
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $msbuild = & $vswhere -latest -products * `
+            -requires Microsoft.Component.MSBuild `
+            -find MSBuild\**\Bin\MSBuild.exe |
+            Select-Object -First 1
+          & $msbuild `
+            clients\visual-studio\HlslLsp.VisualStudio\HlslLsp.VisualStudio.csproj `
+            /restore /t:Rebuild /p:Configuration=Release `
+            /p:HlslLspServerDir="$env:GITHUB_WORKSPACE\out\build\release"
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+          python tools/normalize_zip.py `
+            clients/visual-studio/HlslLsp.VisualStudio/bin/Release/net472/HlslLsp.VisualStudio.vsix
+          if ((Get-FileHash out/HlslLsp.VisualStudio.first.vsix).Hash -ne `
+              (Get-FileHash `
+                clients/visual-studio/HlslLsp.VisualStudio/bin/Release/net472/HlslLsp.VisualStudio.vsix).Hash) {
+            throw 'Visual Studio VSIX is not reproducible'
           }
 
       - name: Upload VSIX workflow artifact
@@ -101,7 +140,16 @@ jobs:
           test -f out/package/linux-x64/libdxcompiler.so
           readelf -d out/package/linux-x64/hlsl-lsp | grep -F '$ORIGIN'
           env -u LD_LIBRARY_PATH out/package/linux-x64/hlsl-lsp </dev/null
-          tar -C out/package -czf out/HLSL-LSP-linux-x64.tar.gz linux-x64
+          cmake -S . -B out/build/release-repro -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DBUILD_TESTING=OFF
+          cmake --build out/build/release-repro --target hlsl-lsp
+          cmp out/build/release/hlsl-lsp out/build/release-repro/hlsl-lsp
+          export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          tar --sort=name "--mtime=@${SOURCE_DATE_EPOCH}" \
+            --owner=0 --group=0 --numeric-owner \
+            -C out/package -czf out/HLSL-LSP-linux-x64.tar.gz linux-x64
 
       - name: Upload Linux x64 runtime for packaging
         uses: actions/upload-artifact@v6
@@ -180,6 +228,15 @@ jobs:
       - name: Package VS Code VSIX
         working-directory: clients/vscode
         run: npm run package
+
+      - name: Normalize VS Code VSIX
+        shell: bash
+        run: |
+          python tools/normalize_zip.py clients/vscode/hlsl-lsp-vscode.vsix
+          cp clients/vscode/hlsl-lsp-vscode.vsix out/hlsl-lsp-vscode.first.vsix
+          npm --prefix clients/vscode run package
+          python tools/normalize_zip.py clients/vscode/hlsl-lsp-vscode.vsix
+          cmp out/hlsl-lsp-vscode.first.vsix clients/vscode/hlsl-lsp-vscode.vsix
 
       - name: Verify packaged Linux executable mode
         working-directory: clients/vscode

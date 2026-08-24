@@ -1,0 +1,6 @@
+#include "/Project/Common.ush"
+
+float4 MainPS(FMaterialInput input) : SV_Target0
+{
+    return EvaluateMaterial(input);
+}

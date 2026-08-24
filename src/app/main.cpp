@@ -3,14 +3,20 @@
 #include <charconv>
 #include <cstddef>
 #include <cstdlib>
+#include <exception>
 #include <iostream>
 #include <limits>
 #include <string>
 #include <string_view>
 
 #ifdef _WIN32
+#define NOMINMAX
+#include <Windows.h>
 #include <fcntl.h>
 #include <io.h>
+#else
+#include <csignal>
+#include <unistd.h>
 #endif
 
 namespace {
@@ -26,14 +32,65 @@ namespace {
     return true;
 }
 
+void write_crash_message(std::string_view message) noexcept {
+#ifdef _WIN32
+    const auto handle = GetStdHandle(STD_ERROR_HANDLE);
+    if (handle == nullptr || handle == INVALID_HANDLE_VALUE) {
+        return;
+    }
+    DWORD written{};
+    static_cast<void>(
+        WriteFile(handle, message.data(), static_cast<DWORD>(message.size()), &written, nullptr));
+#else
+    static_cast<void>(::write(STDERR_FILENO, message.data(), message.size()));
+#endif
+}
+
+#ifdef _WIN32
+LONG WINAPI unhandled_exception_filter(EXCEPTION_POINTERS*) {
+    write_crash_message("HLSL-LSP: fatal native exception; consult Windows Error Reporting\n");
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+#else
+void fatal_signal_handler(int signal) {
+    write_crash_message("HLSL-LSP: fatal native signal; inspect the generated core dump\n");
+    std::signal(signal, SIG_DFL);
+    std::raise(signal);
+}
+#endif
+
+void install_crash_diagnostics() {
+    std::set_terminate([] {
+        write_crash_message("HLSL-LSP: unhandled C++ exception; terminating\n");
+        std::abort();
+    });
+#ifdef _WIN32
+    SetUnhandledExceptionFilter(unhandled_exception_filter);
+#else
+    for (const auto signal : {SIGABRT, SIGBUS, SIGFPE, SIGILL, SIGSEGV}) {
+        std::signal(signal, fatal_signal_handler);
+    }
+#endif
+}
+
 } // namespace
 
 int main(int argc, char* argv[]) {
+    install_crash_diagnostics();
     hlsl_intellisense::lsp::ServerOptions options;
     for (int index = 1; index < argc; ++index) {
         const std::string_view argument{argv[index]};
         if (argument == "--disable-semantic-tokens") {
             options.semantic_tokens = false;
+            continue;
+        }
+        if (argument == "--trace-protocol") {
+            options.protocol_trace = true;
+            continue;
+        }
+        if (argument == "--trace-source") {
+            options.protocol_trace = true;
+            options.trace_source = true;
             continue;
         }
         if (index + 1 >= argc) {

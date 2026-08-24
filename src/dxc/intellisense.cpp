@@ -1317,6 +1317,9 @@ auto Intellisense::parse(std::string root_path, std::vector<SourceFile> files,
     implementation->rebuild_unsaved_files();
 
     implementation->arguments = options.arguments();
+    std::erase_if(implementation->arguments, [](std::string_view argument) {
+        return argument == "-spirv" || argument.starts_with("-fspv-");
+    });
     implementation->parse_translation_unit();
 
     return TranslationUnit{std::move(implementation)};

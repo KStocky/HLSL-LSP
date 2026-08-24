@@ -191,6 +191,9 @@ uses `Microsoft.Direct3D.DXC` `1.9.2607.13`; Linux x64 uses the corresponding
 official DXC `v1.9.2607` release and pinned compatibility header. See
 [`docs/linux.md`](docs/linux.md) for artifact hashes, ABI requirements,
 licensing, installation, runtime loading, and the safe reparse limitation.
+Production tracing, crash diagnostics, resource limits, fuzzing, compatibility,
+corpus scope, and reproducible packaging are documented in
+[`docs/production.md`](docs/production.md).
 
 To use a custom DXC build instead, set both `DXC_INCLUDE_DIR` and
 `DXC_RUNTIME_DIR`. `DXC_INCLUDE_DIR` must directly contain `dxcisense.h`.

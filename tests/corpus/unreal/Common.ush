@@ -1,0 +1,9 @@
+struct FMaterialInput
+{
+    float2 UV;
+};
+
+float4 EvaluateMaterial(FMaterialInput input)
+{
+    return float4(input.UV, 0.0, 1.0);
+}

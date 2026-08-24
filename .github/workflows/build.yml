@@ -5,6 +5,30 @@ on:
   pull_request:
 
 jobs:
+  fuzz-smoke:
+    name: Clang libFuzzer smoke
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out HLSL-LSP
+        uses: actions/checkout@v5
+
+      - name: Build fuzz harnesses
+        shell: bash
+        run: |
+          cmake -S . -B out/build/fuzz -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DBUILD_TESTING=OFF \
+            -DHLSL_BUILD_FUZZERS=ON
+          cmake --build out/build/fuzz --parallel
+
+      - name: Run bounded fuzz smoke tests
+        shell: bash
+        run: |
+          for target in framing json uri edits; do
+            "out/build/fuzz/hlsl-${target}-fuzzer" -runs=2000
+          done
+
   build-and-test:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
@@ -128,6 +152,13 @@ jobs:
             exit $LASTEXITCODE
           }
 
+      - name: Normalize Visual Studio VSIX
+        if: matrix.compiler == 'msvc'
+        shell: pwsh
+        run: |
+          python tools/normalize_zip.py `
+            clients/visual-studio/HlslLsp.VisualStudio/bin/Release/net472/HlslLsp.VisualStudio.vsix
+
       - name: Upload Visual Studio VSIX
         if: matrix.compiler == 'msvc'
         uses: actions/upload-artifact@v6
@@ -186,6 +217,12 @@ jobs:
       - name: Package VS Code VSIX
         working-directory: clients/vscode
         run: npm run package
+
+      - name: Normalize VS Code VSIX
+        run: python tools/normalize_zip.py clients/vscode/hlsl-lsp-vscode.vsix
+
+      - name: Test reproducible ZIP normalization
+        run: python -m unittest tests/tools/test_normalize_zip.py
 
       - name: Verify packaged Linux executable mode
         working-directory: clients/vscode

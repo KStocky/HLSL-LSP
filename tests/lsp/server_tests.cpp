@@ -830,6 +830,7 @@ TEST_CASE("Server can disable semantic tokens for incompatible clients", "[lsp][
     REQUIRE(initialized.has_value());
     const auto* response = std::get_if<hlsl_intellisense::json_rpc::Response>(&*initialized);
     REQUIRE(response != nullptr);
+    CHECK(response->result["serverInfo"]["version"] == "0.6.0");
     CHECK_FALSE(response->result["capabilities"].contains("semanticTokensProvider"));
     CHECK(response->result["capabilities"]["definitionProvider"] == true);
     CHECK(response->result["capabilities"]["referencesProvider"] == true);
@@ -895,6 +896,35 @@ TEST_CASE("Framed LSP session publishes diagnostics and completes HLSL 2021",
             CHECK(message["params"]["version"].get<std::int64_t>() >= 2);
         }
     }
+}
+
+TEST_CASE("Protocol tracing redacts source text by default", "[lsp][protocol][trace]") {
+    const auto uri = shader_uri();
+    const std::string secret_source =
+        "float4 privateSourceMarker() : SV_Target { return 1.0.xxxx; }\n";
+    std::string input;
+    input += frame(request(1, "initialize"));
+    input += frame(notification("initialized"));
+    input += frame(notification(
+        "textDocument/didOpen",
+        {{"textDocument",
+          {{"uri", uri}, {"languageId", "hlsl"}, {"version", 1}, {"text", secret_source}}}}));
+    input += frame(request_without_params(2, "shutdown"));
+    input += frame(notification_without_params("exit"));
+
+    std::istringstream input_stream{input};
+    std::ostringstream output_stream;
+    std::ostringstream error_stream;
+    hlsl_intellisense::lsp::ServerOptions options;
+    options.protocol_trace = true;
+    CHECK(hlsl_intellisense::lsp::run(input_stream, output_stream, error_stream, options) == 0);
+    CHECK(error_stream.str().find("privateSourceMarker") == std::string::npos);
+    CHECK(error_stream.str().find(uri) == std::string::npos);
+    CHECK(error_stream.str().find("completionProvider") == std::string::npos);
+    CHECK(error_stream.str().find("<redacted ") != std::string::npos);
+    CHECK(error_stream.str().find("trace receive") != std::string::npos);
+    CHECK(error_stream.str().find("trace send") != std::string::npos);
+    CHECK_FALSE(read_frames(output_stream.str()).empty());
 }
 
 TEST_CASE("Server applies workspace configuration to DXC analysis",

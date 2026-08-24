@@ -1,11 +1,12 @@
 cmake_minimum_required(VERSION 3.28)
 
-project(HlslLsp VERSION 0.1.0 LANGUAGES CXX)
+project(HlslLsp VERSION 0.6.0 LANGUAGES CXX)
 
 include(CTest)
 include(FetchContent)
 
 option(HLSL_ENABLE_CLANG_TIDY "Run clang-tidy while compiling first-party code" OFF)
+option(HLSL_BUILD_FUZZERS "Build libFuzzer protocol and workspace harnesses" OFF)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(ProjectOptions)
@@ -106,6 +107,8 @@ target_link_libraries(hlsl_lsp
         hlsl_json_rpc
         hlsl_workspace
         hlsl_project_options)
+target_compile_definitions(hlsl_lsp PUBLIC
+    HLSL_LSP_VERSION="${PROJECT_VERSION}")
 hlsl_enable_clang_tidy(hlsl_lsp)
 
 add_executable(hlsl-lsp
@@ -138,12 +141,15 @@ endif()
 
 if(BUILD_TESTING)
     add_executable(hlsl-intellisense-tests
+        tests/dxc/corpus_tests.cpp
         tests/dxc/intellisense_tests.cpp)
     target_link_libraries(hlsl-intellisense-tests PRIVATE
         Catch2::Catch2WithMain
-        hlsl_dxc
+        hlsl_workspace
         hlsl_project_options)
     hlsl_enable_clang_tidy(hlsl-intellisense-tests)
+    target_compile_definitions(hlsl-intellisense-tests PRIVATE
+        HLSL_TEST_CORPUS_DIR="${PROJECT_SOURCE_DIR}/tests/corpus")
     hlsl_copy_dxc_runtime(hlsl-intellisense-tests)
 
     add_executable(hlsl-lsp-tests
@@ -197,6 +203,32 @@ if(BUILD_TESTING)
     catch_discover_tests(hlsl-lsp-tests)
     add_test(NAME analysis-structural-benchmark
         COMMAND hlsl-analysis-benchmark)
+endif()
+
+if(HLSL_BUILD_FUZZERS)
+    if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR
+       CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+        message(FATAL_ERROR "HLSL_BUILD_FUZZERS requires Clang with the GNU-like frontend")
+    endif()
+
+    function(hlsl_add_fuzzer target source library)
+        add_executable("${target}" "${source}")
+        target_link_libraries("${target}" PRIVATE "${library}" hlsl_project_options)
+        target_compile_options("${target}" PRIVATE -fsanitize=fuzzer,address,undefined)
+        target_link_options("${target}" PRIVATE -fsanitize=fuzzer,address,undefined)
+    endfunction()
+
+    foreach(fuzzed_library hlsl_json_rpc hlsl_workspace)
+        target_compile_options("${fuzzed_library}" PRIVATE
+            -fsanitize=fuzzer-no-link,address,undefined)
+        target_link_options("${fuzzed_library}" INTERFACE
+            -fsanitize=address,undefined)
+    endforeach()
+
+    hlsl_add_fuzzer(hlsl-framing-fuzzer fuzz/framing_fuzzer.cpp hlsl_json_rpc)
+    hlsl_add_fuzzer(hlsl-json-fuzzer fuzz/json_fuzzer.cpp hlsl_json_rpc)
+    hlsl_add_fuzzer(hlsl-uri-fuzzer fuzz/uri_fuzzer.cpp hlsl_workspace)
+    hlsl_add_fuzzer(hlsl-edits-fuzzer fuzz/edits_fuzzer.cpp hlsl_workspace)
 endif()
 
 hlsl_add_format_targets()

@@ -7,13 +7,18 @@ if(CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
         /WX
         /permissive-
         /Zc:__cplusplus
-        /EHsc)
+        /EHsc
+        $<$<CONFIG:Release>:/Brepro>)
+    target_link_options(hlsl_project_options INTERFACE
+        $<$<CONFIG:Release>:/Brepro>)
 elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     target_compile_options(hlsl_project_options INTERFACE
         -Wall
         -Wextra
         -Wpedantic
-        -Werror)
+        -Werror
+        "-ffile-prefix-map=${PROJECT_SOURCE_DIR}=."
+        "-fdebug-prefix-map=${PROJECT_SOURCE_DIR}=.")
 else()
     message(FATAL_ERROR
         "Unsupported compiler '${CMAKE_CXX_COMPILER_ID}'. Use MSVC, clang-cl, or Clang.")
@@ -91,6 +96,7 @@ function(hlsl_add_format_targets)
 
     file(GLOB_RECURSE sources CONFIGURE_DEPENDS
         "${PROJECT_SOURCE_DIR}/include/*.h"
+        "${PROJECT_SOURCE_DIR}/fuzz/*.cpp"
         "${PROJECT_SOURCE_DIR}/src/*.cpp"
         "${PROJECT_SOURCE_DIR}/tests/*.cpp")
 
