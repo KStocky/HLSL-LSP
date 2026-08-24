@@ -14,7 +14,7 @@ with:
 - Workspace symbol support for Visual Studio's All-In-One Search
 - Hierarchical `shadertoolsconfig.json` compiler configuration
 - Transitive, virtual, open-buffer, and dependency-aware include handling
-- A Visual Studio 2026 VSIX client under `clients/visual-studio`
+- Visual Studio 2026 and Visual Studio Code clients under `clients/`
 
 The Visual Studio extension serves a similar purpose to
 [Tim Jones' HLSL Tools](https://github.com/tgjones/HlslTools), while using
@@ -132,6 +132,37 @@ clients\visual-studio\HlslLsp.VisualStudio\bin\Release\net472\HlslLsp.VisualStud
 ```
 
 Close Visual Studio and run that file to install the extension.
+
+## Install the Visual Studio Code extension
+
+Download `hlsl-lsp-vscode.vsix` from the
+[latest GitHub release](https://github.com/KStocky/HLSL-LSP/releases/latest),
+then install it from the command line:
+
+```console
+code --install-extension hlsl-lsp-vscode.vsix
+```
+
+The VSIX bundles the Windows x64 server and matching DXC runtime. It activates
+for `.hlsl`, `.hlsli`, and `.usf`; other extensions can use the `hlsl` language
+through VS Code's `files.associations` setting.
+
+To package from source after building the Windows Release server:
+
+```powershell
+cd clients\vscode
+npm ci
+npm run stage:runtime -- --server-dir ..\..\out\build\windows-msvc\Release
+npm run check
+npm run package
+```
+
+The bundled client currently supports Windows x64. Linux users can build the
+server separately, make `libdxcompiler.so` discoverable by the dynamic loader,
+and set `hlsl.server.path`; the extension does not silently fall back when a
+configured or bundled runtime is unavailable. See
+[`clients/vscode/README.md`](clients/vscode/README.md) for configuration,
+testing, path behavior, and current platform limitations.
 
 ## Development requirements
 

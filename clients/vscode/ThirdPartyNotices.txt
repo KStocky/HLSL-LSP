@@ -1,0 +1,39 @@
+HLSL-LSP for Visual Studio Code contains third-party software.
+
+Microsoft DirectX Shader Compiler (DXC) 1.9.2607.13
+---------------------------------------------------
+
+The Windows VSIX contains dxcompiler.dll and dxil.dll from the official
+Microsoft.Direct3D.DXC 1.9.2607.13 NuGet package acquired and checksum-verified
+by cmake/Dxc.cmake. The ReleaseNotes.md included in that downloaded package
+states that LICENSE-LLVM.txt applies to all package files other than
+d3d12shader.h. A verbatim copy of that license is included at
+licenses/dxc/LICENSE-LLVM.txt.
+
+Production npm packages
+-----------------------
+
+The VSIX contains these production npm packages:
+
+- vscode-languageclient 10.1.0
+- vscode-languageserver-protocol 3.18.2
+- vscode-languageserver-types 3.18.0
+- vscode-languageserver-textdocument 1.0.13
+- vscode-jsonrpc 9.0.1
+- minimatch 10.2.6
+- brace-expansion 5.0.9
+- balanced-match 4.0.4
+- semver 7.8.5
+
+The vscode-languageclient family is licensed under the Microsoft MIT license,
+reproduced at licenses/npm/MICROSOFT-MIT.txt. The remaining exact package
+license texts and copyright notices are reproduced under licenses/npm using
+the package names. These notices were copied from the packages resolved by
+package-lock.json.
+
+nlohmann/json 3.12.0
+--------------------
+
+The bundled hlsl-lsp executable incorporates nlohmann/json 3.12.0 under the
+MIT license. The license downloaded by CMake is reproduced at
+licenses/server/NLOHMANN-JSON-MIT.txt.

@@ -1,0 +1,8 @@
+dist
+node_modules
+.test-data
+.vscode-test
+server/win32-x64
+*.vsix
+package-lock.json
+licenses
