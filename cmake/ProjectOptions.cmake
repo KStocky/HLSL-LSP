@@ -68,7 +68,7 @@ function(hlsl_copy_dxc_runtime target)
     if(UNIX)
         add_dependencies("${target}" hlsl_dxc_runtime)
         set_target_properties("${target}" PROPERTIES
-            BUILD_RPATH "${HLSL_DXC_BUILD_RUNTIME_DIR}"
+            BUILD_RPATH "$ORIGIN/dxc-runtime"
             INSTALL_RPATH "$ORIGIN")
         return()
     endif()
