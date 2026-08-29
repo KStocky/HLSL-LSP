@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.ComponentModel.Design;
 using System.ComponentModel;
 using System.IO;
 using System.Linq;
@@ -10,12 +11,15 @@ using System.Threading.Tasks;
 using Microsoft.VisualStudio;
 using Microsoft.VisualStudio.Shell;
 using Microsoft.VisualStudio.Shell.Interop;
+using Microsoft.VisualStudio.TextManager.Interop;
 
 namespace HlslLsp.VisualStudio.Bootstrap;
 
 [PackageRegistration(UseManagedResourcesOnly = true, AllowsBackgroundLoading = true)]
 [InstalledProductRegistration("HLSL-LSP", "DXC-powered HLSL IntelliSense", "0.6.0")]
 [ProvideSettingsManifest(PackageRelativeManifestFile = "HlslLsp.registration.json")]
+[ProvideMenuResource("Menus.ctmenu", 1)]
+[ProvideToolWindow(typeof(MemoryLayoutToolWindow))]
 [ProvideOptionPage(
     typeof(HlslOptionsPage),
     "HLSL-LSP",
@@ -29,6 +33,7 @@ namespace HlslLsp.VisualStudio.Bootstrap;
 [Guid(PackageGuidString)]
 public sealed class HlslBootstrapPackage : AsyncPackage
 {
+    private long memoryLayoutRequestGeneration;
     public const string PackageGuidString = "5ac7fbe7-1b9f-45eb-bca6-ffb9ae1ab67f";
 
     private static readonly object Gate = new();
@@ -60,7 +65,7 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         return new HlslOptionsSnapshot(page.FileExtensions, page.LanguageVersion);
     }
 
-    protected override Task InitializeAsync(
+    protected override async Task InitializeAsync(
         CancellationToken cancellationToken,
         IProgress<ServiceProgressData> progress)
     {
@@ -68,7 +73,85 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         {
             instance = this;
         }
-        return TryActivateLanguageClientAsync(cancellationToken);
+        MemoryLayoutBridge.RegisterPresenter(
+            (uri, line, character) =>
+                JoinableTaskFactory.RunAsync(
+                        () => ShowMemoryLayoutAsync(uri, line, character, DisposalToken))
+                    .FileAndForget("HlslLsp/ShowMemoryLayout"));
+        await RegisterMemoryLayoutCommandAsync(cancellationToken);
+        await TryActivateLanguageClientAsync(cancellationToken);
+    }
+
+    private async Task RegisterMemoryLayoutCommandAsync(CancellationToken cancellationToken)
+    {
+        await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+        var commands = await GetServiceAsync(typeof(IMenuCommandService))
+            as OleMenuCommandService;
+        if (commands == null)
+        {
+            throw new InvalidOperationException(
+                "Visual Studio's command service is unavailable.");
+        }
+        commands.AddCommand(
+            new OleMenuCommand(
+                (_, _) => JoinableTaskFactory.RunAsync(
+                        () => ShowMemoryLayoutAsync(DisposalToken))
+                    .FileAndForget("HlslLsp/ShowMemoryLayout"),
+                new CommandID(
+                    new Guid("cedfa85a-cd51-4825-af1f-0e05bd475426"),
+                    0x0100)));
+    }
+
+    private async Task ShowMemoryLayoutAsync(CancellationToken cancellationToken)
+    {
+        await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+        var textManager = await GetServiceAsync(typeof(SVsTextManager)) as IVsTextManager;
+        if (textManager == null ||
+            ErrorHandler.Failed(textManager.GetActiveView(1, null, out var view)) ||
+            view == null ||
+            ErrorHandler.Failed(view.GetCaretPos(out var line, out var character)) ||
+            ErrorHandler.Failed(view.GetBuffer(out var lines)) ||
+            lines is not IVsUserData userData)
+        {
+            return;
+        }
+        var monikerKey = VSConstants.VsTextBufferUserDataGuid.VsBufferMoniker_guid;
+        if (ErrorHandler.Failed(userData.GetData(ref monikerKey, out var value)) ||
+            value is not string moniker)
+        {
+            return;
+        }
+        var uri = new Uri(Path.GetFullPath(moniker));
+
+        await ShowMemoryLayoutAsync(uri, line, character, cancellationToken);
+    }
+
+    private async Task ShowMemoryLayoutAsync(
+        Uri uri,
+        int line,
+        int character,
+        CancellationToken cancellationToken)
+    {
+        var generation = Interlocked.Increment(ref memoryLayoutRequestGeneration);
+        var layout = await MemoryLayoutBridge.RequestAsync(
+            uri,
+            line,
+            character,
+            cancellationToken);
+        if (generation != Interlocked.Read(ref memoryLayoutRequestGeneration))
+        {
+            return;
+        }
+        await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+        var window = await ShowToolWindowAsync(
+            typeof(MemoryLayoutToolWindow),
+            0,
+            true,
+            cancellationToken) as MemoryLayoutToolWindow;
+        if (generation == Interlocked.Read(ref memoryLayoutRequestGeneration))
+        {
+            window?.SetLayout(layout);
+        }
     }
 
     private async Task TryActivateLanguageClientAsync(

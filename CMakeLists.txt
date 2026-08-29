@@ -72,6 +72,7 @@ add_library(hlsl_dxc STATIC)
 target_sources(hlsl_dxc
     PRIVATE
         src/dxc/intellisense.cpp
+        src/dxc/memory_layout.cpp
     PUBLIC
         FILE_SET HEADERS
         BASE_DIRS include

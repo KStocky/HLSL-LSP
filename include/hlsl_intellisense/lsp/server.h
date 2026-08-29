@@ -76,6 +76,8 @@ class Server final {
                                                   const json_rpc::RequestContext& context);
     [[nodiscard]] json_rpc::Json hover(const std::optional<json_rpc::Json>& params,
                                        const json_rpc::RequestContext& context);
+    [[nodiscard]] json_rpc::Json memory_layout(const std::optional<json_rpc::Json>& params,
+                                               const json_rpc::RequestContext& context);
     [[nodiscard]] json_rpc::Json signature_help(const std::optional<json_rpc::Json>& params,
                                                 const json_rpc::RequestContext& context);
     [[nodiscard]] json_rpc::Json document_symbols(const std::optional<json_rpc::Json>& params,

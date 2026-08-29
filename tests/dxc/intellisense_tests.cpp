@@ -99,6 +99,404 @@ TEST_CASE("DXC IntelliSense analyzes HLSL 2021", "[dxc][integration]") {
     }));
 }
 
+TEST_CASE("DXC IntelliSense computes natural HLSL record layouts", "[dxc][memory-layout]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    const std::string source = "struct Nested {\n"
+                               "    bool enabled;\n"
+                               "    half2 uv;\n"
+                               "};\n"
+                               "struct Data {\n"
+                               "    float3 position, normal;\n"
+                               "    double weight;\n"
+                               "    Nested nested[2][3];\n"
+                               "};\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}});
+
+    const auto layout = translation_unit.memory_layout_at(shader_path, 6, 13);
+    REQUIRE(layout.has_value());
+    REQUIRE(layout->supported);
+    CHECK(layout->kind == hlsl_intellisense::dxc::MemoryLayoutKind::natural);
+    CHECK(layout->name == "Data");
+    CHECK(layout->size == 104);
+    CHECK(layout->alignment == 8);
+    REQUIRE(layout->members.size() == 4);
+    CHECK(layout->members[0].name == "position");
+    CHECK(layout->members[0].offset == 0);
+    CHECK(layout->members[0].size == 12);
+    CHECK(layout->members[0].alignment == 4);
+    CHECK(layout->members[1].name == "normal");
+    CHECK(layout->members[1].offset == 12);
+    CHECK(layout->members[2].offset == 24);
+    CHECK(layout->members[3].offset == 32);
+    CHECK(layout->members[3].size == 72);
+    CHECK(layout->members[3].array_stride == 12);
+    CHECK(layout->members[3].array_dimensions == std::vector<std::uint32_t>{2, 3});
+    REQUIRE(layout->members[3].members.size() == 6);
+    CHECK(layout->members[3].members[0].name == "[0]");
+    CHECK(layout->members[3].members[0].array_index == 0U);
+    CHECK(layout->members[3].members[5].offset == 60);
+    REQUIRE(layout->members[3].members[0].members.size() == 2);
+    CHECK(layout->members[3].members[0].members[0].name == "enabled");
+    CHECK(layout->selected_name == "position");
+    CHECK(layout->selected_size == 12);
+    CHECK_FALSE(layout->packed_offset.has_value());
+}
+
+TEST_CASE("DXC IntelliSense computes constant-buffer packing", "[dxc][memory-layout][cbuffer]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    const std::string source = "struct Inner { float3 direction; float scale; };\n"
+                               "cbuffer Constants {\n"
+                               "    float3 colour;\n"
+                               "    float2 range;\n"
+                               "    float exposure;\n"
+                               "    float values[2];\n"
+                               "    row_major float2x3 transform;\n"
+                               "    float3x1 singleVector;\n"
+                               "    Inner inner;\n"
+                               "};\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}});
+
+    const auto layout = translation_unit.memory_layout_at(shader_path, 5, 12);
+    REQUIRE(layout.has_value());
+    REQUIRE(layout->supported);
+    CHECK(layout->kind == hlsl_intellisense::dxc::MemoryLayoutKind::constant_buffer);
+    REQUIRE(layout->members.size() == 7);
+    CHECK(layout->members[0].offset == 0);
+    CHECK(layout->members[1].offset == 16);
+    CHECK(layout->members[2].offset == 24);
+    CHECK(layout->members[3].offset == 32);
+    CHECK(layout->members[3].array_stride == 16);
+    CHECK(layout->members[3].size == 32);
+    REQUIRE(layout->members[3].members.size() == 2);
+    CHECK(layout->members[3].members[0].offset == 0);
+    CHECK(layout->members[3].members[1].offset == 16);
+    CHECK(layout->members[4].offset == 64);
+    CHECK(layout->members[4].matrix_stride == 16);
+    CHECK(layout->members[4].row_major);
+    CHECK(layout->members[4].size == 32);
+    REQUIRE(layout->members[4].members.size() == 2);
+    CHECK(layout->members[4].members[0].size == 12);
+    CHECK(layout->members[4].members[1].offset == 16);
+    CHECK(layout->members[5].offset == 96);
+    CHECK(layout->members[5].size == 12);
+    CHECK(layout->members[5].matrix_stride == 12);
+    CHECK_FALSE(layout->members[5].row_major);
+    CHECK(layout->members[6].offset == 112);
+    CHECK(layout->members[6].size == 16);
+    CHECK(layout->size == 128);
+    CHECK(layout->selected_name == "exposure");
+    CHECK(layout->packed_offset == 24U);
+}
+
+TEST_CASE("Nested cbuffer records force the following enclosing member to a new row",
+          "[dxc][memory-layout][cbuffer]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    const std::string source = "struct Inner { float value; };\n"
+                               "cbuffer Constants {\n"
+                               "    Inner inner;\n"
+                               "    float trailing;\n"
+                               "};\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}});
+
+    const auto layout = translation_unit.memory_layout_at(shader_path, 3, 12);
+    REQUIRE(layout.has_value());
+    REQUIRE(layout->supported);
+    REQUIRE(layout->members.size() == 2);
+    CHECK(layout->members[0].offset == 0);
+    CHECK(layout->members[0].size == 4);
+    CHECK(layout->members[1].offset == 16);
+    CHECK(layout->size == 20);
+    CHECK(layout->allocation_size == 32);
+}
+
+TEST_CASE("Matrix layouts honor compiler defaults and position-sensitive pragmas",
+          "[dxc][memory-layout][matrix]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    const std::string compiler_source = "cbuffer Constants { float2x3 transform; };\n";
+
+    hlsl_intellisense::dxc::CompilerOptions row_options;
+    row_options.additional_arguments = {"-Zpr"};
+    auto row_translation =
+        intellisense.parse(shader_path, {{shader_path, compiler_source}}, row_options);
+    const auto row_layout = row_translation.memory_layout_at(shader_path, 1, 22);
+    REQUIRE(row_layout.has_value());
+    REQUIRE(row_layout->supported);
+    CHECK(row_layout->members[0].row_major);
+    CHECK(row_layout->members[0].size == 32);
+    CHECK(row_layout->members[0].members.size() == 2);
+
+    hlsl_intellisense::dxc::CompilerOptions column_options;
+    column_options.additional_arguments = {"-Zpc"};
+    auto column_translation =
+        intellisense.parse(shader_path, {{shader_path, compiler_source}}, column_options);
+    const auto column_layout = column_translation.memory_layout_at(shader_path, 1, 22);
+    REQUIRE(column_layout.has_value());
+    REQUIRE(column_layout->supported);
+    CHECK_FALSE(column_layout->members[0].row_major);
+    CHECK(column_layout->members[0].size == 48);
+    CHECK(column_layout->members[0].members.size() == 3);
+
+    const std::string pragma_source = "cbuffer PragmaConstants {\n"
+                                      "#pragma pack_matrix(row_major)\n"
+                                      "    float2x3 first;\n"
+                                      "#pragma pack_matrix(column_major)\n"
+                                      "    float2x3 second;\n"
+                                      "};\n";
+    auto pragma_translation =
+        intellisense.parse(shader_path, {{shader_path, pragma_source}}, column_options);
+    const auto pragma_layout = pragma_translation.memory_layout_at(shader_path, 5, 14);
+    REQUIRE(pragma_layout.has_value());
+    REQUIRE(pragma_layout->supported);
+    CHECK(pragma_layout->members[0].row_major);
+    CHECK(pragma_layout->members[0].size == 32);
+    CHECK_FALSE(pragma_layout->members[1].row_major);
+    CHECK(pragma_layout->members[1].offset == 32);
+    CHECK(pragma_layout->members[1].size == 48);
+}
+
+TEST_CASE("Memory layout field type tokens select their declarator",
+          "[dxc][memory-layout][selection]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    const std::string source = "struct Data {\n"
+                               "    float3 position;\n"
+                               "    double weight;\n"
+                               "};\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}});
+
+    const auto layout = translation_unit.memory_layout_at(shader_path, 2, 7);
+    REQUIRE(layout.has_value());
+    REQUIRE(layout->supported);
+    CHECK(layout->selected_name == "position");
+    CHECK(layout->selected_type == "float3");
+    CHECK(layout->selected_size == 12);
+    CHECK(layout->selected_alignment == 4);
+}
+
+TEST_CASE("Memory layouts reject conditionally preprocessed records and fields",
+          "[dxc][memory-layout][preprocessor]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+
+    const std::string fields_source = "struct ConditionalFields {\n"
+                                      "#if FEATURE\n"
+                                      "    float value;\n"
+                                      "#else\n"
+                                      "    double value;\n"
+                                      "#endif\n"
+                                      "};\n";
+    auto fields_translation = intellisense.parse(shader_path, {{shader_path, fields_source}});
+    const auto fields_layout = fields_translation.memory_layout_at(shader_path, 1, 10);
+    REQUIRE(fields_layout.has_value());
+    CHECK_FALSE(fields_layout->supported);
+    CHECK(fields_layout->explanation.find("Conditional preprocessing") != std::string::npos);
+
+    const std::string record_source = "#ifdef FEATURE\n"
+                                      "struct ConditionalRecord { float value; };\n"
+                                      "#endif\n";
+    auto record_translation = intellisense.parse(shader_path, {{shader_path, record_source}});
+    const auto record_layout = record_translation.memory_layout_at(shader_path, 2, 10);
+    REQUIRE(record_layout.has_value());
+    CHECK_FALSE(record_layout->supported);
+    CHECK(record_layout->explanation.find("Conditional preprocessing") != std::string::npos);
+}
+
+TEST_CASE("Memory layouts reject conditional matrix pragmas without evaluating macros",
+          "[dxc][memory-layout][preprocessor][matrix]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    const std::string conditional_source = "#if 0\n"
+                                           "#pragma pack_matrix(row_major)\n"
+                                           "#endif\n"
+                                           "cbuffer Constants { float2x3 transform; };\n";
+    auto conditional_translation =
+        intellisense.parse(shader_path, {{shader_path, conditional_source}});
+    const auto conditional_layout = conditional_translation.memory_layout_at(shader_path, 4, 22);
+    REQUIRE(conditional_layout.has_value());
+    CHECK_FALSE(conditional_layout->supported);
+    CHECK(conditional_layout->explanation.find("conditional #pragma pack_matrix") !=
+          std::string::npos);
+
+    const std::string reset_source = "#if FEATURE\n"
+                                     "#pragma pack_matrix(row_major)\n"
+                                     "#endif\n"
+                                     "#pragma pack_matrix(column_major)\n"
+                                     "cbuffer Constants { float2x3 transform; };\n";
+    auto reset_translation = intellisense.parse(shader_path, {{shader_path, reset_source}});
+    const auto reset_layout = reset_translation.memory_layout_at(shader_path, 5, 22);
+    REQUIRE(reset_layout.has_value());
+    REQUIRE(reset_layout->supported);
+    CHECK_FALSE(reset_layout->members[0].row_major);
+    CHECK(reset_layout->members[0].size == 48);
+}
+
+TEST_CASE("Constant-buffer root size includes the final register row",
+          "[dxc][memory-layout][cbuffer]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    auto translation_unit =
+        intellisense.parse(shader_path, {{shader_path, "cbuffer Small { float value; };\n"}});
+
+    const auto layout = translation_unit.memory_layout_at(shader_path, 1, 23);
+    REQUIRE(layout.has_value());
+    REQUIRE(layout->supported);
+    CHECK(layout->members[0].size == 4);
+    CHECK(layout->size == 4);
+    CHECK(layout->allocation_size == 16);
+}
+
+TEST_CASE("DXC memory layouts honor native 16-bit types and explain unsupported fields",
+          "[dxc][memory-layout]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.additional_arguments = {"-enable-16bit-types"};
+    const std::string source = "struct Native16 {\n"
+                               "    half value;\n"
+                               "    uint16_t flags;\n"
+                               "};\n"
+                               "struct Unsupported {\n"
+                               "    Texture2D texture;\n"
+                               "};\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+
+    const auto native = translation_unit.memory_layout_at(shader_path, 2, 10);
+    REQUIRE(native.has_value());
+    REQUIRE(native->supported);
+    CHECK(native->size == 4);
+    CHECK(native->alignment == 2);
+    CHECK(native->members[0].size == 2);
+    CHECK(native->members[1].offset == 2);
+
+    const auto unsupported = translation_unit.memory_layout_at(shader_path, 6, 15);
+    REQUIRE(unsupported.has_value());
+    CHECK_FALSE(unsupported->supported);
+    CHECK(unsupported->explanation.find("texture") != std::string::npos);
+    CHECK(unsupported->explanation.find("Unsupported or unresolved") != std::string::npos);
+}
+
+TEST_CASE("Memory layouts reject ambiguous types and excessive expansion", "[dxc][memory-layout]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+
+    SECTION("scalar-prefixed record names remain records") {
+        const std::string source = "struct floatData3 { double value; };\n"
+                                   "struct Outer { floatData3 data; };\n";
+        auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}});
+        const auto layout = translation_unit.memory_layout_at(shader_path, 2, 28);
+        REQUIRE(layout.has_value());
+        REQUIRE(layout->supported);
+        CHECK(layout->size == 8);
+        CHECK(layout->members[0].kind == hlsl_intellisense::dxc::MemoryLayoutElementKind::record);
+    }
+
+    SECTION("bit-fields are explicitly unsupported") {
+        auto translation_unit =
+            intellisense.parse(shader_path, {{shader_path, "struct Bits { uint value : 4; };\n"}});
+        const auto layout = translation_unit.memory_layout_at(shader_path, 1, 20);
+        REQUIRE(layout.has_value());
+        CHECK_FALSE(layout->supported);
+        CHECK(layout->explanation.find("Bit-field") != std::string::npos);
+    }
+
+    SECTION("nested arrays share a bounded expansion budget") {
+        const std::string source = "struct Inner { float values[4096]; };\n"
+                                   "struct Outer { Inner values[4096]; };\n";
+        auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}});
+        const auto layout = translation_unit.memory_layout_at(shader_path, 2, 23);
+        REQUIRE(layout.has_value());
+        CHECK_FALSE(layout->supported);
+        CHECK(layout->explanation.find("4096 elements") != std::string::npos);
+    }
+
+    SECTION("arrays of empty records are explicitly unsupported") {
+        const std::string source = "struct Empty {};\n"
+                                   "struct Outer { Empty values[2]; };\n";
+        auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}});
+        const auto layout = translation_unit.memory_layout_at(shader_path, 2, 23);
+        REQUIRE(layout.has_value());
+        CHECK_FALSE(layout->supported);
+        CHECK(layout->explanation.find("zero-sized") != std::string::npos);
+    }
+
+    SECTION("record nesting has a fixed depth limit") {
+        std::string source;
+        for (int index = 0; index < 129; ++index) {
+            source += "struct Node" + std::to_string(index) + " { Node" +
+                      std::to_string(index + 1) + " value; };\n";
+        }
+        source += "struct Node129 { float value; };\n";
+        auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}});
+        const auto layout = translation_unit.memory_layout_at(shader_path, 1, 8);
+        REQUIRE(layout.has_value());
+        CHECK_FALSE(layout->supported);
+        CHECK(layout->explanation.find("nesting exceeds") != std::string::npos);
+    }
+}
+
+TEST_CASE("Memory layout positions support CR-only line endings", "[dxc][memory-layout]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    const std::string source = "struct First { float value; };\r"
+                               "struct Second { double value; };\r";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}});
+
+    const auto layout = translation_unit.memory_layout_at(shader_path, 2, 25);
+    REQUIRE(layout.has_value());
+    REQUIRE(layout->supported);
+    CHECK(layout->name == "Second");
+    CHECK(layout->size == 8);
+}
+
+TEST_CASE("Memory layouts reject referenced conditional records",
+          "[dxc][memory-layout][preprocessor]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    const std::string source = "#if FEATURE\n"
+                               "struct Inner { float value; };\n"
+                               "#endif\n"
+                               "struct Outer { Inner value; };\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}});
+
+    const auto layout = translation_unit.memory_layout_at(shader_path, 4, 22);
+    REQUIRE(layout.has_value());
+    CHECK_FALSE(layout->supported);
+    CHECK(layout->explanation.find("Conditional preprocessing") != std::string::npos);
+}
+
+TEST_CASE("Memory layout directive scanning ignores block comments and protects include packing",
+          "[dxc][memory-layout][preprocessor]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+
+    SECTION("commented directives do not create conditional records") {
+        const std::string source = "/*\n"
+                                   "#if FEATURE\n"
+                                   "*/\n"
+                                   "struct Data { float value; };\n";
+        auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}});
+        const auto layout = translation_unit.memory_layout_at(shader_path, 4, 20);
+        REQUIRE(layout.has_value());
+        REQUIRE(layout->supported);
+        CHECK(layout->size == 4);
+    }
+
+    SECTION("includes before matrices produce an explicit diagnostic") {
+        const std::string source = "#include \"packing.hlsli\"\n"
+                                   "cbuffer Data { float2x3 value; };\n";
+        auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}});
+        const auto layout = translation_unit.memory_layout_at(shader_path, 2, 25);
+        REQUIRE(layout.has_value());
+        CHECK_FALSE(layout->supported);
+        CHECK(layout->explanation.find("included file") != std::string::npos);
+    }
+}
+
+TEST_CASE("DXC memory layouts reparse unsaved record edits", "[dxc][memory-layout][reparse]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    auto translation_unit =
+        intellisense.parse(shader_path, {{shader_path, "struct Data { float value; };\n"}});
+    REQUIRE(translation_unit.memory_layout_at(shader_path, 1, 21)->size == 4);
+
+    translation_unit.reparse({{shader_path, "struct Data { double value; float tail; };\n"}});
+    const auto layout = translation_unit.memory_layout_at(shader_path, 1, 22);
+    REQUIRE(layout.has_value());
+    REQUIRE(layout->supported);
+    CHECK(layout->size == 16);
+    CHECK(layout->members[1].offset == 8);
+}
+
 TEST_CASE("DXC IntelliSense recognizes Shader Model 6.6 descriptor heaps", "[dxc][integration]") {
     hlsl_intellisense::dxc::Intellisense intellisense;
     hlsl_intellisense::dxc::CompilerOptions options;

@@ -17,6 +17,7 @@ import {
   TraceSetting,
 } from "./configuration";
 import { ClientLifecycle, LifecycleClient, LifecycleState } from "./lifecycle";
+import { MemoryLayout, memoryLayoutHtml } from "./memoryLayout";
 import {
   resolveServerRuntime,
   RuntimeEnvironment,
@@ -34,6 +35,10 @@ const outputName = "HLSL-LSP";
 interface ManagedClient extends LifecycleClient {
   readonly runtime: ServerRuntime;
   configurationChanged(): Promise<void>;
+  memoryLayout(
+    uri: vscode.Uri,
+    position: vscode.Position,
+  ): Promise<MemoryLayout | null>;
 }
 
 export interface HlslExtensionApi {
@@ -44,6 +49,11 @@ interface ClientSettings {
   readonly trace: TraceSetting;
   readonly languageVersion: string;
   readonly server: HlslServerSettings;
+}
+
+interface MemoryLayoutTarget {
+  readonly textDocument: { readonly uri: string };
+  readonly position: { readonly line: number; readonly character: number };
 }
 
 let activeLifecycle: ClientLifecycle<ManagedClient> | undefined;
@@ -147,6 +157,24 @@ class VscodeLanguageClient implements ManagedClient {
       synchronize: {
         fileEvents: [...watchers],
       },
+      middleware: {
+        provideHover: async (document, position, token, next) => {
+          const hover = await next(document, position, token);
+          if (hover !== null && hover !== undefined) {
+            for (const content of hover.contents) {
+              if (
+                content instanceof vscode.MarkdownString &&
+                content.value.includes("command:hlsl.showMemoryLayout")
+              ) {
+                content.isTrusted = {
+                  enabledCommands: ["hlsl.showMemoryLayout"],
+                };
+              }
+            }
+          }
+          return hover;
+        },
+      },
     };
     this.client = new LanguageClient(
       "hlsl",
@@ -201,6 +229,16 @@ class VscodeLanguageClient implements ManagedClient {
     return this.settingsSynchronizer.configurationChanged();
   }
 
+  public memoryLayout(
+    uri: vscode.Uri,
+    position: vscode.Position,
+  ): Promise<MemoryLayout | null> {
+    return this.client.sendRequest<MemoryLayout | null>("hlsl/memoryLayout", {
+      textDocument: { uri: uri.toString() },
+      position: { line: position.line, character: position.character },
+    });
+  }
+
   private async applySettings(
     settings: ClientSettings,
     isCurrentConnection: () => boolean,
@@ -231,6 +269,21 @@ class VscodeLanguageClient implements ManagedClient {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function memoryLayoutTarget(value: unknown): MemoryLayoutTarget | undefined {
+  if (typeof value !== "object" || value === null) {
+    return undefined;
+  }
+  const candidate = value as Partial<MemoryLayoutTarget>;
+  if (
+    typeof candidate.textDocument?.uri !== "string" ||
+    typeof candidate.position?.line !== "number" ||
+    typeof candidate.position.character !== "number"
+  ) {
+    return undefined;
+  }
+  return candidate as MemoryLayoutTarget;
 }
 
 async function reportError(
@@ -342,6 +395,47 @@ export async function activate(
       );
       outputChannel.show(true);
     }),
+    vscode.commands.registerCommand(
+      "hlsl.showMemoryLayout",
+      async (commandArgument: unknown) => {
+        const editor = vscode.window.activeTextEditor;
+        const target = memoryLayoutTarget(commandArgument);
+        let uri: vscode.Uri;
+        let position: vscode.Position;
+        if (target === undefined) {
+          if (editor?.document.languageId !== "hlsl") {
+            await vscode.window.showInformationMessage(
+              "Open an HLSL document and place the caret on a type, cbuffer, or member.",
+            );
+            return;
+          }
+          uri = editor.document.uri;
+          position = editor.selection.active;
+        } else {
+          uri = vscode.Uri.parse(target.textDocument.uri);
+          position = new vscode.Position(
+            target.position.line,
+            target.position.character,
+          );
+        }
+        const layout = await lifecycle.withClient((client) =>
+          client.memoryLayout(uri, position),
+        );
+        if (layout === null || layout === undefined) {
+          await vscode.window.showInformationMessage(
+            "No supported HLSL memory layout is available at the caret.",
+          );
+          return;
+        }
+        const panel = vscode.window.createWebviewPanel(
+          "hlslMemoryLayout",
+          `Memory Layout: ${layout.name || layout.type}`,
+          vscode.ViewColumn.Beside,
+          { enableScripts: false },
+        );
+        panel.webview.html = memoryLayoutHtml(layout);
+      },
+    ),
     vscode.workspace.onDidChangeConfiguration(async (event) => {
       const resource = configurationResource();
       if (!event.affectsConfiguration("hlsl", resource)) {

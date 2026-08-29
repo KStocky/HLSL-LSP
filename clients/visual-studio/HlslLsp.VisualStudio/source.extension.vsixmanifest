@@ -46,5 +46,9 @@
            d:Source="Project"
            d:ProjectName="HlslLsp.VisualStudio.Classification"
            Path="|HlslLsp.VisualStudio.Classification|" />
+    <Asset Type="Microsoft.VisualStudio.MefComponent"
+           d:Source="Project"
+           d:ProjectName="HlslLsp.VisualStudio"
+           Path="Client\|HlslLsp.VisualStudio|" />
   </Assets>
 </PackageManifest>
