@@ -110,8 +110,7 @@ export function memoryLayoutHtml(layout: MemoryLayout): string {
       ? "Constant-buffer packing"
       : "Natural / structured-buffer layout";
 
-  const hasContent =
-    layout.diagnostics.length === 0 && layout.members.length > 0;
+  const hasContent = layout.members.length > 0;
 
   const diagnostics =
     layout.diagnostics.length === 0

@@ -142,6 +142,21 @@ TEST_CASE("DXC IntelliSense computes natural HLSL record layouts", "[dxc][memory
     CHECK_FALSE(layout->packed_offset.has_value());
 }
 
+TEST_CASE("Memory layout probes replace configured target profiles", "[dxc][memory-layout]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.target_profile = "ps_6_6";
+    const std::string source = "struct Data { float3 value; };\n"
+                               "float4 main() : SV_Target { return float4(0, 0, 0, 0); }\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+
+    const auto layout = translation_unit.memory_layout_at(shader_path, 1, 9);
+    REQUIRE(layout.has_value());
+    REQUIRE(layout->supported);
+    CHECK(layout->name == "Data");
+    CHECK(layout->size == 12);
+}
+
 TEST_CASE("DXC IntelliSense computes constant-buffer packing", "[dxc][memory-layout][cbuffer]") {
     hlsl_intellisense::dxc::Intellisense intellisense;
     const std::string source = "struct Inner { float3 direction; float scale; };\n"
@@ -411,6 +426,15 @@ TEST_CASE("Memory layouts reject ambiguous types and excessive expansion", "[dxc
         REQUIRE(layout.has_value());
         if (layout->supported) {
             CHECK(layout->size == 128); // 4 * (8 * 4) = 128
+            REQUIRE(layout->members.size() == 1);
+            CHECK(layout->members[0].size == 128);
+            CHECK(layout->members[0].array_stride == 32);
+            REQUIRE(layout->members[0].members.size() == 4);
+            REQUIRE(layout->members[0].members[0].members.size() == 1);
+            CHECK(layout->members[0].members[0].members[0].size == 32);
+            CHECK(layout->members[0].members[0].members[0].array_stride == 4);
+            REQUIRE(layout->members[0].members[0].members[0].members.size() == 8);
+            CHECK(layout->members[0].members[0].members[0].members[7].offset == 28);
         }
     }
 
@@ -506,26 +530,45 @@ TEST_CASE("Compiler-backed layout handles comments and includes correctly",
 TEST_CASE("Include guards do not block compiler-backed layout",
           "[dxc][memory-layout][preprocessor][regression]") {
     hlsl_intellisense::dxc::Intellisense intellisense;
+    const auto guarded_shader_path =
+        (std::filesystem::current_path() / "guarded-layout.hlsli").generic_string();
+    const auto traits_path = (std::filesystem::current_path() / "traits.hlsli").generic_string();
     // Simulate a header with conventional include guards and an enum field —
     // the pattern reported in v0.6.0 where the old parser rejected the struct
     // because the #ifndef/#endif overlapped the declaration.
     const std::string source = "#ifndef SECTION_MANAGEMENT_HEADER\n"
                                "#define SECTION_MANAGEMENT_HEADER\n"
                                "\n"
-                               "enum ESectionRunState { Idle, Running, Complete };\n"
+                               "#include \"traits.hlsli\"\n"
                                "\n"
+                               "namespace stf {\n"
+                               "namespace detail {\n"
+                               "enum class ExecutionRunState { Idle, Running, Complete };\n"
                                "struct ScenarioSectionInfo {\n"
                                "    int ParentID;\n"
-                               "    int RunState;\n"
+                               "    ExecutionRunState RunState;\n"
                                "};\n"
-                               "\n"
+                               "}\n"
+                               "}\n"
                                "#endif\n";
-    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}});
-    // Cursor on "ScenarioSectionInfo" at line 6, col 8.
-    const auto layout = translation_unit.memory_layout_at(shader_path, 6, 8);
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.language_version = "2021";
+    auto translation_unit = intellisense.parse(
+        guarded_shader_path,
+        {{guarded_shader_path, source}, {traits_path, "struct IncludedTrait {};\n"}}, options);
+    const auto diagnostics = translation_unit.diagnostics();
+    const auto diagnostic_message =
+        diagnostics.empty() ? std::string{} : diagnostics.front().message;
+    INFO(diagnostic_message);
+    REQUIRE(diagnostics.empty());
+    const auto hover = translation_unit.hover_at(guarded_shader_path, 9, 12);
+    REQUIRE(hover.has_value());
+    CHECK(hover->qualified_name == "stf::detail::ScenarioSectionInfo");
+    const auto layout = translation_unit.memory_layout_at(guarded_shader_path, 9, 12);
     REQUIRE(layout.has_value());
+    INFO(layout->explanation);
     REQUIRE(layout->supported);
-    CHECK(layout->name == "ScenarioSectionInfo");
+    CHECK(layout->name == "stf::detail::ScenarioSectionInfo");
     CHECK(layout->size == 8);
     CHECK(layout->members.size() == 2);
     CHECK(layout->members[0].name == "ParentID");
@@ -533,6 +576,16 @@ TEST_CASE("Include guards do not block compiler-backed layout",
     CHECK(layout->members[0].size == 4);
     CHECK(layout->members[1].name == "RunState");
     CHECK(layout->members[1].offset == 4);
+
+    const auto field_layout = translation_unit.memory_layout_at(guarded_shader_path, 10, 9);
+    REQUIRE(field_layout.has_value());
+    CHECK(field_layout->supported);
+    CHECK(field_layout->size == 8);
+
+    const auto enum_field_layout = translation_unit.memory_layout_at(guarded_shader_path, 11, 25);
+    REQUIRE(enum_field_layout.has_value());
+    CHECK(enum_field_layout->supported);
+    CHECK(enum_field_layout->size == 8);
 }
 
 TEST_CASE("DXC memory layouts reparse unsaved record edits", "[dxc][memory-layout][reparse]") {

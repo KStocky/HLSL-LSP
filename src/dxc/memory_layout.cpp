@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <limits>
 #include <optional>
 #include <stdexcept>
@@ -242,8 +243,9 @@ void check(HRESULT hr, std::string_view op) {
     const int len = ::WideCharToMultiByte(CP_UTF8, 0, wide, -1, nullptr, 0, nullptr, nullptr);
     if (len <= 0)
         return {};
-    std::string result(static_cast<std::size_t>(len - 1), '\0');
+    std::string result(static_cast<std::size_t>(len), '\0');
     ::WideCharToMultiByte(CP_UTF8, 0, wide, -1, result.data(), len, nullptr, nullptr);
+    result.pop_back();
     return result;
 }
 #else
@@ -338,7 +340,7 @@ class ProbeIncludeHandler final : public IDxcIncludeHandler {
 
         const auto path = wide_to_utf8(pFilename);
         for (const auto& source : sources_) {
-            if (source.path == path || path_matches(source.path, path)) {
+            if (path_matches(source, path)) {
                 LocalComPtr<IDxcBlobEncoding> blob;
                 HRESULT hr = utils_->CreateBlobFromPinned(source.text.data(),
                                                           static_cast<UINT32>(source.text.size()),
@@ -354,16 +356,35 @@ class ProbeIncludeHandler final : public IDxcIncludeHandler {
     }
 
   private:
-    [[nodiscard]] static bool path_matches(std::string_view full, std::string_view requested) {
+    [[nodiscard]] static bool path_matches(const hlsl_intellisense::dxc::SourceFile& source,
+                                           std::string_view requested) {
         if (requested.empty())
             return false;
-        if (full == requested)
+
+        auto normalize = [](std::string_view path) {
+            std::string result{path};
+            std::ranges::replace(result, '\\', '/');
+#ifdef _WIN32
+            std::ranges::transform(result, result.begin(), [](char value) {
+                if (value >= 'A' && value <= 'Z')
+                    return static_cast<char>(value - 'A' + 'a');
+                return value;
+            });
+#endif
+            return result;
+        };
+
+        const auto normalized_full = normalize(source.path);
+        const auto normalized_requested = normalize(requested);
+        if (normalized_full == normalized_requested)
             return true;
         // Match if 'full' ends with the requested path after a separator.
-        if (full.size() > requested.size()) {
-            const auto c = full[full.size() - requested.size() - 1];
-            if (c == '/' || c == '\\') {
-                return full.substr(full.size() - requested.size()) == requested;
+        if (normalized_full.size() > normalized_requested.size()) {
+            const auto separator =
+                normalized_full[normalized_full.size() - normalized_requested.size() - 1];
+            if (separator == '/') {
+                return normalized_full.substr(normalized_full.size() -
+                                              normalized_requested.size()) == normalized_requested;
             }
         }
         return false;
@@ -444,7 +465,6 @@ struct WalkContext {
     case SVC_VECTOR:
         return MemoryLayoutElementKind::vector;
     case SVC_MATRIX_ROWS:
-        return MemoryLayoutElementKind::matrix;
     case SVC_MATRIX_COLUMNS:
         return MemoryLayoutElementKind::matrix;
     case SVC_STRUCT:
@@ -507,7 +527,7 @@ void walk_struct_members(IShaderReflectionType* type, const ShaderTypeDesc& desc
         default:
             break;
         }
-        if (data_size > 0) {
+        if (data_size > 0 && member_desc.Elements == 0) {
             element.size = data_size;
         }
 
@@ -772,31 +792,27 @@ std::optional<MemoryLayout> memory_layout_from_probe(DxcCreateInstanceProc creat
     // Step 3: Build compiler arguments.
     bool has_16bit = false;
     std::vector<std::wstring> wide_args;
+    const auto source_directory = std::filesystem::path{main_path}.parent_path();
+    if (!source_directory.empty()) {
+        wide_args.push_back(L"-I");
+        wide_args.push_back(utf8_to_wide(source_directory.generic_string()));
+    }
+    bool skip_next = false;
     for (const auto& arg : arguments) {
-        // Skip entry point and target profile from user args.
-        if (arg == "-E" || arg == "-T")
+        if (skip_next) {
+            skip_next = false;
             continue;
+        }
+        if (arg == "-E" || arg == "-T") {
+            skip_next = true;
+            continue;
+        }
+        if ((arg.starts_with("-E") || arg.starts_with("-T")) && arg.size() > 2) {
+            continue;
+        }
         if (arg == "-enable-16bit-types")
             has_16bit = true;
         wide_args.push_back(utf8_to_wide(arg));
-    }
-    // Remove the argument AFTER -E and -T.
-    {
-        std::vector<std::wstring> filtered;
-        bool skip_next = false;
-        for (std::size_t i = 0; i < wide_args.size(); ++i) {
-            if (skip_next) {
-                skip_next = false;
-                continue;
-            }
-            auto narrow = wide_to_utf8(wide_args[i].c_str());
-            if (narrow == "-E" || narrow == "-T") {
-                skip_next = true;
-                continue;
-            }
-            filtered.push_back(std::move(wide_args[i]));
-        }
-        wide_args = std::move(filtered);
     }
 
     // Add probe entry point and target.

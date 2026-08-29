@@ -1196,7 +1196,7 @@ auto TranslationUnit::memory_layout_at(std::string_view path, std::uint32_t line
     detail::ProbeTarget probe_target;
 
     auto resolve_struct = [&](IDxcCursor* struct_cursor) -> bool {
-        probe_target.type_name = cursor_spelling(*struct_cursor);
+        probe_target.type_name = cursor_qualified_symbol_name(*struct_cursor);
         return !probe_target.type_name.empty();
     };
 
@@ -1312,16 +1312,8 @@ auto TranslationUnit::memory_layout_at(std::string_view path, std::uint32_t line
         // Try walking up the cursor hierarchy to find a containing struct, field,
         // or cbuffer variable. Walk up to 8 levels of lexical parents.
         bool resolved = false;
-        ComPtr<IDxcCursor> walk_cursors[9];
-        walk_cursors[0] = ComPtr<IDxcCursor>{}; // will be set below
-        // Keep cursor alive by copying it.
-        {
-            IDxcCursor* raw = cursor.get();
-            raw->AddRef();
-            ComPtr<IDxcCursor> owned;
-            // Store the initial cursor as a non-owning ref, but we already own it via cursor.
-        }
         IDxcCursor* current = cursor.get();
+        ComPtr<IDxcCursor> current_owner;
         for (unsigned depth = 0; depth < 8 && !resolved; ++depth) {
             ComPtr<IDxcCursor> parent;
             check(current->GetLexicalParent(parent.put()), "GetLexicalParent");
@@ -1364,8 +1356,8 @@ auto TranslationUnit::memory_layout_at(std::string_view path, std::uint32_t line
                 }
             }
             // Keep parent alive and continue walking up.
-            walk_cursors[depth + 1] = std::move(parent);
-            current = walk_cursors[depth + 1].get();
+            current_owner = std::move(parent);
+            current = current_owner.get();
         }
 
         if (!resolved) {
