@@ -15,7 +15,10 @@
 
 #if defined(__clang__)
 // Partial designated initializers intentionally retain aggregate defaults.
+#pragma clang diagnostic ignored "-Wmissing-field-initializers"
+#if defined(_MSC_VER)
 #pragma clang diagnostic ignored "-Wmissing-designated-field-initializers"
+#endif
 #endif
 
 namespace hlsl_intellisense::dxc::detail {
