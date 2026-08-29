@@ -197,7 +197,9 @@ TEST_CASE("Server exposes memory layouts through hover and the custom protocol",
     hlsl_intellisense::lsp::Server server{
         [&notifications](const auto& value) { notifications.push_back(value); }};
     static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
-        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+        .id = std::int64_t{1},
+        .method = "initialize",
+        .params = Json{{"initializationOptions", {{"commandLinks", true}}}}}));
     static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
         .method = "initialized", .params = Json::object()}));
     static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
@@ -251,13 +253,13 @@ TEST_CASE("Server exposes memory layouts through hover and the custom protocol",
         CHECK(layout["members"][0][key].is_number_unsigned());
     }
 
-    const auto limits_type = source.find("float2 limits");
-    REQUIRE(limits_type != std::string::npos);
+    const auto limits_name = source.find("limits");
+    REQUIRE(limits_name != std::string::npos);
     const auto hover = server.handle(hlsl_intellisense::json_rpc::Request{
         .id = std::int64_t{3},
         .method = "textDocument/hover",
         .params = Json{{"textDocument", {{"uri", uri}}},
-                       {"position", position_at(source, limits_type + 2)}}});
+                       {"position", position_at(source, limits_name + 2)}}});
     REQUIRE(hover.has_value());
     const auto* hover_response = std::get_if<hlsl_intellisense::json_rpc::Response>(&*hover);
     REQUIRE(hover_response != nullptr);
@@ -297,10 +299,11 @@ TEST_CASE("Server exposes memory layouts through hover and the custom protocol",
     CHECK(edited_response->result["members"][0]["type"] == "double");
 }
 
-TEST_CASE("Memory layout protocol explains unsupported declarations",
+TEST_CASE("Memory layout protocol handles packoffset and conditionals via DXC",
           "[lsp][memory-layout][unsupported]") {
     const auto uri = shader_uri();
-    const std::string source = "cbuffer Invalid { float value : packoffset(c0); };\n";
+    // DXC handles packoffset natively; the layout is compiler-authoritative.
+    const std::string source = "cbuffer Valid { float value : packoffset(c0); };\n";
     std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
     hlsl_intellisense::lsp::Server server{
         [&notifications](const auto& value) { notifications.push_back(value); }};
@@ -324,10 +327,10 @@ TEST_CASE("Memory layout protocol explains unsupported declarations",
     const auto* result = std::get_if<hlsl_intellisense::json_rpc::Response>(&*response);
     REQUIRE(result != nullptr);
     INFO(result->result.dump());
-    REQUIRE(result->result["diagnostics"].size() == 1);
-    CHECK(result->result["diagnostics"][0].get<std::string>().find("packoffset") !=
-          std::string::npos);
+    // DXC compiles packoffset; no diagnostic expected.
+    CHECK(result->result["diagnostics"].empty());
 
+    // DXC compiles conditional preprocessing using the default macro state.
     const std::string conditional = "struct Conditional {\n"
                                     "#if FEATURE\n"
                                     "    float value;\n"
@@ -348,9 +351,8 @@ TEST_CASE("Memory layout protocol explains unsupported declarations",
     const auto* conditional_result =
         std::get_if<hlsl_intellisense::json_rpc::Response>(&*conditional_response);
     REQUIRE(conditional_result != nullptr);
-    REQUIRE(conditional_result->result["diagnostics"].size() == 1);
-    CHECK(conditional_result->result["diagnostics"][0].get<std::string>().find(
-              "Conditional preprocessing") != std::string::npos);
+    // DXC compiles with default macros; the layout is valid.
+    CHECK(conditional_result->result["diagnostics"].empty());
 }
 
 TEST_CASE("Server provides hierarchical document and searchable workspace symbols",

@@ -15,15 +15,15 @@ namespace HlslLsp.VisualStudio;
 [Name("HLSL-LSP memory layout action")]
 [ContentType("HLSL")]
 [ContentType("HLSLHeader")]
-[ContentType("HLSL-LSP-Colored")]
-[ContentType("HLSLHeader-LSP-Colored")]
 internal sealed class MemoryLayoutQuickInfoSourceProvider : IAsyncQuickInfoSourceProvider
 {
     [Import]
     internal ITextDocumentFactoryService TextDocuments { get; set; }
 
     public IAsyncQuickInfoSource TryCreateQuickInfoSource(ITextBuffer textBuffer)
-        => new MemoryLayoutQuickInfoSource(textBuffer, TextDocuments);
+        => textBuffer.Properties.GetOrCreateSingletonProperty(
+            typeof(MemoryLayoutQuickInfoSource),
+            () => new MemoryLayoutQuickInfoSource(textBuffer, TextDocuments));
 }
 
 internal sealed class MemoryLayoutQuickInfoSource : IAsyncQuickInfoSource

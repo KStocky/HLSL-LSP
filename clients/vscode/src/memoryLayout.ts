@@ -109,10 +109,29 @@ export function memoryLayoutHtml(layout: MemoryLayout): string {
     layout.mode === "constantBuffer"
       ? "Constant-buffer packing"
       : "Natural / structured-buffer layout";
+
+  const hasContent = layout.members.length > 0;
+
   const diagnostics =
     layout.diagnostics.length === 0
       ? ""
       : `<section class="diagnostics">${layout.diagnostics.map((message) => `<p>${escapeHtml(message)}</p>`).join("")}</section>`;
+
+  const summary = hasContent
+    ? `<div class="summary">${mode} · size ${String(layout.size)} bytes · alignment ${String(layout.alignment)} bytes · allocation ${String(layout.allocationSize)} bytes</div>`
+    : `<div class="summary">${mode}</div>`;
+
+  const diagram = hasContent
+    ? `<div class="diagram">${rowDiagram(layout)}</div>`
+    : "";
+
+  const table = hasContent
+    ? `<table>
+<thead><tr><th>Member</th><th>Type</th><th>Offset</th><th>Size</th><th>Alignment</th><th>Padding before</th></tr></thead>
+<tbody>${memberRows(layout.members)}</tbody>
+</table>`
+    : "";
+
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -135,18 +154,15 @@ export function memoryLayoutHtml(layout: MemoryLayout): string {
   table { border-collapse: collapse; width: 100%; max-width: 70rem; }
   th, td { border-bottom: 1px solid var(--vscode-panel-border); padding: .45rem .5rem; text-align: left; }
   th { color: var(--vscode-descriptionForeground); }
-  .diagnostics { border-left: 3px solid var(--vscode-editorWarning-foreground); padding-left: .75rem; }
+  .diagnostics { border-left: 3px solid var(--vscode-editorWarning-foreground); padding-left: .75rem; margin: 1rem 0; }
 </style>
 </head>
 <body>
 <h1>${escapeHtml(layout.name || layout.type)}</h1>
-<div class="summary">${mode} · size ${String(layout.size)} bytes · alignment ${String(layout.alignment)} bytes · allocation ${String(layout.allocationSize)} bytes</div>
+${summary}
 ${diagnostics}
-<div class="diagram">${rowDiagram(layout)}</div>
-<table>
-<thead><tr><th>Member</th><th>Type</th><th>Offset</th><th>Size</th><th>Alignment</th><th>Padding before</th></tr></thead>
-<tbody>${memberRows(layout.members)}</tbody>
-</table>
+${diagram}
+${table}
 </body>
 </html>`;
 }

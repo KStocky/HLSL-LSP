@@ -150,6 +150,7 @@ class VscodeLanguageClient implements ManagedClient {
         hlsl: {
           languageVersion: initialSettings.languageVersion,
         },
+        commandLinks: true,
       },
       outputChannel,
       traceOutputChannel: outputChannel,
