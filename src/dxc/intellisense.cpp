@@ -1168,19 +1168,215 @@ auto TranslationUnit::hover_at(std::string_view path, std::uint32_t line,
 
 auto TranslationUnit::memory_layout_at(std::string_view path, std::uint32_t line,
                                        std::uint32_t column) const -> std::optional<MemoryLayout> {
-    bool default_row_major{};
-    for (const auto& argument : implementation_->arguments) {
-        if (argument == "-Zpr") {
-            default_row_major = true;
-        } else if (argument == "-Zpc") {
-            default_row_major = false;
+    // Step 1: Identify the type at cursor position using DXC IntelliSense cursor APIs.
+    const auto ident = identifier_at(implementation_->sources, path, line, column);
+    if (!ident.has_value()) {
+        return std::nullopt;
+    }
+
+    const std::string owned_path{path};
+    ComPtr<IDxcFile> file;
+    check(implementation_->translation_unit->GetFile(owned_path.c_str(), file.put()), "GetFile");
+    ComPtr<IDxcSourceLocation> location;
+    check(implementation_->translation_unit->GetLocation(file.get(), line, column, location.put()),
+          "GetLocation");
+    ComPtr<IDxcCursor> cursor;
+    check(implementation_->translation_unit->GetCursorForLocation(location.get(), cursor.put()),
+          "GetCursorForLocation");
+    if (is_null_cursor(cursor.get())) {
+        return std::nullopt;
+    }
+
+    // Resolve to the referenced declaration.
+    ComPtr<IDxcCursor> referenced;
+    check(cursor->GetReferencedCursor(referenced.put()), "GetReferencedCursor");
+    auto* target = is_null_cursor(referenced.get()) ? cursor.get() : referenced.get();
+    const auto kind = cursor_kind(*target);
+
+    detail::ProbeTarget probe_target;
+
+    auto resolve_struct = [&](IDxcCursor* struct_cursor) -> bool {
+        probe_target.type_name = cursor_spelling(*struct_cursor);
+        return !probe_target.type_name.empty();
+    };
+
+    auto resolve_cbuffer = [&](IDxcCursor* cb_cursor, const std::string& field) -> bool {
+        probe_target.cbuffer_name = cursor_spelling(*cb_cursor);
+        probe_target.selected_field = field;
+        // Walk children to find a scalar variable to reference in the probe.
+        // Prefer scalar/vector types over structs since asuint() requires scalar.
+        unsigned child_count{};
+        IDxcCursor** raw_children{};
+        if (SUCCEEDED(cb_cursor->GetChildren(0, 64, &child_count, &raw_children))) {
+            TaskCursors children{raw_children, child_count};
+            std::string first_var;
+            for (unsigned i = 0; i < child_count; ++i) {
+                if (children[i] == nullptr)
+                    continue;
+                const auto ck = cursor_kind(*children[i]);
+                if (ck != DxcCursor_VarDecl && ck != DxcCursor_FieldDecl)
+                    continue;
+                auto var_name = cursor_spelling(*children[i]);
+                if (var_name.empty())
+                    continue;
+                if (first_var.empty())
+                    first_var = var_name;
+                // Check if the type is scalar/vector (not a struct).
+                auto var_type_str = cursor_type(*children[i]);
+                if (!var_type_str.empty() && (var_type_str.find("float") != std::string::npos ||
+                                              var_type_str.find("int") != std::string::npos ||
+                                              var_type_str.find("uint") != std::string::npos ||
+                                              var_type_str.find("half") != std::string::npos ||
+                                              var_type_str.find("bool") != std::string::npos ||
+                                              var_type_str.find("double") != std::string::npos)) {
+                    probe_target.reference_var = var_name;
+                    break;
+                }
+            }
+            if (probe_target.reference_var.empty()) {
+                probe_target.reference_var = first_var;
+            }
+        }
+        return !probe_target.cbuffer_name.empty();
+    };
+
+    if (kind == DxcCursor_StructDecl) {
+        // Cursor is on a struct declaration.
+        if (!resolve_struct(target))
+            return std::nullopt;
+    } else if (kind == DxcCursor_FieldDecl) {
+        // Cursor is on a field within a struct.
+        probe_target.selected_field = cursor_spelling(*target);
+        ComPtr<IDxcCursor> parent;
+        check(target->GetSemanticParent(parent.put()), "GetSemanticParent");
+        if (!is_null_cursor(parent.get())) {
+            const auto parent_kind = cursor_kind(*parent.get());
+            if (parent_kind == DxcCursor_StructDecl) {
+                if (!resolve_struct(parent.get()))
+                    return std::nullopt;
+            } else {
+                return std::nullopt;
+            }
+        } else {
+            return std::nullopt;
+        }
+    } else if (kind == DxcCursor_VarDecl) {
+        // Could be a cbuffer variable or something else.
+        probe_target.selected_field = cursor_spelling(*target);
+        probe_target.reference_var = probe_target.selected_field;
+
+        // Check lexical parent for cbuffer detection.
+        ComPtr<IDxcCursor> lexical;
+        check(target->GetLexicalParent(lexical.put()), "GetLexicalParent");
+
+        // Also check semantic parent as fallback.
+        ComPtr<IDxcCursor> semantic;
+        check(target->GetSemanticParent(semantic.put()), "GetSemanticParent");
+
+        // Try lexical parent first, then semantic parent.
+        IDxcCursor* parent_candidates[] = {lexical.get(), semantic.get()};
+        bool resolved = false;
+        for (auto* parent : parent_candidates) {
+            if (is_null_cursor(parent))
+                continue;
+            const auto pk = cursor_kind(*parent);
+            if (pk == DxcCursor_UnexposedDecl) {
+                auto formatted = cursor_formatted_name(*parent);
+                if (formatted.starts_with("cbuffer ")) {
+                    resolve_cbuffer(parent, probe_target.selected_field);
+                    resolved = true;
+                    break;
+                }
+            } else if (pk == DxcCursor_StructDecl) {
+                probe_target.selected_field = cursor_spelling(*target);
+                if (resolve_struct(parent)) {
+                    resolved = true;
+                    break;
+                }
+            }
+        }
+
+        if (!resolved) {
+            return std::nullopt;
+        }
+    } else if (kind == DxcCursor_UnexposedDecl) {
+        // Might be a cbuffer declaration itself.
+        auto formatted = cursor_formatted_name(*target);
+        if (formatted.starts_with("cbuffer ")) {
+            if (!resolve_cbuffer(target, ""))
+                return std::nullopt;
+        } else {
+            return std::nullopt;
+        }
+    } else {
+        // Try walking up the cursor hierarchy to find a containing struct, field,
+        // or cbuffer variable. Walk up to 8 levels of lexical parents.
+        bool resolved = false;
+        ComPtr<IDxcCursor> walk_cursors[9];
+        walk_cursors[0] = ComPtr<IDxcCursor>{}; // will be set below
+        // Keep cursor alive by copying it.
+        {
+            IDxcCursor* raw = cursor.get();
+            raw->AddRef();
+            ComPtr<IDxcCursor> owned;
+            // Store the initial cursor as a non-owning ref, but we already own it via cursor.
+        }
+        IDxcCursor* current = cursor.get();
+        for (unsigned depth = 0; depth < 8 && !resolved; ++depth) {
+            ComPtr<IDxcCursor> parent;
+            check(current->GetLexicalParent(parent.put()), "GetLexicalParent");
+            if (is_null_cursor(parent.get()))
+                break;
+            const auto pk = cursor_kind(*parent.get());
+
+            if (pk == DxcCursor_FieldDecl) {
+                probe_target.selected_field = cursor_spelling(*parent.get());
+                ComPtr<IDxcCursor> gp;
+                check(parent->GetSemanticParent(gp.put()), "GetSemanticParent");
+                if (!is_null_cursor(gp.get()) && cursor_kind(*gp.get()) == DxcCursor_StructDecl) {
+                    resolved = resolve_struct(gp.get());
+                }
+                break;
+            }
+            if (pk == DxcCursor_StructDecl) {
+                resolved = resolve_struct(parent.get());
+                break;
+            }
+            if (pk == DxcCursor_VarDecl) {
+                probe_target.selected_field = cursor_spelling(*parent.get());
+                probe_target.reference_var = probe_target.selected_field;
+                ComPtr<IDxcCursor> gp;
+                check(parent->GetLexicalParent(gp.put()), "GetLexicalParent");
+                if (!is_null_cursor(gp.get()) &&
+                    cursor_kind(*gp.get()) == DxcCursor_UnexposedDecl) {
+                    auto fmt = cursor_formatted_name(*gp.get());
+                    if (fmt.starts_with("cbuffer ")) {
+                        resolved = resolve_cbuffer(gp.get(), probe_target.selected_field);
+                    }
+                }
+                break;
+            }
+            if (pk == DxcCursor_UnexposedDecl) {
+                auto fmt = cursor_formatted_name(*parent.get());
+                if (fmt.starts_with("cbuffer ")) {
+                    resolved = resolve_cbuffer(parent.get(), "");
+                    break;
+                }
+            }
+            // Keep parent alive and continue walking up.
+            walk_cursors[depth + 1] = std::move(parent);
+            current = walk_cursors[depth + 1].get();
+        }
+
+        if (!resolved) {
+            return std::nullopt;
         }
     }
-    return detail::memory_layout_at(
-        implementation_->sources, path, line, column,
-        std::ranges::find(implementation_->arguments, "-enable-16bit-types") !=
-            implementation_->arguments.end(),
-        default_row_major);
+
+    // Step 2: Call the compiler-backed probe.
+    return detail::memory_layout_from_probe(implementation_->owner->create_instance,
+                                            implementation_->sources, implementation_->arguments,
+                                            implementation_->root_path, probe_target);
 }
 
 auto TranslationUnit::signatures_at(std::string_view path, std::uint32_t line,
