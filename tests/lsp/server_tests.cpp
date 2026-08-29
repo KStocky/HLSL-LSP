@@ -190,6 +190,7 @@ TEST_CASE("Server exposes memory layouts through hover and the custom protocol",
                                "cbuffer Constants {\n"
                                "    float3 direction;\n"
                                "    float2 limits;\n"
+                               "    float values[2];\n"
                                "    Material material;\n"
                                "};\n";
     std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
@@ -220,7 +221,7 @@ TEST_CASE("Server exposes memory layouts through hover and the custom protocol",
     CHECK(layout.size() == 8);
     CHECK(layout["name"] == "Constants");
     CHECK(layout["mode"] == "constantBuffer");
-    CHECK(layout["allocationSize"] == 48);
+    CHECK(layout["allocationSize"] == 80);
     CHECK(layout["diagnostics"].empty());
     for (const auto key : {"size", "alignment", "allocationSize"}) {
         CHECK(layout[key].is_number_unsigned());
@@ -230,7 +231,13 @@ TEST_CASE("Server exposes memory layouts through hover and the custom protocol",
     CHECK(layout["members"][1]["paddingBefore"] == 4);
     CHECK(layout["members"][2]["offset"] == 32);
     REQUIRE(layout["members"][2]["members"].size() == 2);
-    CHECK(layout["members"][2]["members"][1]["offset"] == 4);
+    CHECK(layout["members"][2]["members"][0]["arrayIndex"] == 0);
+    CHECK(layout["members"][2]["members"][0]["offset"] == 0);
+    CHECK(layout["members"][2]["members"][1]["arrayIndex"] == 1);
+    CHECK(layout["members"][2]["members"][1]["offset"] == 16);
+    CHECK(layout["members"][3]["offset"] == 64);
+    REQUIRE(layout["members"][3]["members"].size() == 2);
+    CHECK(layout["members"][3]["members"][1]["offset"] == 4);
     CHECK(layout["members"][0].size() == 7);
     CHECK(layout["members"][0].contains("name"));
     CHECK(layout["members"][0].contains("type"));
@@ -243,8 +250,13 @@ TEST_CASE("Server exposes memory layouts through hover and the custom protocol",
         CHECK(layout["members"][0][key].is_number_unsigned());
     }
 
+    const auto limits_type = source.find("float2 limits");
+    REQUIRE(limits_type != std::string::npos);
     const auto hover = server.handle(hlsl_intellisense::json_rpc::Request{
-        .id = std::int64_t{3}, .method = "textDocument/hover", .params = params});
+        .id = std::int64_t{3},
+        .method = "textDocument/hover",
+        .params = Json{{"textDocument", {{"uri", uri}}},
+                       {"position", position_at(source, limits_type + 2)}}});
     REQUIRE(hover.has_value());
     const auto* hover_response = std::get_if<hlsl_intellisense::json_rpc::Response>(&*hover);
     REQUIRE(hover_response != nullptr);

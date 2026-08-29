@@ -1168,10 +1168,19 @@ auto TranslationUnit::hover_at(std::string_view path, std::uint32_t line,
 
 auto TranslationUnit::memory_layout_at(std::string_view path, std::uint32_t line,
                                        std::uint32_t column) const -> std::optional<MemoryLayout> {
+    bool default_row_major{};
+    for (const auto& argument : implementation_->arguments) {
+        if (argument == "-Zpr") {
+            default_row_major = true;
+        } else if (argument == "-Zpc") {
+            default_row_major = false;
+        }
+    }
     return detail::memory_layout_at(
         implementation_->sources, path, line, column,
         std::ranges::find(implementation_->arguments, "-enable-16bit-types") !=
-            implementation_->arguments.end());
+            implementation_->arguments.end(),
+        default_row_major);
 }
 
 auto TranslationUnit::signatures_at(std::string_view path, std::uint32_t line,

@@ -83,6 +83,7 @@ struct MemoryLayoutElement {
     std::uint32_t array_stride{};
     std::uint32_t matrix_stride{};
     bool row_major{};
+    std::optional<std::uint32_t> array_index;
     std::vector<std::uint32_t> array_dimensions;
     std::vector<MemoryLayoutElement> members;
 };

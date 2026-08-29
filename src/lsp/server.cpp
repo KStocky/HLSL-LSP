@@ -335,6 +335,9 @@ void append_document_symbols(Json& output, const std::vector<dxc::Symbol>& symbo
                 {"offset", element.offset},       {"size", element.size},
                 {"alignment", element.alignment}, {"paddingBefore", padding_before},
                 {"members", std::move(members)}};
+    if (element.array_index.has_value()) {
+        result["arrayIndex"] = *element.array_index;
+    }
     return result;
 }
 

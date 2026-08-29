@@ -42,6 +42,11 @@ struct Record {
     std::string unsupported;
 };
 
+struct MatrixMajorEvent {
+    std::size_t offset{};
+    bool row_major{};
+};
+
 enum class TypeKind : std::uint8_t { scalar, vector, matrix, record, unsupported };
 
 struct Type {
@@ -80,6 +85,16 @@ struct TypeLayout {
     return std::isalnum(static_cast<unsigned char>(character)) != 0 || character == '_';
 }
 
+[[nodiscard]] bool directive_start(std::string_view source, std::size_t offset) {
+    while (offset > 0 && source[offset - 1] != '\n' && source[offset - 1] != '\r') {
+        if (std::isspace(static_cast<unsigned char>(source[offset - 1])) == 0) {
+            return false;
+        }
+        --offset;
+    }
+    return true;
+}
+
 [[nodiscard]] std::vector<Token> lex(std::string_view source) {
     std::vector<Token> result;
     std::size_t index{};
@@ -87,6 +102,12 @@ struct TypeLayout {
         const auto character = source[index];
         if (std::isspace(static_cast<unsigned char>(character)) != 0) {
             ++index;
+            continue;
+        }
+        if (character == '#' && directive_start(source, index)) {
+            while (index < source.size() && source[index] != '\n' && source[index] != '\r') {
+                ++index;
+            }
             continue;
         }
         if (character == '/' && index + 1 < source.size() && source[index + 1] == '/') {
@@ -159,7 +180,10 @@ struct TypeLayout {
 
 class Parser final {
   public:
-    explicit Parser(std::string_view source) : source_{source}, tokens_{lex(source)} {}
+    Parser(std::string_view source, bool default_row_major)
+        : source_{source}, tokens_{lex(source)}, default_row_major_{default_row_major} {
+        parse_matrix_major_pragmas();
+    }
 
     [[nodiscard]] std::vector<Record> parse() {
         std::vector<Record> records;
@@ -178,6 +202,48 @@ class Parser final {
     }
 
   private:
+    void parse_matrix_major_pragmas() {
+        std::size_t line_begin{};
+        while (line_begin < source_.size()) {
+            auto line_end = source_.find_first_of("\r\n", line_begin);
+            if (line_end == std::string_view::npos) {
+                line_end = source_.size();
+            }
+            auto line = source_.substr(line_begin, line_end - line_begin);
+            if (const auto comment = line.find("//"); comment != std::string_view::npos) {
+                line = line.substr(0, comment);
+            }
+            std::string compact;
+            compact.reserve(line.size());
+            for (const auto character : line) {
+                if (std::isspace(static_cast<unsigned char>(character)) == 0) {
+                    compact.push_back(character);
+                }
+            }
+            if (compact == "#pragmapack_matrix(row_major)") {
+                matrix_major_events_.push_back({.offset = line_begin, .row_major = true});
+            } else if (compact == "#pragmapack_matrix(column_major)") {
+                matrix_major_events_.push_back({.offset = line_begin, .row_major = false});
+            }
+            line_begin = line_end;
+            while (line_begin < source_.size() &&
+                   (source_[line_begin] == '\n' || source_[line_begin] == '\r')) {
+                ++line_begin;
+            }
+        }
+    }
+
+    [[nodiscard]] bool row_major_at(std::size_t offset) const {
+        auto result = default_row_major_;
+        for (const auto& event : matrix_major_events_) {
+            if (event.offset >= offset) {
+                break;
+            }
+            result = event.row_major;
+        }
+        return result;
+    }
+
     [[nodiscard]] std::pair<std::optional<Record>, std::size_t>
     parse_record(std::size_t start) const {
         const bool cbuffer = tokens_[start].text == "cbuffer";
@@ -254,13 +320,14 @@ class Parser final {
     }
 
     void parse_declaration(Record& record, std::size_t begin, std::size_t end) const {
-        bool row_major{};
-        bool column_major{};
+        const auto declaration_begin = begin;
+        bool explicit_row_major{};
+        bool explicit_column_major{};
         while (begin < end &&
                (tokens_[begin].text == "row_major" || tokens_[begin].text == "column_major" ||
                 qualifier(tokens_[begin].text))) {
-            row_major = row_major || tokens_[begin].text == "row_major";
-            column_major = column_major || tokens_[begin].text == "column_major";
+            explicit_row_major = explicit_row_major || tokens_[begin].text == "row_major";
+            explicit_column_major = explicit_column_major || tokens_[begin].text == "column_major";
             ++begin;
         }
         if (begin == end) {
@@ -295,7 +362,12 @@ class Parser final {
         for (auto index = begin; index < type_end; ++index) {
             type += tokens_[index].text;
         }
+        const auto row_major =
+            explicit_row_major ||
+            (!explicit_column_major && row_major_at(tokens_[declaration_begin].begin));
+        const auto column_major = explicit_column_major;
         auto declarator_begin = type_end;
+        bool first_declarator = true;
         std::size_t square{};
         std::size_t parenthesis{};
         for (auto index = type_end; index <= end; ++index) {
@@ -312,21 +384,28 @@ class Parser final {
                 }
             }
             if (at_end || (tokens_[index].text == "," && square == 0 && parenthesis == 0)) {
-                parse_declarator(record, type, row_major, column_major, declarator_begin, index);
+                const auto selection_begin =
+                    first_declarator ? tokens_[declaration_begin].begin
+                                     : (declarator_begin < end ? tokens_[declarator_begin].begin
+                                                               : tokens_[index - 1].end);
+                parse_declarator(record, type, row_major, column_major, declarator_begin, index,
+                                 selection_begin);
+                first_declarator = false;
                 declarator_begin = index + 1;
             }
         }
     }
 
     void parse_declarator(Record& record, const std::string& type, bool row_major,
-                          bool column_major, std::size_t begin, std::size_t end) const {
+                          bool column_major, std::size_t begin, std::size_t end,
+                          std::size_t selection_begin) const {
         if (begin >= end) {
             return;
         }
         const auto name_index = begin;
         Field field{.name = tokens_[name_index].text,
                     .type = type,
-                    .begin = tokens_[name_index].begin,
+                    .begin = selection_begin,
                     .end = tokens_[name_index].end,
                     .row_major = row_major,
                     .column_major = column_major};
@@ -368,6 +447,8 @@ class Parser final {
 
     std::string_view source_;
     std::vector<Token> tokens_;
+    bool default_row_major_{};
+    std::vector<MatrixMajorEvent> matrix_major_events_;
 };
 
 [[nodiscard]] std::optional<std::pair<std::uint32_t, std::uint32_t>>
@@ -542,6 +623,7 @@ class LayoutEngine final {
         TypeLayout result{.kind = MemoryLayoutElementKind::record,
                           .alignment = constant_buffer ? 16U : 1U};
         std::size_t cursor{};
+        bool previous_was_record{};
         for (const auto& field : record.fields) {
             if (!field.unsupported.empty()) {
                 return {.supported = false, .explanation = field.name + ": " + field.unsupported};
@@ -552,6 +634,9 @@ class LayoutEngine final {
                 return field_layout;
             }
             if (constant_buffer) {
+                if (previous_was_record) {
+                    cursor = align_up(cursor, 16);
+                }
                 cursor = cbuffer_field_offset(cursor, field_layout);
             } else {
                 cursor = align_up(cursor, field_layout.alignment);
@@ -571,6 +656,7 @@ class LayoutEngine final {
                                       .array_dimensions = field.dimensions,
                                       .members = std::move(field_layout.members)});
             cursor += field_layout.size;
+            previous_was_record = field_layout.kind == MemoryLayoutElementKind::record;
             result.alignment = (std::max)(result.alignment, field_layout.alignment);
         }
         const auto final_size = constant_buffer ? (root ? align_up(cursor, 16) : cursor)
@@ -596,6 +682,12 @@ class LayoutEngine final {
             }
             count *= dimension;
         }
+        constexpr std::size_t max_expanded_array_elements = 4096;
+        if (count > max_expanded_array_elements) {
+            return {.supported = false,
+                    .explanation = "Arrays with more than 4096 elements are unsupported"};
+        }
+        const auto element = result;
         const auto stride =
             constant_buffer ? align_up(result.size, 16) : align_up(result.size, result.alignment);
         if (stride > UINT32_MAX || count > UINT32_MAX / stride) {
@@ -604,6 +696,21 @@ class LayoutEngine final {
         result.kind = MemoryLayoutElementKind::array;
         result.array_stride = static_cast<std::uint32_t>(stride);
         result.size = static_cast<std::uint32_t>(stride * count);
+        result.members.clear();
+        result.members.reserve(count);
+        for (std::size_t index = 0; index < count; ++index) {
+            result.members.push_back({.name = "[" + std::to_string(index) + "]",
+                                      .type = field.type,
+                                      .kind = element.kind,
+                                      .offset = static_cast<std::uint32_t>(stride * index),
+                                      .size = element.size,
+                                      .alignment = element.alignment,
+                                      .array_stride = element.array_stride,
+                                      .matrix_stride = element.matrix_stride,
+                                      .row_major = field.row_major,
+                                      .array_index = static_cast<std::uint32_t>(index),
+                                      .members = element.members});
+        }
         if (constant_buffer) {
             result.alignment = 16;
         }
@@ -625,16 +732,30 @@ class LayoutEngine final {
             const auto vectors = row_major ? type.rows : type.columns;
             const auto components = row_major ? type.columns : type.rows;
             const auto vector_size = type.scalar_size * components;
+            const auto vector_stride = constant_buffer && vectors > 1 ? 16U : vector_size;
+            std::vector<MemoryLayoutElement> vector_elements;
+            vector_elements.reserve(vectors);
+            for (std::uint32_t index = 0; index < vectors; ++index) {
+                vector_elements.push_back({.name = "[" + std::to_string(index) + "]",
+                                           .type = type.spelling,
+                                           .kind = MemoryLayoutElementKind::vector,
+                                           .offset = vector_stride * index,
+                                           .size = vector_size,
+                                           .alignment = type.scalar_size,
+                                           .array_index = index});
+            }
             if (constant_buffer && vectors > 1) {
                 return {.kind = MemoryLayoutElementKind::matrix,
                         .size = static_cast<std::uint32_t>(16U * vectors),
                         .alignment = 16,
-                        .matrix_stride = 16};
+                        .matrix_stride = 16,
+                        .members = std::move(vector_elements)};
             }
             return {.kind = MemoryLayoutElementKind::matrix,
                     .size = vector_size * vectors,
                     .alignment = type.scalar_size,
-                    .matrix_stride = vector_size};
+                    .matrix_stride = vector_size,
+                    .members = std::move(vector_elements)};
         }
         case TypeKind::record: {
             const auto found = records_.find(type.record);
@@ -696,7 +817,8 @@ class LayoutEngine final {
 
 std::optional<MemoryLayout> memory_layout_at(const std::vector<SourceFile>& sources,
                                              std::string_view path, std::uint32_t line,
-                                             std::uint32_t column, bool native_16_bit_types) {
+                                             std::uint32_t column, bool native_16_bit_types,
+                                             bool default_row_major) {
     const auto source = std::ranges::find(sources, path, &SourceFile::path);
     if (source == sources.end()) {
         return std::nullopt;
@@ -705,7 +827,7 @@ std::optional<MemoryLayout> memory_layout_at(const std::vector<SourceFile>& sour
     if (!offset.has_value()) {
         return std::nullopt;
     }
-    const auto records = Parser{source->text}.parse();
+    const auto records = Parser{source->text, default_row_major}.parse();
     const Record* selected_record{};
     const Field* selected_field{};
     for (const auto& record : records) {

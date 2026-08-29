@@ -131,8 +131,12 @@ TEST_CASE("DXC IntelliSense computes natural HLSL record layouts", "[dxc][memory
     CHECK(layout->members[3].size == 72);
     CHECK(layout->members[3].array_stride == 12);
     CHECK(layout->members[3].array_dimensions == std::vector<std::uint32_t>{2, 3});
-    REQUIRE(layout->members[3].members.size() == 2);
-    CHECK(layout->members[3].members[0].name == "enabled");
+    REQUIRE(layout->members[3].members.size() == 6);
+    CHECK(layout->members[3].members[0].name == "[0]");
+    CHECK(layout->members[3].members[0].array_index == 0U);
+    CHECK(layout->members[3].members[5].offset == 60);
+    REQUIRE(layout->members[3].members[0].members.size() == 2);
+    CHECK(layout->members[3].members[0].members[0].name == "enabled");
     CHECK(layout->selected_name == "position");
     CHECK(layout->selected_size == 12);
     CHECK_FALSE(layout->packed_offset.has_value());
@@ -163,10 +167,16 @@ TEST_CASE("DXC IntelliSense computes constant-buffer packing", "[dxc][memory-lay
     CHECK(layout->members[3].offset == 32);
     CHECK(layout->members[3].array_stride == 16);
     CHECK(layout->members[3].size == 32);
+    REQUIRE(layout->members[3].members.size() == 2);
+    CHECK(layout->members[3].members[0].offset == 0);
+    CHECK(layout->members[3].members[1].offset == 16);
     CHECK(layout->members[4].offset == 64);
     CHECK(layout->members[4].matrix_stride == 16);
     CHECK(layout->members[4].row_major);
     CHECK(layout->members[4].size == 32);
+    REQUIRE(layout->members[4].members.size() == 2);
+    CHECK(layout->members[4].members[0].size == 12);
+    CHECK(layout->members[4].members[1].offset == 16);
     CHECK(layout->members[5].offset == 96);
     CHECK(layout->members[5].size == 12);
     CHECK(layout->members[5].matrix_stride == 12);
@@ -176,6 +186,90 @@ TEST_CASE("DXC IntelliSense computes constant-buffer packing", "[dxc][memory-lay
     CHECK(layout->size == 128);
     CHECK(layout->selected_name == "exposure");
     CHECK(layout->packed_offset == 24U);
+}
+
+TEST_CASE("Nested cbuffer records force the following enclosing member to a new row",
+          "[dxc][memory-layout][cbuffer]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    const std::string source = "struct Inner { float value; };\n"
+                               "cbuffer Constants {\n"
+                               "    Inner inner;\n"
+                               "    float trailing;\n"
+                               "};\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}});
+
+    const auto layout = translation_unit.memory_layout_at(shader_path, 3, 12);
+    REQUIRE(layout.has_value());
+    REQUIRE(layout->supported);
+    REQUIRE(layout->members.size() == 2);
+    CHECK(layout->members[0].offset == 0);
+    CHECK(layout->members[0].size == 4);
+    CHECK(layout->members[1].offset == 16);
+    CHECK(layout->size == 20);
+    CHECK(layout->allocation_size == 32);
+}
+
+TEST_CASE("Matrix layouts honor compiler defaults and position-sensitive pragmas",
+          "[dxc][memory-layout][matrix]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    const std::string compiler_source = "cbuffer Constants { float2x3 transform; };\n";
+
+    hlsl_intellisense::dxc::CompilerOptions row_options;
+    row_options.additional_arguments = {"-Zpr"};
+    auto row_translation =
+        intellisense.parse(shader_path, {{shader_path, compiler_source}}, row_options);
+    const auto row_layout = row_translation.memory_layout_at(shader_path, 1, 22);
+    REQUIRE(row_layout.has_value());
+    REQUIRE(row_layout->supported);
+    CHECK(row_layout->members[0].row_major);
+    CHECK(row_layout->members[0].size == 32);
+    CHECK(row_layout->members[0].members.size() == 2);
+
+    hlsl_intellisense::dxc::CompilerOptions column_options;
+    column_options.additional_arguments = {"-Zpc"};
+    auto column_translation =
+        intellisense.parse(shader_path, {{shader_path, compiler_source}}, column_options);
+    const auto column_layout = column_translation.memory_layout_at(shader_path, 1, 22);
+    REQUIRE(column_layout.has_value());
+    REQUIRE(column_layout->supported);
+    CHECK_FALSE(column_layout->members[0].row_major);
+    CHECK(column_layout->members[0].size == 48);
+    CHECK(column_layout->members[0].members.size() == 3);
+
+    const std::string pragma_source = "cbuffer PragmaConstants {\n"
+                                      "#pragma pack_matrix(row_major)\n"
+                                      "    float2x3 first;\n"
+                                      "#pragma pack_matrix(column_major)\n"
+                                      "    float2x3 second;\n"
+                                      "};\n";
+    auto pragma_translation =
+        intellisense.parse(shader_path, {{shader_path, pragma_source}}, column_options);
+    const auto pragma_layout = pragma_translation.memory_layout_at(shader_path, 5, 14);
+    REQUIRE(pragma_layout.has_value());
+    REQUIRE(pragma_layout->supported);
+    CHECK(pragma_layout->members[0].row_major);
+    CHECK(pragma_layout->members[0].size == 32);
+    CHECK_FALSE(pragma_layout->members[1].row_major);
+    CHECK(pragma_layout->members[1].offset == 32);
+    CHECK(pragma_layout->members[1].size == 48);
+}
+
+TEST_CASE("Memory layout field type tokens select their declarator",
+          "[dxc][memory-layout][selection]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    const std::string source = "struct Data {\n"
+                               "    float3 position;\n"
+                               "    double weight;\n"
+                               "};\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}});
+
+    const auto layout = translation_unit.memory_layout_at(shader_path, 2, 7);
+    REQUIRE(layout.has_value());
+    REQUIRE(layout->supported);
+    CHECK(layout->selected_name == "position");
+    CHECK(layout->selected_type == "float3");
+    CHECK(layout->selected_size == 12);
+    CHECK(layout->selected_alignment == 4);
 }
 
 TEST_CASE("Constant-buffer root size includes the final register row",

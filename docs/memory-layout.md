@@ -79,6 +79,8 @@ Natural layouts model StructuredBuffer-like storage:
 - Arrays are tight, with each element advanced by the naturally aligned
   element stride. Multidimensional dimensions are retained in source order.
 - Matrices are arrays of vectors selected by `row_major` or `column_major`.
+  Unqualified matrices use the effective `-Zpr`/`-Zpc` compiler default and
+  position-sensitive `#pragma pack_matrix(...)` directives.
 
 Constant-buffer layouts additionally apply these rules:
 
@@ -87,7 +89,8 @@ Constant-buffer layouts additionally apply these rules:
 - A matrix is an array of row or column vectors, each beginning on a new row.
   A matrix containing only one vector is packed as that vector.
 - Nested structures begin on a 16-byte row. Their reported size ends at the
-  final member rather than adding artificial tail padding.
+  final member rather than adding artificial tail padding. A following
+  enclosing member still begins on the next 16-byte row.
 - `size` ends at the final cbuffer member; `allocationSize` includes padding
   through the final 16-byte row.
 
@@ -95,7 +98,12 @@ Constant-buffer layouts additionally apply these rules:
 
 The parser accepts named `struct` and `cbuffer` declarations, scalar/vector/
 matrix fields, previously declared named records, multiple declarators,
-fixed-size multidimensional arrays, and `row_major`/`column_major`.
+fixed-size multidimensional arrays, `row_major`/`column_major`, `-Zpr`/`-Zpc`,
+and `#pragma pack_matrix`.
+
+Arrays and matrices expand into indexed recursive members with `arrayIndex`
+and offsets relative to their parent, allowing clients to display every
+element and vector.
 
 Resource and object types, recursive records, anonymous or inline records,
 templates and aliases, non-literal or unsized arrays, initializers, methods,
