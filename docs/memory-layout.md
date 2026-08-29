@@ -39,15 +39,7 @@ declaration. Otherwise the result has this shape:
   "size": 48,
   "allocationSize": 48,
   "alignment": 16,
-  "supported": true,
-  "explanation": "",
-  "selected": {
-    "name": "colour",
-    "type": "float3",
-    "offset": 0,
-    "size": 12,
-    "alignment": 4
-  },
+  "diagnostics": [],
   "members": [
     {
       "name": "colour",
@@ -57,10 +49,6 @@ declaration. Otherwise the result has this shape:
       "size": 12,
       "alignment": 4,
       "paddingBefore": 0,
-      "arrayStride": 0,
-      "matrixStride": 0,
-      "matrixMajor": "column",
-      "arrayDimensions": [],
       "members": []
     }
   ]
@@ -68,11 +56,10 @@ declaration. Otherwise the result has this shape:
 ```
 
 `mode` is `natural` for structure layouts and `constantBuffer` for cbuffers.
-Element `kind` is `scalar`, `vector`, `matrix`, `array`, or `record`.
-`matrixStride` is the vector stride of a matrix and `matrixMajor` records its
-row/column orientation. A recognized but unsupported declaration returns
-`supported: false` and a precise
-`explanation`; offsets are never guessed.
+Every recursive member contains `name`, `type`, `offset`, `size`, `alignment`,
+`paddingBefore`, and `members`. Expanded array elements may additionally
+contain a nonnegative `arrayIndex`. A recognized but unsupported declaration
+returns its explanation in `diagnostics`; offsets are never guessed.
 
 The hover command URI invokes `hlsl.showMemoryLayout` with one argument having
 the same `textDocument` and `position` members as the request.

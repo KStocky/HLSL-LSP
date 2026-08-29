@@ -217,20 +217,31 @@ TEST_CASE("Server exposes memory layouts through hover and the custom protocol",
     REQUIRE(layout_response != nullptr);
     const auto& layout = layout_response->result;
     INFO(layout.dump());
+    CHECK(layout.size() == 8);
     CHECK(layout["name"] == "Constants");
     CHECK(layout["mode"] == "constantBuffer");
-    CHECK(layout["layout"] == "constantBuffer");
     CHECK(layout["allocationSize"] == 48);
-    CHECK(layout["supported"] == true);
-    CHECK(layout["selected"]["name"] == "limits");
-    CHECK(layout["selected"]["offset"] == 16);
-    CHECK(layout["selected"]["size"] == 8);
+    CHECK(layout["diagnostics"].empty());
+    for (const auto key : {"size", "alignment", "allocationSize"}) {
+        CHECK(layout[key].is_number_unsigned());
+    }
     CHECK(layout["members"][0]["offset"] == 0);
     CHECK(layout["members"][1]["offset"] == 16);
     CHECK(layout["members"][1]["paddingBefore"] == 4);
     CHECK(layout["members"][2]["offset"] == 32);
     REQUIRE(layout["members"][2]["members"].size() == 2);
     CHECK(layout["members"][2]["members"][1]["offset"] == 4);
+    CHECK(layout["members"][0].size() == 7);
+    CHECK(layout["members"][0].contains("name"));
+    CHECK(layout["members"][0].contains("type"));
+    CHECK(layout["members"][0].contains("offset"));
+    CHECK(layout["members"][0].contains("size"));
+    CHECK(layout["members"][0].contains("alignment"));
+    CHECK(layout["members"][0].contains("paddingBefore"));
+    CHECK(layout["members"][0].contains("members"));
+    for (const auto key : {"offset", "size", "alignment", "paddingBefore"}) {
+        CHECK(layout["members"][0][key].is_number_unsigned());
+    }
 
     const auto hover = server.handle(hlsl_intellisense::json_rpc::Request{
         .id = std::int64_t{3}, .method = "textDocument/hover", .params = params});
@@ -243,6 +254,17 @@ TEST_CASE("Server exposes memory layouts through hover and the custom protocol",
           std::string::npos);
     CHECK(hover_text.find("[Memory Layout](command:hlsl.showMemoryLayout?") != std::string::npos);
 
+    const auto no_layout = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{4},
+        .method = "hlsl/memoryLayout",
+        .params =
+            Json{{"textDocument", {{"uri", uri}}}, {"position", {{"line", 0}, {"character", 1}}}}});
+    REQUIRE(no_layout.has_value());
+    const auto* no_layout_response =
+        std::get_if<hlsl_intellisense::json_rpc::Response>(&*no_layout);
+    REQUIRE(no_layout_response != nullptr);
+    CHECK(no_layout_response->result.is_null());
+
     const std::string edited = "struct Material { double value; };\n";
     static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
         .method = "textDocument/didChange",
@@ -250,7 +272,7 @@ TEST_CASE("Server exposes memory layouts through hover and the custom protocol",
                        {"contentChanges", Json::array({Json{{"text", edited}}})}}}));
     const auto edited_offset = edited.find("value");
     const auto edited_layout = server.handle(hlsl_intellisense::json_rpc::Request{
-        .id = std::int64_t{4},
+        .id = std::int64_t{5},
         .method = "hlsl/memoryLayout",
         .params = Json{{"textDocument", {{"uri", uri}}},
                        {"position", position_at(edited, edited_offset + 1)}}});
@@ -259,7 +281,7 @@ TEST_CASE("Server exposes memory layouts through hover and the custom protocol",
         std::get_if<hlsl_intellisense::json_rpc::Response>(&*edited_layout);
     REQUIRE(edited_response != nullptr);
     CHECK(edited_response->result["size"] == 8);
-    CHECK(edited_response->result["selected"]["type"] == "double");
+    CHECK(edited_response->result["members"][0]["type"] == "double");
 }
 
 TEST_CASE("Memory layout protocol explains unsupported declarations",
@@ -289,8 +311,9 @@ TEST_CASE("Memory layout protocol explains unsupported declarations",
     const auto* result = std::get_if<hlsl_intellisense::json_rpc::Response>(&*response);
     REQUIRE(result != nullptr);
     INFO(result->result.dump());
-    CHECK(result->result["supported"] == false);
-    CHECK(result->result["explanation"].get<std::string>().find("packoffset") != std::string::npos);
+    REQUIRE(result->result["diagnostics"].size() == 1);
+    CHECK(result->result["diagnostics"][0].get<std::string>().find("packoffset") !=
+          std::string::npos);
 }
 
 TEST_CASE("Server provides hierarchical document and searchable workspace symbols",

@@ -321,22 +321,6 @@ void append_document_symbols(Json& output, const std::vector<dxc::Symbol>& symbo
     return kind == dxc::MemoryLayoutKind::constant_buffer ? "constantBuffer" : "natural";
 }
 
-[[nodiscard]] std::string_view layout_element_kind(dxc::MemoryLayoutElementKind kind) {
-    switch (kind) {
-    case dxc::MemoryLayoutElementKind::scalar:
-        return "scalar";
-    case dxc::MemoryLayoutElementKind::vector:
-        return "vector";
-    case dxc::MemoryLayoutElementKind::matrix:
-        return "matrix";
-    case dxc::MemoryLayoutElementKind::array:
-        return "array";
-    case dxc::MemoryLayoutElementKind::record:
-        return "record";
-    }
-    return "scalar";
-}
-
 [[nodiscard]] Json layout_element_json(const dxc::MemoryLayoutElement& element,
                                        std::uint32_t padding_before) {
     Json members = Json::array();
@@ -347,17 +331,9 @@ void append_document_symbols(Json& output, const std::vector<dxc::Symbol>& symbo
         members.push_back(layout_element_json(member_value, padding));
         previous_end = member_value.offset + member_value.size;
     }
-    Json result{{"name", element.name},
-                {"type", element.type},
-                {"kind", layout_element_kind(element.kind)},
-                {"offset", element.offset},
-                {"size", element.size},
-                {"alignment", element.alignment},
-                {"paddingBefore", padding_before},
-                {"arrayStride", element.array_stride},
-                {"matrixStride", element.matrix_stride},
-                {"matrixMajor", element.row_major ? "row" : "column"},
-                {"arrayDimensions", element.array_dimensions},
+    Json result{{"name", element.name},           {"type", element.type},
+                {"offset", element.offset},       {"size", element.size},
+                {"alignment", element.alignment}, {"paddingBefore", padding_before},
                 {"members", std::move(members)}};
     return result;
 }
@@ -378,21 +354,11 @@ void append_document_symbols(Json& output, const std::vector<dxc::Symbol>& symbo
     Json result{{"name", layout.name},
                 {"type", layout.type},
                 {"mode", layout_kind(layout.kind)},
-                {"layout", layout_kind(layout.kind)},
                 {"size", layout.size},
                 {"allocationSize", layout.allocation_size},
                 {"alignment", layout.alignment},
-                {"supported", layout.supported},
-                {"explanation", layout.explanation},
                 {"diagnostics", std::move(diagnostics)},
-                {"selected",
-                 {{"name", layout.selected_name},
-                  {"type", layout.selected_type},
-                  {"size", layout.selected_size},
-                  {"alignment", layout.selected_alignment}}},
                 {"members", std::move(members)}};
-    result["selected"]["offset"] =
-        layout.packed_offset.has_value() ? Json(*layout.packed_offset) : Json(nullptr);
     return result;
 }
 
