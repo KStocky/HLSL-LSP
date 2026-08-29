@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<CommandTable xmlns="http://schemas.microsoft.com/VisualStudio/2005-10-18/CommandTable">
+  <Extern href="stdidcmd.h"/>
+  <Extern href="vsshlids.h"/>
+  <Commands package="guidHlslLspPackage">
+    <Groups>
+      <Group guid="guidHlslLspCommands" id="HlslLspGroup" priority="0x0600">
+        <Parent guid="guidSHLMainMenu" id="IDM_VS_MENU_TOOLS"/>
+      </Group>
+    </Groups>
+    <Buttons>
+      <Button guid="guidHlslLspCommands" id="ShowMemoryLayout" priority="0x0100" type="Button">
+        <Parent guid="guidHlslLspCommands" id="HlslLspGroup"/>
+        <Strings>
+          <ButtonText>HLSL Memory Layout</ButtonText>
+        </Strings>
+      </Button>
+    </Buttons>
+  </Commands>
+  <Symbols>
+    <GuidSymbol name="guidHlslLspPackage" value="{5ac7fbe7-1b9f-45eb-bca6-ffb9ae1ab67f}"/>
+    <GuidSymbol name="guidHlslLspCommands" value="{cedfa85a-cd51-4825-af1f-0e05bd475426}">
+      <IDSymbol name="HlslLspGroup" value="0x1020"/>
+      <IDSymbol name="ShowMemoryLayout" value="0x0100"/>
+    </GuidSymbol>
+  </Symbols>
+</CommandTable>

@@ -50,6 +50,10 @@ alignment, and packed offset, with a Memory Layout action backed by the
 cross-editor `hlsl/memoryLayout` protocol. Layout rules and limitations are
 documented in [`docs/memory-layout.md`](docs/memory-layout.md).
 
+In Visual Studio, select **Memory Layout** in Quick Info or use
+**Tools > HLSL Memory Layout**. In Visual Studio Code, select the hover action
+or run **HLSL: Show Memory Layout** from the Command Palette.
+
 The pinned DXC `1.9.2607.13` API exposes no callable constructor overloads or
 parameter cursors. Scalar casts resolve to an unnamed initializer expression;
 `float4` and `float2x2` resolve to typedefs; and generic `vector` and `matrix`

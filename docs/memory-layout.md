@@ -61,6 +61,11 @@ Every recursive member contains `name`, `type`, `offset`, `size`, `alignment`,
 contain a nonnegative `arrayIndex`. A recognized but unsupported declaration
 returns its explanation in `diagnostics`; offsets are never guessed.
 
+Record declarations referenced from included files are not currently expanded.
+If an include before the selected declaration could affect matrix packing, the
+request returns an unsupported diagnostic rather than guessing the active
+`pack_matrix` state.
+
 The hover command URI invokes `hlsl.showMemoryLayout` with one argument having
 the same `textDocument` and `position` members as the request.
 

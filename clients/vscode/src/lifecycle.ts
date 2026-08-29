@@ -62,12 +62,11 @@ export class ClientLifecycle<T extends LifecycleClient> {
     });
   }
 
-  public withClient(action: (client: T) => Promise<void>): Promise<void> {
-    return this.enqueue(async () => {
-      if (this.client !== undefined) {
-        await action(this.client);
-      }
-    });
+  public withClient<TResult>(
+    action: (client: T) => Promise<TResult>,
+  ): Promise<TResult | undefined> {
+    const current = this.client;
+    return current === undefined ? Promise.resolve(undefined) : action(current);
   }
 
   private enqueue(action: () => Promise<void>): Promise<void> {

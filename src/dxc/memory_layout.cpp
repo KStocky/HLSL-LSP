@@ -13,6 +13,11 @@
 #include <utility>
 #include <vector>
 
+#if defined(__clang__)
+// Partial designated initializers intentionally retain aggregate defaults.
+#pragma clang diagnostic ignored "-Wmissing-designated-field-initializers"
+#endif
+
 namespace hlsl_intellisense::dxc::detail {
 namespace {
 
@@ -224,22 +229,46 @@ class Parser final {
         return records;
     }
 
+    [[nodiscard]] bool has_include_before(std::size_t offset) const {
+        return std::ranges::any_of(include_offsets_,
+                                   [offset](const auto include) { return include < offset; });
+    }
+
   private:
     void parse_directives() {
         std::vector<std::size_t> conditional_stack;
         std::size_t line_begin{};
+        bool block_comment{};
         while (line_begin < source_.size()) {
             auto line_end = source_.find_first_of("\r\n", line_begin);
             if (line_end == std::string_view::npos) {
                 line_end = source_.size();
             }
-            auto line = source_.substr(line_begin, line_end - line_begin);
-            if (const auto comment = line.find("//"); comment != std::string_view::npos) {
-                line = line.substr(0, comment);
+            const auto line = source_.substr(line_begin, line_end - line_begin);
+            std::string uncommented;
+            uncommented.reserve(line.size());
+            for (std::size_t index = 0; index < line.size();) {
+                if (block_comment) {
+                    const auto end = line.find("*/", index);
+                    if (end == std::string_view::npos) {
+                        index = line.size();
+                    } else {
+                        block_comment = false;
+                        index = end + 2;
+                    }
+                } else if (line.substr(index).starts_with("//")) {
+                    break;
+                } else if (line.substr(index).starts_with("/*")) {
+                    block_comment = true;
+                    index += 2;
+                } else {
+                    uncommented.push_back(line[index]);
+                    ++index;
+                }
             }
             std::string compact;
-            compact.reserve(line.size());
-            for (const auto character : line) {
+            compact.reserve(uncommented.size());
+            for (const auto character : uncommented) {
                 if (std::isspace(static_cast<unsigned char>(character)) == 0) {
                     compact.push_back(character);
                 }
@@ -261,6 +290,8 @@ class Parser final {
                 matrix_major_events_.push_back({.offset = line_begin,
                                                 .row_major = false,
                                                 .conditional = !conditional_stack.empty()});
+            } else if (compact.starts_with("#include")) {
+                include_offsets_.push_back(line_begin);
             }
             line_begin = line_end;
             while (line_begin < source_.size() &&
@@ -494,6 +525,8 @@ class Parser final {
             } else if (tokens_[index].text == ":") {
                 if (index + 1 < end && tokens_[index + 1].text == "packoffset") {
                     field.unsupported = "Explicit packoffset layout is not supported";
+                } else {
+                    field.unsupported = "Bit-field layout is not supported";
                 }
                 break;
             } else if (tokens_[index].text == "=" || tokens_[index].text == "(") {
@@ -512,14 +545,15 @@ class Parser final {
     bool default_row_major_{};
     std::vector<MatrixMajorEvent> matrix_major_events_;
     std::vector<ConditionalRange> conditional_ranges_;
+    std::vector<std::size_t> include_offsets_;
 };
 
 [[nodiscard]] std::optional<std::pair<std::uint32_t, std::uint32_t>>
 vector_suffix(std::string_view value) {
     const auto x = value.find('x');
     if (x == std::string_view::npos) {
-        if (!value.empty() && value.back() >= '1' && value.back() <= '4') {
-            return std::pair{1U, static_cast<std::uint32_t>(value.back() - '0')};
+        if (value.size() == 1 && value.front() >= '1' && value.front() <= '4') {
+            return std::pair{1U, static_cast<std::uint32_t>(value.front() - '0')};
         }
         return std::nullopt;
     }
@@ -640,8 +674,9 @@ class LayoutEngine final {
             result.explanation = record.unsupported;
             return result;
         }
-        const auto laid_out =
-            layout_record(record, record.constant_buffer, {}, record.constant_buffer);
+        std::size_t remaining_nodes = max_expanded_nodes;
+        const auto laid_out = layout_record(record, record.constant_buffer, {}, remaining_nodes,
+                                            record.constant_buffer);
         result.size = laid_out.size;
         result.allocation_size = laid_out.size;
         result.alignment = laid_out.alignment;
@@ -678,9 +713,17 @@ class LayoutEngine final {
 
   private:
     [[nodiscard]] TypeLayout layout_record(const Record& record, bool constant_buffer,
-                                           std::vector<std::string> stack, bool root = false) {
+                                           std::vector<std::string> stack,
+                                           std::size_t& remaining_nodes, bool root = false) {
+        if (!record.unsupported.empty()) {
+            return {.supported = false, .explanation = record.unsupported};
+        }
         if (std::ranges::find(stack, record.name) != stack.end()) {
             return {.supported = false, .explanation = "Recursive record layouts are unsupported"};
+        }
+        if (stack.size() >= max_record_depth) {
+            return {.supported = false,
+                    .explanation = "Record nesting exceeds the supported depth of 128"};
         }
         stack.push_back(record.name);
         TypeLayout result{.kind = MemoryLayoutElementKind::record,
@@ -691,7 +734,7 @@ class LayoutEngine final {
             if (!field.unsupported.empty()) {
                 return {.supported = false, .explanation = field.name + ": " + field.unsupported};
             }
-            auto field_layout = layout_field(field, constant_buffer, stack);
+            auto field_layout = layout_field(field, constant_buffer, stack, remaining_nodes);
             if (!field_layout.supported) {
                 field_layout.explanation = field.name + ": " + field_layout.explanation;
                 return field_layout;
@@ -707,6 +750,11 @@ class LayoutEngine final {
             if (cursor > UINT32_MAX || field_layout.size > UINT32_MAX - cursor) {
                 return {.supported = false, .explanation = "Layout exceeds 32-bit byte offsets"};
             }
+            if (remaining_nodes == 0) {
+                return {.supported = false,
+                        .explanation = "Layout expands to more than 4096 elements"};
+            }
+            --remaining_nodes;
             result.members.push_back({.name = field.name,
                                       .type = field.type,
                                       .kind = field_layout.kind,
@@ -732,9 +780,10 @@ class LayoutEngine final {
     }
 
     [[nodiscard]] TypeLayout layout_field(const Field& field, bool constant_buffer,
-                                          const std::vector<std::string>& stack) {
+                                          const std::vector<std::string>& stack,
+                                          std::size_t& remaining_nodes) {
         auto type = parse_type(field.type, records_, native_16_bit_types_);
-        auto result = layout_type(type, constant_buffer, field.row_major, stack);
+        auto result = layout_type(type, constant_buffer, field.row_major, stack, remaining_nodes);
         if (!result.supported || field.dimensions.empty()) {
             return result;
         }
@@ -745,14 +794,20 @@ class LayoutEngine final {
             }
             count *= dimension;
         }
-        constexpr std::size_t max_expanded_array_elements = 4096;
-        if (count > max_expanded_array_elements) {
+        const auto child_count = expanded_node_count(result.members);
+        const auto additional_child_count = child_count * (count - 1);
+        if (count > remaining_nodes || additional_child_count > remaining_nodes - count) {
             return {.supported = false,
-                    .explanation = "Arrays with more than 4096 elements are unsupported"};
+                    .explanation = "Array layout expands to more than 4096 elements"};
         }
+        remaining_nodes -= count + additional_child_count;
         const auto element = result;
         const auto stride =
             constant_buffer ? align_up(result.size, 16) : align_up(result.size, result.alignment);
+        if (stride == 0) {
+            return {.supported = false,
+                    .explanation = "Arrays of zero-sized records are unsupported"};
+        }
         if (stride > UINT32_MAX || count > UINT32_MAX / stride) {
             return {.supported = false, .explanation = "Array layout exceeds 32-bit byte offsets"};
         }
@@ -781,7 +836,8 @@ class LayoutEngine final {
     }
 
     [[nodiscard]] TypeLayout layout_type(const Type& type, bool constant_buffer, bool row_major,
-                                         const std::vector<std::string>& stack) {
+                                         const std::vector<std::string>& stack,
+                                         std::size_t& remaining_nodes) {
         switch (type.kind) {
         case TypeKind::scalar:
             return {.kind = MemoryLayoutElementKind::scalar,
@@ -796,6 +852,11 @@ class LayoutEngine final {
             const auto components = row_major ? type.columns : type.rows;
             const auto vector_size = type.scalar_size * components;
             const auto vector_stride = constant_buffer && vectors > 1 ? 16U : vector_size;
+            if (vectors > remaining_nodes) {
+                return {.supported = false,
+                        .explanation = "Layout expands to more than 4096 elements"};
+            }
+            remaining_nodes -= vectors;
             std::vector<MemoryLayoutElement> vector_elements;
             vector_elements.reserve(vectors);
             for (std::uint32_t index = 0; index < vectors; ++index) {
@@ -825,7 +886,7 @@ class LayoutEngine final {
             if (found == records_.end()) {
                 return {.supported = false, .explanation = "Unresolved record type"};
             }
-            return layout_record(*found->second, constant_buffer, stack);
+            return layout_record(*found->second, constant_buffer, stack, remaining_nodes);
         }
         case TypeKind::unsupported:
             return {.supported = false, .explanation = type.explanation};
@@ -848,6 +909,17 @@ class LayoutEngine final {
         return cursor;
     }
 
+    [[nodiscard]] static std::size_t
+    expanded_node_count(const std::vector<MemoryLayoutElement>& members) {
+        std::size_t result{};
+        for (const auto& member : members) {
+            result += 1 + expanded_node_count(member.members);
+        }
+        return result;
+    }
+
+    static constexpr std::size_t max_expanded_nodes = 4096;
+    static constexpr std::size_t max_record_depth = 128;
     bool native_16_bit_types_{};
     std::unordered_map<std::string, const Record*> records_;
 };
@@ -860,6 +932,14 @@ class LayoutEngine final {
     std::uint32_t current_line{1};
     std::size_t offset{};
     while (offset < text.size() && current_line < line) {
+        if (text[offset] == '\r') {
+            ++current_line;
+            ++offset;
+            if (offset < text.size() && text[offset] == '\n') {
+                ++offset;
+            }
+            continue;
+        }
         if (text[offset] == '\n') {
             ++current_line;
         }
@@ -876,6 +956,12 @@ class LayoutEngine final {
     return requested;
 }
 
+[[nodiscard]] bool contains_matrix(const std::vector<MemoryLayoutElement>& members) {
+    return std::ranges::any_of(members, [](const auto& member) {
+        return member.kind == MemoryLayoutElementKind::matrix || contains_matrix(member.members);
+    });
+}
+
 } // namespace
 
 std::optional<MemoryLayout> memory_layout_at(const std::vector<SourceFile>& sources,
@@ -890,7 +976,8 @@ std::optional<MemoryLayout> memory_layout_at(const std::vector<SourceFile>& sour
     if (!offset.has_value()) {
         return std::nullopt;
     }
-    const auto records = Parser{source->text, default_row_major}.parse();
+    Parser parser{source->text, default_row_major};
+    const auto records = parser.parse();
     const Record* selected_record{};
     const Field* selected_field{};
     for (const auto& record : records) {
@@ -909,7 +996,16 @@ std::optional<MemoryLayout> memory_layout_at(const std::vector<SourceFile>& sour
     if (selected_record == nullptr) {
         return std::nullopt;
     }
-    return LayoutEngine{records, native_16_bit_types}.layout(*selected_record, selected_field);
+    auto result =
+        LayoutEngine{records, native_16_bit_types}.layout(*selected_record, selected_field);
+    if (result.supported && parser.has_include_before(selected_record->begin) &&
+        contains_matrix(result.members)) {
+        result.supported = false;
+        result.explanation =
+            "An included file can affect matrix packing before this declaration; layout is "
+            "unsupported without include expansion";
+    }
+    return result;
 }
 
 } // namespace hlsl_intellisense::dxc::detail

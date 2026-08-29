@@ -321,6 +321,22 @@ void append_document_symbols(Json& output, const std::vector<dxc::Symbol>& symbo
     return kind == dxc::MemoryLayoutKind::constant_buffer ? "constantBuffer" : "natural";
 }
 
+[[nodiscard]] std::string_view layout_element_kind(dxc::MemoryLayoutElementKind kind) {
+    switch (kind) {
+    case dxc::MemoryLayoutElementKind::scalar:
+        return "scalar";
+    case dxc::MemoryLayoutElementKind::vector:
+        return "vector";
+    case dxc::MemoryLayoutElementKind::matrix:
+        return "matrix";
+    case dxc::MemoryLayoutElementKind::array:
+        return "array";
+    case dxc::MemoryLayoutElementKind::record:
+        return "record";
+    }
+    return "scalar";
+}
+
 [[nodiscard]] Json layout_element_json(const dxc::MemoryLayoutElement& element,
                                        std::uint32_t padding_before) {
     Json members = Json::array();
@@ -331,9 +347,13 @@ void append_document_symbols(Json& output, const std::vector<dxc::Symbol>& symbo
         members.push_back(layout_element_json(member_value, padding));
         previous_end = member_value.offset + member_value.size;
     }
-    Json result{{"name", element.name},           {"type", element.type},
-                {"offset", element.offset},       {"size", element.size},
-                {"alignment", element.alignment}, {"paddingBefore", padding_before},
+    Json result{{"name", element.name},
+                {"type", element.type},
+                {"kind", layout_element_kind(element.kind)},
+                {"offset", element.offset},
+                {"size", element.size},
+                {"alignment", element.alignment},
+                {"paddingBefore", padding_before},
                 {"members", std::move(members)}};
     if (element.array_index.has_value()) {
         result["arrayIndex"] = *element.array_index;

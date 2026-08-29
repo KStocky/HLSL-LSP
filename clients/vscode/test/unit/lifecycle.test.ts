@@ -73,3 +73,15 @@ void test("concurrent starts are serialized and create one client", async () => 
   await Promise.all([lifecycle.start(), lifecycle.start()]);
   assert.equal(creates, 1);
 });
+
+void test("an in-flight client action does not block shutdown", async () => {
+  const client = new FakeClient();
+  const lifecycle = new ClientLifecycle(() => Promise.resolve(client));
+  await lifecycle.start();
+
+  void lifecycle.withClient(() => new Promise<never>(() => undefined));
+  await lifecycle.stop();
+
+  assert.equal(client.stops, 1);
+  assert.equal(lifecycle.state, "stopped");
+});

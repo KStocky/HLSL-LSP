@@ -141,6 +141,7 @@ public sealed class HlslLspActivator :
 
         var broker = componentModel.GetService<ILanguageClientBroker>();
         languageClient = new HlslLanguageClient(GetOptions().LanguageVersion);
+        MemoryLayoutBridge.Register(languageClient.GetMemoryLayoutAsync);
         await broker.LoadAsync(new HlslLanguageClientMetadata(), languageClient);
 
         navigationBars = new HlslNavigationBarManager(

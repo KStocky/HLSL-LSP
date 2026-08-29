@@ -34,7 +34,8 @@
     "onCommand:hlsl.restartServer",
     "onCommand:hlsl.stopServer",
     "onCommand:hlsl.showOutput",
-    "onCommand:hlsl.showDiagnostics"
+    "onCommand:hlsl.showDiagnostics",
+    "onCommand:hlsl.showMemoryLayout"
   ],
   "capabilities": {
     "untrustedWorkspaces": {
@@ -78,6 +79,11 @@
       {
         "command": "hlsl.showDiagnostics",
         "title": "HLSL: Show Client Diagnostics",
+        "category": "HLSL"
+      },
+      {
+        "command": "hlsl.showMemoryLayout",
+        "title": "HLSL: Show Memory Layout",
         "category": "HLSL"
       }
     ],

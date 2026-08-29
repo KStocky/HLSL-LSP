@@ -238,9 +238,10 @@ TEST_CASE("Server exposes memory layouts through hover and the custom protocol",
     CHECK(layout["members"][3]["offset"] == 64);
     REQUIRE(layout["members"][3]["members"].size() == 2);
     CHECK(layout["members"][3]["members"][1]["offset"] == 4);
-    CHECK(layout["members"][0].size() == 7);
+    CHECK(layout["members"][0].size() == 8);
     CHECK(layout["members"][0].contains("name"));
     CHECK(layout["members"][0].contains("type"));
+    CHECK(layout["members"][0]["kind"] == "vector");
     CHECK(layout["members"][0].contains("offset"));
     CHECK(layout["members"][0].contains("size"));
     CHECK(layout["members"][0].contains("alignment"));
