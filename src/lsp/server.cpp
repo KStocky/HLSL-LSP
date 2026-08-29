@@ -1318,11 +1318,16 @@ Json Server::initialize(const std::optional<Json>& params) {
     }
     const auto& value = object_params(params);
     std::optional<std::string> client_default_language_version;
+    bool client_command_links = false;
     if (const auto initialization_options = value.find("initializationOptions");
         initialization_options != value.end() && !initialization_options->is_null()) {
         const auto defaults = configuration_overrides(*initialization_options);
         if (defaults.language_version) {
             client_default_language_version = *defaults.language_version;
+        }
+        if (const auto links = initialization_options->find("commandLinks");
+            links != initialization_options->end() && links->is_boolean()) {
+            client_command_links = links->get<bool>();
         }
     }
     std::unordered_map<std::string, std::filesystem::path> workspace_folders;
@@ -1349,6 +1354,7 @@ Json Server::initialize(const std::optional<Json>& params) {
     }
     workspace_folders_ = std::move(workspace_folders);
     client_default_language_version_ = std::move(client_default_language_version);
+    command_links_ = client_command_links;
     state_ = State::awaiting_initialized;
     Json capabilities = {
         {"positionEncoding", "utf-16"},
@@ -1865,9 +1871,11 @@ Json Server::hover(const std::optional<Json>& params, const json_rpc::RequestCon
             contents += "Memory layout unavailable: ";
             contents += layout->explanation;
         }
-        contents += "\n\n[Memory Layout](";
-        contents += memory_layout_command(uri, request_position);
-        contents += ')';
+        if (command_links_) {
+            contents += "\n\n[Memory Layout](";
+            contents += memory_layout_command(uri, request_position);
+            contents += ')';
+        }
     }
 
     Json result{{"contents",

@@ -503,6 +503,38 @@ TEST_CASE("Compiler-backed layout handles comments and includes correctly",
     }
 }
 
+TEST_CASE("Include guards do not block compiler-backed layout",
+          "[dxc][memory-layout][preprocessor][regression]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    // Simulate a header with conventional include guards and an enum field —
+    // the pattern reported in v0.6.0 where the old parser rejected the struct
+    // because the #ifndef/#endif overlapped the declaration.
+    const std::string source = "#ifndef SECTION_MANAGEMENT_HEADER\n"
+                               "#define SECTION_MANAGEMENT_HEADER\n"
+                               "\n"
+                               "enum ESectionRunState { Idle, Running, Complete };\n"
+                               "\n"
+                               "struct ScenarioSectionInfo {\n"
+                               "    int ParentID;\n"
+                               "    int RunState;\n"
+                               "};\n"
+                               "\n"
+                               "#endif\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}});
+    // Cursor on "ScenarioSectionInfo" at line 6, col 8.
+    const auto layout = translation_unit.memory_layout_at(shader_path, 6, 8);
+    REQUIRE(layout.has_value());
+    REQUIRE(layout->supported);
+    CHECK(layout->name == "ScenarioSectionInfo");
+    CHECK(layout->size == 8);
+    CHECK(layout->members.size() == 2);
+    CHECK(layout->members[0].name == "ParentID");
+    CHECK(layout->members[0].offset == 0);
+    CHECK(layout->members[0].size == 4);
+    CHECK(layout->members[1].name == "RunState");
+    CHECK(layout->members[1].offset == 4);
+}
+
 TEST_CASE("DXC memory layouts reparse unsaved record edits", "[dxc][memory-layout][reparse]") {
     hlsl_intellisense::dxc::Intellisense intellisense;
     auto translation_unit =

@@ -124,6 +124,7 @@ class Server final {
     mutable std::mutex state_mutex_;
     std::unordered_map<std::string, std::uint64_t> analysis_generations_;
     State state_{State::uninitialized};
+    bool command_links_{};
     std::atomic_bool exit_requested_{};
     bool clean_shutdown_{};
 };

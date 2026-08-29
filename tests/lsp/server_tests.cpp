@@ -197,7 +197,9 @@ TEST_CASE("Server exposes memory layouts through hover and the custom protocol",
     hlsl_intellisense::lsp::Server server{
         [&notifications](const auto& value) { notifications.push_back(value); }};
     static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
-        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+        .id = std::int64_t{1},
+        .method = "initialize",
+        .params = Json{{"initializationOptions", {{"commandLinks", true}}}}}));
     static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
         .method = "initialized", .params = Json::object()}));
     static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
