@@ -86,6 +86,7 @@ class Server final {
                                                    const json_rpc::RequestContext& context);
     [[nodiscard]] json_rpc::Json semantic_tokens(const std::optional<json_rpc::Json>& params,
                                                  const json_rpc::RequestContext& context);
+    [[nodiscard]] json_rpc::Json dxc_runtime(const std::optional<json_rpc::Json>& params);
     void initialized(const std::optional<json_rpc::Json>& params);
     void did_open(const std::optional<json_rpc::Json>& params);
     void did_change(const std::optional<json_rpc::Json>& params);
@@ -99,6 +100,12 @@ class Server final {
     void analyze_affected(std::string_view uri);
     void analyze_and_publish(std::string_view uri);
     void reanalyze_all();
+    // Compares the DXC runtime selected by editor settings and shadertoolsconfig
+    // against the runtime this process loaded. A valid, different selection
+    // triggers a single controlled-restart request; invalid or conflicting
+    // selections are reported without a restart so no restart loop can form.
+    void reevaluate_runtime_selection();
+    [[nodiscard]] std::string loaded_runtime_directory() const;
     void analysis_completed(const workspace::SourceSnapshot& snapshot,
                             const std::vector<dxc::Diagnostic>& diagnostics,
                             std::uint64_t generation);
@@ -125,6 +132,10 @@ class Server final {
     std::unordered_map<std::string, std::uint64_t> analysis_generations_;
     State state_{State::uninitialized};
     bool command_links_{};
+    // Loop prevention: the runtime target already requested and the runtime issue
+    // already reported, both stored as normalized comparison keys.
+    std::optional<std::string> requested_runtime_key_;
+    std::optional<std::string> reported_runtime_issue_key_;
     std::atomic_bool exit_requested_{};
     bool clean_shutdown_{};
 };

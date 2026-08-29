@@ -62,7 +62,10 @@ public sealed class HlslBootstrapPackage : AsyncPackage
     {
         ThreadHelper.ThrowIfNotOnUIThread();
         var page = (HlslOptionsPage)GetDialogPage(typeof(HlslOptionsPage));
-        return new HlslOptionsSnapshot(page.FileExtensions, page.LanguageVersion);
+        return new HlslOptionsSnapshot(
+            page.FileExtensions,
+            page.LanguageVersion,
+            page.DxcRuntimeDirectory);
     }
 
     protected override async Task InitializeAsync(
@@ -249,15 +252,21 @@ public sealed class HlslBootstrapPackage : AsyncPackage
 
 public sealed class HlslOptionsSnapshot
 {
-    public HlslOptionsSnapshot(string fileExtensions, string languageVersion)
+    public HlslOptionsSnapshot(
+        string fileExtensions,
+        string languageVersion,
+        string dxcRuntimeDirectory)
     {
         FileExtensions = fileExtensions;
         LanguageVersion = languageVersion;
+        DxcRuntimeDirectory = dxcRuntimeDirectory;
     }
 
     public string FileExtensions { get; }
 
     public string LanguageVersion { get; }
+
+    public string DxcRuntimeDirectory { get; }
 }
 
 [TypeDescriptionProvider(typeof(HlslOptionsTypeDescriptionProvider))]
@@ -265,6 +274,7 @@ public sealed class HlslOptionsPage : DialogPage
 {
     private string fileExtensions = ".hlsl;.hlsli;.usf";
     private string languageVersion = "2021";
+    private string dxcRuntimeDirectory = "";
 
     [Category("Files")]
     [System.ComponentModel.DisplayName("HLSL file extensions")]
@@ -300,6 +310,27 @@ public sealed class HlslOptionsPage : DialogPage
                 return;
             }
             languageVersion = value;
+            HlslBootstrapPackage.NotifyOptionsChanged();
+        }
+    }
+
+    [Category("DXC")]
+    [System.ComponentModel.DisplayName("DXC runtime directory")]
+    [Description(
+        "Directory containing a compatible DXC runtime to load instead of the " +
+        "bundled one (dxcompiler.dll and dxil.dll). An explicit value overrides " +
+        "shadertoolsconfig.json. Leave empty to use the bundled runtime. " +
+        "Changing this restarts the language server.")]
+    public string DxcRuntimeDirectory
+    {
+        get => dxcRuntimeDirectory;
+        set
+        {
+            if (string.Equals(dxcRuntimeDirectory, value, StringComparison.Ordinal))
+            {
+                return;
+            }
+            dxcRuntimeDirectory = value;
             HlslBootstrapPackage.NotifyOptionsChanged();
         }
     }
@@ -374,6 +405,8 @@ public sealed class HlslOptionsPage : DialogPage
                         return "hlslLsp.general.fileExtensions";
                     case nameof(HlslOptionsPage.LanguageVersion):
                         return "hlslLsp.general.languageVersion";
+                    case nameof(HlslOptionsPage.DxcRuntimeDirectory):
+                        return "hlslLsp.general.dxcRuntimeDirectory";
                     default:
                         return null;
                 }

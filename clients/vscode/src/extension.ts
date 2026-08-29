@@ -19,6 +19,7 @@ import {
 import { ClientLifecycle, LifecycleClient, LifecycleState } from "./lifecycle";
 import { MemoryLayout, memoryLayoutHtml } from "./memoryLayout";
 import {
+  resolveDxcRuntimeDirectory,
   resolveServerRuntime,
   RuntimeEnvironment,
   ServerRuntime,
@@ -39,10 +40,25 @@ interface ManagedClient extends LifecycleClient {
     uri: vscode.Uri,
     position: vscode.Position,
   ): Promise<MemoryLayout | null>;
+  dxcRuntime(): Promise<DxcRuntimeInfo | null>;
 }
 
 export interface HlslExtensionApi {
   readonly state: LifecycleState;
+}
+
+interface DxcRuntimeInfo {
+  readonly source: string;
+  readonly directory: string;
+  readonly libraryPath: string;
+  readonly version: string;
+  readonly requiresRestart: boolean;
+  readonly error?: string;
+}
+
+interface RuntimeRestartRequest {
+  readonly directory?: string;
+  readonly reason?: string;
 }
 
 interface ClientSettings {
@@ -132,10 +148,12 @@ class VscodeLanguageClient implements ManagedClient {
     outputChannel: vscode.LogOutputChannel,
     private readonly watchers: readonly vscode.FileSystemWatcher[],
     initialSettings: ClientSettings,
+    serverArgs: readonly string[],
+    onRuntimeRestartRequired: (request: RuntimeRestartRequest) => void,
   ) {
     const executable: Executable = {
       command: runtime.command,
-      args: [],
+      args: [...serverArgs],
       options: {
         cwd: runtime.workingDirectory,
       },
@@ -182,6 +200,12 @@ class VscodeLanguageClient implements ManagedClient {
       outputName,
       serverOptions,
       clientOptions,
+    );
+    this.client.onNotification(
+      "hlsl/dxcRuntimeRestartRequired",
+      (params: unknown) => {
+        onRuntimeRestartRequired(runtimeRestartRequest(params));
+      },
     );
     this.settingsSynchronizer = new RunningSettingsSynchronizer<ClientSettings>(
       clientSettings,
@@ -240,6 +264,13 @@ class VscodeLanguageClient implements ManagedClient {
     });
   }
 
+  public dxcRuntime(): Promise<DxcRuntimeInfo | null> {
+    return this.client.sendRequest<DxcRuntimeInfo | null>(
+      "hlsl/dxcRuntime",
+      {},
+    );
+  }
+
   private async applySettings(
     settings: ClientSettings,
     isCurrentConnection: () => boolean,
@@ -270,6 +301,21 @@ class VscodeLanguageClient implements ManagedClient {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function runtimeRestartRequest(value: unknown): RuntimeRestartRequest {
+  if (typeof value !== "object" || value === null) {
+    return {};
+  }
+  const candidate = value as Partial<RuntimeRestartRequest>;
+  const result: { directory?: string; reason?: string } = {};
+  if (typeof candidate.directory === "string") {
+    result.directory = candidate.directory;
+  }
+  if (typeof candidate.reason === "string") {
+    result.reason = candidate.reason;
+  }
+  return result;
 }
 
 function memoryLayoutTarget(value: unknown): MemoryLayoutTarget | undefined {
@@ -317,6 +363,8 @@ export async function activate(
   });
   context.subscriptions.push(outputChannel);
 
+  let workspaceRuntimeDirectory: string | undefined;
+
   const lifecycle = new ClientLifecycle<ManagedClient>(async () => {
     const reader = configuration();
     const configuredPath = reader.get<string>("server.path");
@@ -329,9 +377,24 @@ export async function activate(
       configuredPath,
       runtimeEnvironment(context),
     );
+    const configuredRuntime = reader.get<string>("dxcRuntimeDirectory");
+    const selectedRuntime =
+      configuredRuntime && configuredRuntime.trim() !== ""
+        ? configuredRuntime
+        : workspaceRuntimeDirectory;
+    const dxcRuntime = await resolveDxcRuntimeDirectory(
+      selectedRuntime,
+      runtimeEnvironment(context),
+    );
+    const serverArgs = dxcRuntime
+      ? ["--dxc-runtime", dxcRuntime.directory]
+      : [];
     outputChannel.appendLine(
       `Starting ${runtime.source} server: ${runtime.command}`,
     );
+    if (dxcRuntime) {
+      outputChannel.appendLine(`Selected DXC runtime: ${dxcRuntime.directory}`);
+    }
     const watchers = createWatchers(initialSettings.server);
     try {
       return new VscodeLanguageClient(
@@ -339,6 +402,8 @@ export async function activate(
         outputChannel,
         watchers,
         initialSettings,
+        serverArgs,
+        handleRuntimeRestartRequired,
       );
     } catch (error) {
       for (const watcher of watchers) {
@@ -360,6 +425,31 @@ export async function activate(
         error,
       );
     }
+  };
+
+  // The server requests a controlled restart when shadertoolsconfig.json selects
+  // a different DXC runtime. An explicit editor setting takes precedence, and an
+  // already-applied selection is ignored, so no restart loop can form.
+  const handleRuntimeRestartRequired = (
+    request: RuntimeRestartRequest,
+  ): void => {
+    const editorRuntime = configuration().get<string>("dxcRuntimeDirectory");
+    if (editorRuntime && editorRuntime.trim() !== "") {
+      return;
+    }
+    const requested =
+      request.directory && request.directory.trim() !== ""
+        ? request.directory.trim()
+        : undefined;
+    if (workspaceRuntimeDirectory === requested) {
+      return;
+    }
+    workspaceRuntimeDirectory = requested;
+    outputChannel.appendLine(
+      `Applying workspace DXC runtime (${requested ?? "bundled default"})` +
+        (request.reason ? `: ${request.reason}` : ""),
+    );
+    void restart();
   };
 
   context.subscriptions.push(
@@ -390,6 +480,41 @@ export async function activate(
         }
       } catch (error) {
         outputChannel.appendLine(`Runtime error: ${errorMessage(error)}`);
+      }
+      try {
+        const configuredRuntime = configuration().get<string>(
+          "dxcRuntimeDirectory",
+        );
+        const selectedRuntime =
+          configuredRuntime && configuredRuntime.trim() !== ""
+            ? configuredRuntime
+            : workspaceRuntimeDirectory;
+        const dxcRuntime = await resolveDxcRuntimeDirectory(
+          selectedRuntime,
+          runtimeEnvironment(context),
+        );
+        outputChannel.appendLine(
+          `Selected DXC runtime: ${dxcRuntime ? dxcRuntime.directory : "bundled default"}`,
+        );
+      } catch (error) {
+        outputChannel.appendLine(`DXC runtime error: ${errorMessage(error)}`);
+      }
+      const activeRuntime = await lifecycle
+        .withClient((client) => client.dxcRuntime())
+        .catch((error: unknown) => {
+          outputChannel.appendLine(
+            `Active DXC runtime error: ${errorMessage(error)}`,
+          );
+          return undefined;
+        });
+      if (activeRuntime !== null && activeRuntime !== undefined) {
+        outputChannel.appendLine(
+          `Active DXC runtime: ${activeRuntime.source}; version ${activeRuntime.version}` +
+            (activeRuntime.libraryPath
+              ? `; ${activeRuntime.libraryPath}`
+              : "") +
+            (activeRuntime.requiresRestart ? "; restart pending" : ""),
+        );
       }
       outputChannel.appendLine(
         `Editor overrides: ${JSON.stringify(readServerSettings(configuration()))}`,
@@ -440,6 +565,12 @@ export async function activate(
     vscode.workspace.onDidChangeConfiguration(async (event) => {
       const resource = configurationResource();
       if (!event.affectsConfiguration("hlsl", resource)) {
+        return;
+      }
+      if (event.affectsConfiguration("hlsl.dxcRuntimeDirectory", resource)) {
+        // An explicit editor runtime supersedes any workspace-driven selection.
+        workspaceRuntimeDirectory = undefined;
+        await restart();
         return;
       }
       if (

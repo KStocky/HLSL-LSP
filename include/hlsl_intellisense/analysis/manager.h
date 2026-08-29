@@ -28,6 +28,9 @@ struct AnalysisLimits {
 struct AnalysisOptions {
     SchedulerOptions scheduler{};
     AnalysisLimits limits{};
+    // Selects the process-wide DXC runtime loaded by analysis workers. Empty
+    // selects the bundled default.
+    dxc::RuntimeConfiguration runtime{};
 };
 
 struct AnalysisMetrics {
@@ -119,6 +122,9 @@ class Manager final {
     dependent_root_uris(const std::unordered_set<std::string>& changed_identities,
                         std::string_view except_root = {}) const;
     [[nodiscard]] AnalysisMetrics metrics() const noexcept;
+    // Reports the DXC runtime the workers load, for client and server
+    // diagnostics. Loading and validating the runtime can throw dxc::RuntimeError.
+    [[nodiscard]] dxc::RuntimeInfo dxc_runtime_info() const;
     [[nodiscard]] static std::string
     configuration_fingerprint(const workspace::WorkspaceConfiguration& configuration);
 

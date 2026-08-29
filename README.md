@@ -14,6 +14,7 @@ with:
 - DXC-backed semantic colouring and go-to-definition for symbols and include paths
 - Workspace symbol support for Visual Studio's All-In-One Search
 - Hierarchical `shadertoolsconfig.json` compiler configuration
+- Selectable DXC runtime: the bundled default or an explicit compatible runtime
 - Transitive, virtual, open-buffer, and dependency-aware include handling
 - Bounded, cancellable, version-coalesced background analysis
 - Visual Studio 2026 and Visual Studio Code clients under `clients/`
@@ -292,6 +293,12 @@ file changes do not reparse unrelated completed roots. Macro-computed includes
 and roots whose first analysis is still pending conservatively depend on all
 open documents until DXC analysis establishes precise metadata.
 
+The `--dxc-runtime <directory>` argument selects the DXC runtime the process
+loads instead of the bundled default; the editor clients pass it when a runtime
+is configured. The directory must contain the platform DXC compiler library and
+is validated at startup. The active runtime path and version are reported by the
+`hlsl/dxcRuntime` request.
+
 The checked-in representative shader benchmark reports cold parse, warm cache,
 reparse, completion, hit/miss/eviction, and estimated-memory metrics:
 
@@ -312,6 +319,16 @@ DXC-oriented settings. See the
 [`shadertoolsconfig.json` reference](docs/shadertoolsconfig.md) for discovery,
 merging, every supported property, path handling, examples, and editor-setting
 precedence.
+
+By default HLSL-LSP loads the bundled, pinned DXC runtime. A project can select
+a different compatible DXC runtime with the `hlsl.dxcRuntimeDirectory`
+`shadertoolsconfig.json` setting, the Visual Studio Code
+`hlsl.dxcRuntimeDirectory` setting, or Visual Studio's **Tools > Options >
+HLSL-LSP > DXC runtime directory**. Because DXC IntelliSense is loaded once per
+process, the selection is process-wide, is validated before a controlled
+restart, and reports invalid or conflicting choices without looping. See the
+[DXC runtime selection](docs/shadertoolsconfig.md#dxc-runtime-selection) section
+for precedence, workspace-relative paths, and diagnostics.
 
 ## License
 

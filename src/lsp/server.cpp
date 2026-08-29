@@ -927,6 +927,25 @@ optional_string_setting(const Json& settings, const Json* hlsl, std::string_view
     return std::optional<std::optional<std::string>>{std::in_place, value->get<std::string>()};
 }
 
+// Produces a stable comparison key for a runtime directory. The key is the
+// normalized absolute path, lowered on Windows so case-only differences do not
+// look like a runtime change. An empty directory keys to the bundled default.
+[[nodiscard]] std::string runtime_directory_key(const std::string& directory) {
+    if (directory.empty()) {
+        return {};
+    }
+    std::error_code error;
+    const auto normalized =
+        std::filesystem::absolute(std::filesystem::path{directory}, error).lexically_normal();
+    std::string key = error ? directory : normalized.string();
+#ifdef _WIN32
+    std::ranges::transform(key, key.begin(), [](char character) {
+        return static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
+    });
+#endif
+    return key;
+}
+
 [[nodiscard]] workspace::ConfigurationOverrides configuration_overrides(const Json& settings) {
     if (!settings.is_object()) {
         invalid_params("settings must be an object");
@@ -1006,6 +1025,15 @@ optional_string_setting(const Json& settings, const Json* hlsl, std::string_view
             values.push_back(argument.get<std::string>());
         }
         result.additional_arguments = std::move(values);
+    }
+
+    if (const auto runtime = optional_string_setting(settings, hlsl, "dxcRuntimeDirectory")) {
+        const auto& value = *runtime;
+        if (value && !value->empty()) {
+            result.dxc_runtime_directory.emplace(std::filesystem::path{*value});
+        } else {
+            result.dxc_runtime_directory.emplace(std::nullopt);
+        }
     }
     return result;
 }
@@ -1214,6 +1242,8 @@ void Server::register_handlers() {
                                          [this](const auto& params, const auto& context) {
                                              return workspace_symbols(params, context);
                                          });
+    dispatcher_.register_request_handler(
+        "hlsl/dxcRuntime", [this](const auto& params) { return dxc_runtime(params); });
     if (options_.semantic_tokens) {
         dispatcher_.register_request_handler("textDocument/semanticTokens/full",
                                              [this](const auto& params, const auto& context) {
@@ -1842,18 +1872,6 @@ Json Server::hover(const std::optional<Json>& params, const json_rpc::RequestCon
         contents += "\nType: ";
         contents += information->type;
     }
-    if (information.has_value() && !information->declaration_location.path.empty()) {
-        contents += "\nDeclared at ";
-        contents += information->declaration_location.path;
-        if (information->declaration_location.line != 0) {
-            contents += ':';
-            contents += std::to_string(information->declaration_location.line);
-            if (information->declaration_location.column != 0) {
-                contents += ':';
-                contents += std::to_string(information->declaration_location.column);
-            }
-        }
-    }
     if (layout.has_value()) {
         contents += "\n\n";
         if (layout->supported) {
@@ -2149,6 +2167,7 @@ void Server::did_open(const std::optional<Json>& params) {
                                 string_member(document, "text"));
         }
         analyze_affected(uri);
+        reevaluate_runtime_selection();
     } catch (const std::exception& error) {
         log(error.what());
     }
@@ -2244,6 +2263,7 @@ void Server::did_close(const std::optional<Json>& params) {
         sender_(json_rpc::Notification{
             .method = "textDocument/publishDiagnostics",
             .params = Json{{"uri", snapshot.uri()}, {"diagnostics", Json::array()}}});
+        reevaluate_runtime_selection();
     } catch (const std::exception& error) {
         log(error.what());
     }
@@ -2262,6 +2282,7 @@ void Server::did_change_configuration(const std::optional<Json>& params) {
             editor_settings_ = candidate;
         }
         reanalyze_all();
+        reevaluate_runtime_selection();
     } catch (const std::exception& error) {
         log(error.what());
     }
@@ -2310,6 +2331,7 @@ void Server::did_change_workspace_folders(const std::optional<Json>& params) {
             workspace_folders_ = std::move(workspace_folders);
         }
         reanalyze_all();
+        reevaluate_runtime_selection();
     } catch (const std::exception& error) {
         log(error.what());
     }
@@ -2390,6 +2412,7 @@ void Server::did_change_watched_files(const std::optional<Json>& params) {
         for (const auto& root_uri : affected_roots) {
             analyze_and_publish(root_uri);
         }
+        reevaluate_runtime_selection();
     } catch (const std::exception& error) {
         log(error.what());
     }
@@ -2490,6 +2513,139 @@ void Server::reanalyze_all() {
     for (const auto& document : open_documents) {
         analyze_and_publish(document.uri());
     }
+}
+
+std::string Server::loaded_runtime_directory() const { return options_.analysis.runtime.directory; }
+
+void Server::reevaluate_runtime_selection() {
+    std::optional<std::string> notify_directory;
+    std::string notify_reason;
+    std::string issue_message;
+    bool issue_is_error = false;
+    {
+        std::scoped_lock state_lock{state_mutex_};
+        if (state_ != State::running) {
+            return;
+        }
+        const auto open_documents = documents_.open_snapshots();
+        if (open_documents.empty()) {
+            return;
+        }
+
+        std::optional<std::optional<std::filesystem::path>> desired;
+        std::string desired_key;
+        std::string desired_label;
+        bool conflict = false;
+        std::string conflict_label;
+        for (const auto& snapshot : open_documents) {
+            std::optional<std::filesystem::path> selection;
+            try {
+                selection = configuration_for(snapshot, editor_settings_).dxc_runtime_directory;
+            } catch (const std::exception&) {
+                // Configuration errors already surface through analysis diagnostics.
+                continue;
+            }
+            const auto label = selection ? selection->string() : std::string{"bundled default"};
+            const auto key = runtime_directory_key(selection ? selection->string() : std::string{});
+            if (!desired) {
+                desired = std::move(selection);
+                desired_key = key;
+                desired_label = label;
+            } else if (key != desired_key) {
+                conflict = true;
+                conflict_label = label;
+                break;
+            }
+        }
+        if (!desired) {
+            return;
+        }
+
+        if (conflict) {
+            const auto key = "conflict:" + desired_key + "|" + conflict_label;
+            if (reported_runtime_issue_key_ != key) {
+                reported_runtime_issue_key_ = key;
+                issue_message = "Open HLSL documents select different DXC runtimes ('" +
+                                desired_label + "' and '" + conflict_label +
+                                "'). DXC is loaded per process, so the active runtime is unchanged "
+                                "until the conflict is resolved.";
+            }
+            requested_runtime_key_.reset();
+        } else {
+            const auto loaded_key = runtime_directory_key(options_.analysis.runtime.directory);
+            const auto desired_runtime = desired.value_or(std::nullopt);
+            const std::string desired_directory =
+                desired_runtime ? desired_runtime->string() : std::string{};
+            if (desired_key == loaded_key) {
+                requested_runtime_key_.reset();
+                reported_runtime_issue_key_.reset();
+            } else {
+                try {
+                    if (!desired_directory.empty()) {
+                        static_cast<void>(dxc::validate_runtime_directory(desired_directory));
+                    }
+                    if (requested_runtime_key_ != desired_key) {
+                        requested_runtime_key_ = desired_key;
+                        reported_runtime_issue_key_.reset();
+                        notify_directory = desired_directory;
+                        notify_reason = "The HLSL workspace selected the " + desired_label +
+                                        " DXC runtime. Restarting the language server to load it.";
+                    }
+                } catch (const dxc::RuntimeError& error) {
+                    const auto key = "invalid:" + desired_key;
+                    if (reported_runtime_issue_key_ != key) {
+                        reported_runtime_issue_key_ = key;
+                        issue_message = std::string{"The selected DXC runtime cannot be used: "} +
+                                        error.what() + ". The active runtime is unchanged.";
+                        issue_is_error = true;
+                    }
+                }
+            }
+        }
+    }
+
+    if (notify_directory) {
+        log(notify_reason);
+        sender_(json_rpc::Notification{
+            .method = "hlsl/dxcRuntimeRestartRequired",
+            .params = Json{{"directory", *notify_directory}, {"reason", notify_reason}}});
+    }
+    if (!issue_message.empty()) {
+        log(issue_message);
+        sender_(json_rpc::Notification{
+            .method = "window/showMessage",
+            .params = Json{{"type", issue_is_error ? 1 : 2}, {"message", issue_message}}});
+    }
+}
+
+Json Server::dxc_runtime(const std::optional<Json>& params) {
+    require_running();
+    if (params.has_value() && !params->is_null() && !params->is_object()) {
+        invalid_params("hlsl/dxcRuntime does not accept parameters");
+    }
+    dxc::RuntimeInfo info;
+    std::string error_message;
+    try {
+        info = analysis_.dxc_runtime_info();
+    } catch (const std::exception& error) {
+        error_message = error.what();
+    }
+    std::string requested;
+    {
+        std::scoped_lock state_lock{state_mutex_};
+        if (requested_runtime_key_) {
+            requested = *requested_runtime_key_;
+        }
+    }
+    Json result = {{"source", info.bundled ? "bundled" : "configured"},
+                   {"directory", info.directory},
+                   {"libraryPath", info.library_path},
+                   {"version", info.version},
+                   {"requiresRestart", !requested.empty()}};
+    if (!error_message.empty()) {
+        result["error"] = error_message;
+    }
+    return result;
 }
 
 void Server::analysis_completed(const workspace::SourceSnapshot& snapshot,

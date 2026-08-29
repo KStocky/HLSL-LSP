@@ -96,6 +96,12 @@
           "scope": "machine-overridable",
           "description": "Path to an external hlsl-lsp executable. The first workspace folder selects this setting for the window and resolves a relative path. When empty, the platform-specific bundled server is required."
         },
+        "hlsl.dxcRuntimeDirectory": {
+          "type": "string",
+          "default": "",
+          "scope": "machine-overridable",
+          "description": "Directory containing a compatible DXC runtime to load instead of the bundled one (dxcompiler.dll and dxil.dll on Windows, libdxcompiler.so on Linux). The first workspace folder selects this setting and resolves a relative path. An explicit value overrides shadertoolsconfig.json. Empty uses the bundled runtime. Changing it restarts the language server."
+        },
         "hlsl.trace.server": {
           "type": "string",
           "enum": [

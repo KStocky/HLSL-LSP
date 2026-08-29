@@ -619,3 +619,79 @@ TEST_CASE("Editor settings replace file properties and resolve from the workspac
     CHECK(!configuration.entry_point.has_value());
     CHECK(configuration.additional_arguments.empty());
 }
+
+TEST_CASE("Configuration resolves a workspace-relative DXC runtime directory",
+          "[configuration][runtime]") {
+    const TestTree tree;
+    tree.file("shadertoolsconfig.json",
+              R"({ "root": true, "hlsl.dxcRuntimeDirectory": "dxc/bin" })");
+    tree.file("shader.hlsl", "");
+    const auto config = workspace::load_workspace_configuration_for_file(tree.path("shader.hlsl"));
+    REQUIRE(config.dxc_runtime_directory.has_value());
+    CHECK(config.dxc_runtime_directory->is_absolute());
+    CHECK(config.dxc_runtime_directory->filename().string() == "bin");
+    CHECK(config.dxc_runtime_directory->parent_path().filename().string() == "dxc");
+}
+
+TEST_CASE("Conflicting nested DXC runtime selections are rejected", "[configuration][runtime]") {
+    const TestTree tree;
+    tree.file("shadertoolsconfig.json",
+              R"({ "root": true, "hlsl.dxcRuntimeDirectory": "runtime-a" })");
+    tree.file("child/shadertoolsconfig.json", R"({ "hlsl.dxcRuntimeDirectory": "runtime-b" })");
+    tree.file("child/shader.hlsl", "");
+    const auto failure = configuration_failure(tree.path("child/shader.hlsl"));
+    CHECK(failure.code == workspace::ConfigurationErrorCode::conflicting_runtime);
+    CHECK(failure.message.find("Conflicting DXC runtime") != std::string::npos);
+}
+
+TEST_CASE("Matching nested DXC runtime selections are accepted", "[configuration][runtime]") {
+    const TestTree tree;
+    tree.file("shadertoolsconfig.json",
+              R"({ "root": true, "hlsl.dxcRuntimeDirectory": "shared-runtime" })");
+    tree.file("child/shadertoolsconfig.json",
+              R"({ "hlsl.dxcRuntimeDirectory": "../shared-runtime" })");
+    tree.file("child/shader.hlsl", "");
+    const auto config =
+        workspace::load_workspace_configuration_for_file(tree.path("child/shader.hlsl"));
+    REQUIRE(config.dxc_runtime_directory.has_value());
+    CHECK(config.dxc_runtime_directory->filename().string() == "shared-runtime");
+}
+
+TEST_CASE("A DXC runtime directory is not allowed in a file group", "[configuration][runtime]") {
+    const TestTree tree;
+    tree.file(
+        "shadertoolsconfig.json",
+        R"({ "root": true, "hlsl.fileGroups": [ { "files": ["*.hlsl"], "hlsl.dxcRuntimeDirectory": "runtime" } ] })");
+    tree.file("shader.hlsl", "");
+    const auto failure = configuration_failure(tree.path("shader.hlsl"));
+    CHECK(failure.code == workspace::ConfigurationErrorCode::invalid_type);
+    CHECK(failure.message.find("dxcRuntimeDirectory") != std::string::npos);
+}
+
+TEST_CASE("A non-string DXC runtime directory is rejected", "[configuration][runtime]") {
+    const TestTree tree;
+    tree.file("shadertoolsconfig.json", R"({ "root": true, "hlsl.dxcRuntimeDirectory": 5 })");
+    tree.file("shader.hlsl", "");
+    const auto failure = configuration_failure(tree.path("shader.hlsl"));
+    CHECK(failure.code == workspace::ConfigurationErrorCode::invalid_type);
+}
+
+TEST_CASE("Editor overrides replace and clear the DXC runtime directory",
+          "[configuration][runtime]") {
+    workspace::WorkspaceConfiguration base;
+    base.dxc_runtime_directory = std::filesystem::path{"file-runtime"};
+
+    workspace::ConfigurationOverrides replace_override;
+    replace_override.dxc_runtime_directory.emplace(std::filesystem::path{"editor/runtime"});
+    const auto replaced = workspace::apply_configuration_overrides(base, replace_override,
+                                                                   std::filesystem::current_path());
+    REQUIRE(replaced.dxc_runtime_directory.has_value());
+    CHECK(replaced.dxc_runtime_directory->is_absolute());
+    CHECK(replaced.dxc_runtime_directory->filename().string() == "runtime");
+
+    workspace::ConfigurationOverrides clear_override;
+    clear_override.dxc_runtime_directory.emplace(std::nullopt);
+    const auto cleared = workspace::apply_configuration_overrides(base, clear_override,
+                                                                  std::filesystem::current_path());
+    CHECK_FALSE(cleared.dxc_runtime_directory.has_value());
+}

@@ -23,6 +23,7 @@ export interface HlslServerSettings {
   targetProfile?: string;
   entryPoint?: string;
   additionalArguments?: readonly string[];
+  dxcRuntimeDirectory?: string;
 }
 
 const configuredValue = (
@@ -46,6 +47,7 @@ export function readServerSettings(
     "targetProfile",
     "entryPoint",
     "additionalArguments",
+    "dxcRuntimeDirectory",
   ] as const;
   const entries = keys
     .map((key) => [key, configuredValue(reader.inspect(key))] as const)

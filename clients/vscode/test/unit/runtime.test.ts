@@ -3,6 +3,7 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  resolveDxcRuntimeDirectory,
   resolveServerRuntime,
   RuntimeFileSystem,
   RuntimeResolutionError,
@@ -154,6 +155,116 @@ void test("a relative external path requires a workspace", async () => {
   await assert.rejects(
     resolveServerRuntime("hlsl-lsp", {
       platform: "linux",
+      architecture: "x64",
+      extensionPath: path.resolve("extension"),
+      workspaceFolders: [],
+      fileSystem: new FakeFileSystem(),
+    }),
+    /no workspace folder is open/,
+  );
+});
+
+void test("an unset DXC runtime directory keeps the bundled runtime", async () => {
+  const environment = {
+    platform: "win32" as NodeJS.Platform,
+    architecture: "x64",
+    extensionPath: path.resolve("extension"),
+    workspaceFolders: [],
+    fileSystem: new FakeFileSystem(),
+  };
+  assert.equal(
+    await resolveDxcRuntimeDirectory(undefined, environment),
+    undefined,
+  );
+  assert.equal(await resolveDxcRuntimeDirectory("", environment), undefined);
+  assert.equal(await resolveDxcRuntimeDirectory("   ", environment), undefined);
+});
+
+void test("a Windows DXC runtime directory requires both DXC files", async () => {
+  const fileSystem = new FakeFileSystem();
+  const directory = path.resolve("custom-dxc");
+  fileSystem.add(path.join(directory, "dxcompiler.dll"));
+
+  await assert.rejects(
+    resolveDxcRuntimeDirectory(directory, {
+      platform: "win32",
+      architecture: "x64",
+      extensionPath: path.resolve("extension"),
+      workspaceFolders: [],
+      fileSystem,
+    }),
+    (error: unknown) =>
+      error instanceof RuntimeResolutionError &&
+      error.message.includes("dxil.dll"),
+  );
+
+  fileSystem.add(path.join(directory, "dxil.dll"));
+  const runtime = await resolveDxcRuntimeDirectory(directory, {
+    platform: "win32",
+    architecture: "x64",
+    extensionPath: path.resolve("extension"),
+    workspaceFolders: [],
+    fileSystem,
+  });
+  assert.ok(runtime);
+  assert.equal(runtime.directory, directory);
+  assert.equal(runtime.runtimeFiles.length, 2);
+});
+
+void test("a Linux DXC runtime directory requires the shared object", async () => {
+  const fileSystem = new FakeFileSystem();
+  const directory = path.resolve("custom-dxc");
+
+  await assert.rejects(
+    resolveDxcRuntimeDirectory(directory, {
+      platform: "linux",
+      architecture: "x64",
+      extensionPath: path.resolve("extension"),
+      workspaceFolders: [],
+      fileSystem,
+    }),
+    /libdxcompiler\.so/,
+  );
+
+  fileSystem.add(path.join(directory, "libdxcompiler.so"));
+  const runtime = await resolveDxcRuntimeDirectory(directory, {
+    platform: "linux",
+    architecture: "x64",
+    extensionPath: path.resolve("extension"),
+    workspaceFolders: [],
+    fileSystem,
+  });
+  assert.ok(runtime);
+  assert.equal(runtime.directory, directory);
+  assert.deepEqual(runtime.runtimeFiles, [
+    path.join(directory, "libdxcompiler.so"),
+  ]);
+});
+
+void test("a relative DXC runtime directory resolves from the workspace", async () => {
+  const fileSystem = new FakeFileSystem();
+  const workspace = path.resolve("workspace");
+  const directory = path.join(workspace, "tools", "dxc");
+  fileSystem.add(
+    path.join(directory, "dxcompiler.dll"),
+    path.join(directory, "dxil.dll"),
+  );
+
+  const runtime = await resolveDxcRuntimeDirectory("tools/dxc", {
+    platform: "win32",
+    architecture: "x64",
+    extensionPath: path.resolve("extension"),
+    workspaceFolders: [workspace],
+    fileSystem,
+  });
+  assert.ok(runtime);
+  assert.equal(runtime.directory, directory);
+});
+
+void test("a relative DXC runtime directory requires a workspace", async () => {
+  await assert.rejects(
+    resolveDxcRuntimeDirectory("tools/dxc", {
+      platform: "win32",
       architecture: "x64",
       extensionPath: path.resolve("extension"),
       workspaceFolders: [],

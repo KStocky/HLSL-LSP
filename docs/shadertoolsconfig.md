@@ -39,6 +39,9 @@ JSON comments are accepted.
     "-enable-16bit-types"
   ],
 
+  // Optional: load a checked-in DXC runtime instead of the bundled default.
+  "hlsl.dxcRuntimeDirectory": "Tools/dxc/bin",
+
   "hlsl.fileGroups": [
     {
       "name": "Compute shaders",
@@ -147,9 +150,42 @@ reanalyzed so their effective groups are refreshed.
 | `hlsl.targetProfile` | String | Sets the DXC target profile, such as `ps_6_0`, `cs_6_7`, or `lib_6_8`. |
 | `hlsl.entryPoint` | String | Sets the shader entry point supplied to DXC. |
 | `hlsl.additionalArguments` | String array | Replaces the inherited list of extra DXC arguments, such as `-spirv` or `-enable-16bit-types`. |
+| `hlsl.dxcRuntimeDirectory` | String | Selects a compatible DXC runtime directory to load instead of the bundled default. Process-wide; see [DXC runtime selection](#dxc-runtime-selection). |
 
 Use a Shader Model 6.6 or newer profile when code references
 `ResourceDescriptorHeap` or `SamplerDescriptorHeap`.
+
+## DXC runtime selection
+
+By default HLSL-LSP loads the bundled, pinned DXC runtime. `hlsl.dxcRuntimeDirectory`
+selects a different compatible DXC runtime for a project without changing the
+bundled default for other workspaces.
+
+DXC IntelliSense is loaded once into the language-server process, so the runtime
+cannot vary per file. The selection therefore has *process-wide, workspace-level*
+semantics:
+
+- The value is a directory that must contain the platform DXC compiler library
+  (`dxcompiler.dll`, plus `dxil.dll`, on Windows; `libdxcompiler.so` on Linux).
+  The directory and its matching compiler library are validated before the
+  server restarts.
+- Relative values resolve from the directory containing the declaring
+  configuration file, so checked-in, workspace-relative paths remain
+  environment independent.
+- `hlsl.dxcRuntimeDirectory` may only appear at the top level of a
+  configuration file. It is rejected inside `hlsl.fileGroups`, because a runtime
+  cannot be chosen per file.
+- If configuration files discovered for a shader disagree on the runtime
+  directory, HLSL-LSP reports an actionable configuration error instead of
+  silently switching runtimes. Nested files may repeat the same resolved
+  directory, but they must not select different ones.
+
+Changing the effective runtime triggers a single controlled restart of the
+language server; open documents are re-analyzed against the new runtime. Invalid,
+missing, incompatible, or conflicting selections are reported without restarting,
+so a bad value cannot cause a restart loop. The active runtime path and version
+are available through the `hlsl/dxcRuntime` request and each client's diagnostics
+command.
 
 ## Editor-setting precedence
 
@@ -168,3 +204,9 @@ An editor property replaces the corresponding file-derived property. Empty
 arrays and objects deliberately clear inherited values, while omitted
 properties leave them unchanged. Relative editor paths resolve from the
 containing workspace folder.
+
+For `hlsl.dxcRuntimeDirectory`, an explicit editor setting (Visual Studio Code's
+`hlsl.dxcRuntimeDirectory` or Visual Studio's **Tools > Options > HLSL-LSP > DXC
+runtime directory**) overrides any `shadertoolsconfig.json` selection. Clearing
+the editor setting restores the `shadertoolsconfig.json`-driven selection, or the
+bundled default when none is configured.

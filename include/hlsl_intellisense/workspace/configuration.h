@@ -21,7 +21,8 @@ enum class ConfigurationErrorCode {
     invalid_virtual_directory,
     missing_path,
     path_not_directory,
-    invalid_glob
+    invalid_glob,
+    conflicting_runtime
 };
 
 class ConfigurationError final : public std::runtime_error {
@@ -47,6 +48,10 @@ struct WorkspaceConfiguration {
     std::optional<std::string> target_profile;
     std::optional<std::string> entry_point;
     std::vector<std::string> additional_arguments;
+    // Selects the process-wide DXC runtime for the workspace. Empty selects the
+    // bundled default. Conflicting nested selections are reported rather than
+    // silently switched.
+    std::optional<std::filesystem::path> dxc_runtime_directory;
 
     [[nodiscard]] dxc::CompilerOptions compiler_options() const;
 };
@@ -60,6 +65,7 @@ struct ConfigurationOverrides {
     std::optional<std::optional<std::string>> target_profile;
     std::optional<std::optional<std::string>> entry_point;
     std::optional<std::vector<std::string>> additional_arguments;
+    std::optional<std::optional<std::filesystem::path>> dxc_runtime_directory;
 };
 
 [[nodiscard]] std::vector<std::filesystem::path>
