@@ -602,6 +602,18 @@ std::optional<dxc::Hover> Manager::hover(std::string root_identity, std::int64_t
         });
 }
 
+std::optional<dxc::MemoryLayout>
+Manager::memory_layout(std::string root_identity, std::int64_t version, std::string path,
+                       std::uint32_t line, std::uint32_t column,
+                       const json_rpc::CancellationToken& cancellation) {
+    return implementation_->query<std::optional<dxc::MemoryLayout>>(
+        std::move(root_identity), version, cancellation,
+        [requested_path = std::move(path), line, column](Impl::Entry& entry) {
+            static_cast<void>(requested_path);
+            return entry.translation_unit.memory_layout_at(entry.root_path, line, column);
+        });
+}
+
 std::vector<dxc::Signature> Manager::signatures(std::string root_identity, std::int64_t version,
                                                 std::string path, std::uint32_t line,
                                                 std::uint32_t column,

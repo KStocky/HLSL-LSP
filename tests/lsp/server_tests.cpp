@@ -163,7 +163,8 @@ TEST_CASE("LSP handler enforces lifecycle and invalid parameters", "[lsp][handle
     REQUIRE(params_error != nullptr);
     CHECK(params_error->error.code == hlsl_intellisense::json_rpc::invalid_params_code);
 
-    for (const auto method : {"textDocument/hover", "textDocument/signatureHelp"}) {
+    for (const auto method :
+         {"textDocument/hover", "textDocument/signatureHelp", "hlsl/memoryLayout"}) {
         const auto invalid = server.handle(hlsl_intellisense::json_rpc::Request{
             .id = std::int64_t{4},
             .method = method,
@@ -179,6 +180,117 @@ TEST_CASE("LSP handler enforces lifecycle and invalid parameters", "[lsp][handle
         hlsl_intellisense::json_rpc::Notification{.method = "exit", .params = std::nullopt}));
     CHECK(server.exit_requested());
     CHECK(server.exit_code() == 1);
+}
+
+TEST_CASE("Server exposes memory layouts through hover and the custom protocol",
+          "[lsp][memory-layout][integration]") {
+    const auto uri = shader_uri();
+    const std::string source = "// \xF0\x9F\x98\x80 UTF-16 prefix\n"
+                               "struct Material { bool enabled; float3 colour; };\n"
+                               "cbuffer Constants {\n"
+                               "    float3 direction;\n"
+                               "    float2 limits;\n"
+                               "    Material material;\n"
+                               "};\n";
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    hlsl_intellisense::lsp::Server server{
+        [&notifications](const auto& value) { notifications.push_back(value); }};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params =
+            Json{{"textDocument",
+                  {{"uri", uri}, {"languageId", "hlsl"}, {"version", 1}, {"text", source}}}}}));
+
+    const auto limits_offset = source.find("limits");
+    REQUIRE(limits_offset != std::string::npos);
+    const auto params = Json{{"textDocument", {{"uri", uri}}},
+                             {"position", position_at(source, limits_offset + 2)}};
+    const auto request_layout = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{2}, .method = "hlsl/memoryLayout", .params = params});
+    REQUIRE(request_layout.has_value());
+    const auto* layout_response =
+        std::get_if<hlsl_intellisense::json_rpc::Response>(&*request_layout);
+    REQUIRE(layout_response != nullptr);
+    const auto& layout = layout_response->result;
+    INFO(layout.dump());
+    CHECK(layout["name"] == "Constants");
+    CHECK(layout["mode"] == "constantBuffer");
+    CHECK(layout["layout"] == "constantBuffer");
+    CHECK(layout["allocationSize"] == 48);
+    CHECK(layout["supported"] == true);
+    CHECK(layout["selected"]["name"] == "limits");
+    CHECK(layout["selected"]["offset"] == 16);
+    CHECK(layout["selected"]["size"] == 8);
+    CHECK(layout["members"][0]["offset"] == 0);
+    CHECK(layout["members"][1]["offset"] == 16);
+    CHECK(layout["members"][1]["paddingBefore"] == 4);
+    CHECK(layout["members"][2]["offset"] == 32);
+    REQUIRE(layout["members"][2]["members"].size() == 2);
+    CHECK(layout["members"][2]["members"][1]["offset"] == 4);
+
+    const auto hover = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{3}, .method = "textDocument/hover", .params = params});
+    REQUIRE(hover.has_value());
+    const auto* hover_response = std::get_if<hlsl_intellisense::json_rpc::Response>(&*hover);
+    REQUIRE(hover_response != nullptr);
+    CHECK(hover_response->result["contents"]["kind"] == "markdown");
+    const auto hover_text = hover_response->result["contents"]["value"].get<std::string>();
+    CHECK(hover_text.find("size 8 bytes, alignment 4 bytes, packed offset 16 bytes") !=
+          std::string::npos);
+    CHECK(hover_text.find("[Memory Layout](command:hlsl.showMemoryLayout?") != std::string::npos);
+
+    const std::string edited = "struct Material { double value; };\n";
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didChange",
+        .params = Json{{"textDocument", {{"uri", uri}, {"version", 2}}},
+                       {"contentChanges", Json::array({Json{{"text", edited}}})}}}));
+    const auto edited_offset = edited.find("value");
+    const auto edited_layout = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{4},
+        .method = "hlsl/memoryLayout",
+        .params = Json{{"textDocument", {{"uri", uri}}},
+                       {"position", position_at(edited, edited_offset + 1)}}});
+    REQUIRE(edited_layout.has_value());
+    const auto* edited_response =
+        std::get_if<hlsl_intellisense::json_rpc::Response>(&*edited_layout);
+    REQUIRE(edited_response != nullptr);
+    CHECK(edited_response->result["size"] == 8);
+    CHECK(edited_response->result["selected"]["type"] == "double");
+}
+
+TEST_CASE("Memory layout protocol explains unsupported declarations",
+          "[lsp][memory-layout][unsupported]") {
+    const auto uri = shader_uri();
+    const std::string source = "cbuffer Invalid { float value : packoffset(c0); };\n";
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    hlsl_intellisense::lsp::Server server{
+        [&notifications](const auto& value) { notifications.push_back(value); }};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params =
+            Json{{"textDocument",
+                  {{"uri", uri}, {"languageId", "hlsl"}, {"version", 1}, {"text", source}}}}}));
+
+    const auto offset = source.find("value");
+    const auto response = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{2},
+        .method = "hlsl/memoryLayout",
+        .params =
+            Json{{"textDocument", {{"uri", uri}}}, {"position", position_at(source, offset + 1)}}});
+    REQUIRE(response.has_value());
+    const auto* result = std::get_if<hlsl_intellisense::json_rpc::Response>(&*response);
+    REQUIRE(result != nullptr);
+    INFO(result->result.dump());
+    CHECK(result->result["supported"] == false);
+    CHECK(result->result["explanation"].get<std::string>().find("packoffset") != std::string::npos);
 }
 
 TEST_CASE("Server provides hierarchical document and searchable workspace symbols",

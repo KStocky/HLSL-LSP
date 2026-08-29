@@ -265,7 +265,43 @@ TEST_CASE("Interactive analysis cancellation returns before blocked worker clean
     } catch (const json_rpc::HandlerError& error) {
         CHECK(error.code() == json_rpc::request_cancelled_code);
     }
+
     interactive.release();
     manager.wait_idle();
     CHECK(manager.metrics().scheduler.cancelled >= 1);
+}
+
+TEST_CASE("Memory layout queries preserve cancellation and stale-version safety",
+          "[analysis][memory-layout][cancellation]") {
+    TestDirectory directory;
+    const auto uri = workspace::DocumentUri::from_path((directory.path() / "root.hlsl").string());
+    auto hooks = std::make_shared<analysis::AnalysisHooks>();
+    Gate interactive;
+    hooks->before_interactive = [&](std::string_view) {
+        interactive.enter();
+        interactive.wait_until_released();
+    };
+    analysis::Manager manager{[](const auto&, const auto&, std::uint64_t) {}, test_options(),
+                              hooks};
+    manager.analyze(input(uri, 1, "struct Data { float3 value; };\n"));
+    manager.wait_idle();
+
+    json_rpc::CancellationToken cancellation;
+    auto request = std::async(std::launch::async, [&] {
+        return manager.memory_layout(uri.identity(), 1, uri.path(), 1, 23, cancellation);
+    });
+    interactive.wait_until_entered();
+    cancellation.cancel();
+    try {
+        static_cast<void>(request.get());
+        FAIL("Cancelled memory layout unexpectedly returned");
+    } catch (const json_rpc::HandlerError& error) {
+        CHECK(error.code() == json_rpc::request_cancelled_code);
+    }
+    interactive.release();
+    manager.wait_idle();
+
+    json_rpc::CancellationToken current;
+    CHECK_THROWS_AS(manager.memory_layout(uri.identity(), 2, uri.path(), 1, 23, current),
+                    json_rpc::HandlerError);
 }

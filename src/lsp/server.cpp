@@ -317,6 +317,110 @@ void append_document_symbols(Json& output, const std::vector<dxc::Symbol>& symbo
            }).begin() != text.end();
 }
 
+[[nodiscard]] std::string_view layout_kind(dxc::MemoryLayoutKind kind) {
+    return kind == dxc::MemoryLayoutKind::constant_buffer ? "constantBuffer" : "natural";
+}
+
+[[nodiscard]] std::string_view layout_element_kind(dxc::MemoryLayoutElementKind kind) {
+    switch (kind) {
+    case dxc::MemoryLayoutElementKind::scalar:
+        return "scalar";
+    case dxc::MemoryLayoutElementKind::vector:
+        return "vector";
+    case dxc::MemoryLayoutElementKind::matrix:
+        return "matrix";
+    case dxc::MemoryLayoutElementKind::array:
+        return "array";
+    case dxc::MemoryLayoutElementKind::record:
+        return "record";
+    }
+    return "scalar";
+}
+
+[[nodiscard]] Json layout_element_json(const dxc::MemoryLayoutElement& element,
+                                       std::uint32_t padding_before) {
+    Json members = Json::array();
+    std::uint32_t previous_end{};
+    for (const auto& member_value : element.members) {
+        const auto padding =
+            member_value.offset > previous_end ? member_value.offset - previous_end : 0U;
+        members.push_back(layout_element_json(member_value, padding));
+        previous_end = member_value.offset + member_value.size;
+    }
+    Json result{{"name", element.name},
+                {"type", element.type},
+                {"kind", layout_element_kind(element.kind)},
+                {"offset", element.offset},
+                {"size", element.size},
+                {"alignment", element.alignment},
+                {"paddingBefore", padding_before},
+                {"arrayStride", element.array_stride},
+                {"matrixStride", element.matrix_stride},
+                {"matrixMajor", element.row_major ? "row" : "column"},
+                {"arrayDimensions", element.array_dimensions},
+                {"members", std::move(members)}};
+    return result;
+}
+
+[[nodiscard]] Json memory_layout_json(const dxc::MemoryLayout& layout) {
+    Json members = Json::array();
+    std::uint32_t previous_end{};
+    for (const auto& member_value : layout.members) {
+        const auto padding =
+            member_value.offset > previous_end ? member_value.offset - previous_end : 0U;
+        members.push_back(layout_element_json(member_value, padding));
+        previous_end = member_value.offset + member_value.size;
+    }
+    Json diagnostics = Json::array();
+    if (!layout.explanation.empty()) {
+        diagnostics.push_back(layout.explanation);
+    }
+    Json result{{"name", layout.name},
+                {"type", layout.type},
+                {"mode", layout_kind(layout.kind)},
+                {"layout", layout_kind(layout.kind)},
+                {"size", layout.size},
+                {"allocationSize", layout.allocation_size},
+                {"alignment", layout.alignment},
+                {"supported", layout.supported},
+                {"explanation", layout.explanation},
+                {"diagnostics", std::move(diagnostics)},
+                {"selected",
+                 {{"name", layout.selected_name},
+                  {"type", layout.selected_type},
+                  {"size", layout.selected_size},
+                  {"alignment", layout.selected_alignment}}},
+                {"members", std::move(members)}};
+    result["selected"]["offset"] =
+        layout.packed_offset.has_value() ? Json(*layout.packed_offset) : Json(nullptr);
+    return result;
+}
+
+[[nodiscard]] std::string percent_encode(std::string_view value) {
+    constexpr char hexadecimal[] = "0123456789ABCDEF";
+    std::string result;
+    result.reserve(value.size());
+    for (const auto character : value) {
+        const auto byte = static_cast<unsigned char>(character);
+        if (std::isalnum(byte) != 0 || character == '-' || character == '_' || character == '.' ||
+            character == '~') {
+            result.push_back(character);
+        } else {
+            result.push_back('%');
+            result.push_back(hexadecimal[byte >> 4]);
+            result.push_back(hexadecimal[byte & 0x0F]);
+        }
+    }
+    return result;
+}
+
+[[nodiscard]] std::string memory_layout_command(std::string_view uri,
+                                                workspace::Position position_value) {
+    const Json arguments = Json::array(
+        {Json{{"textDocument", {{"uri", uri}}}, {"position", lsp_position(position_value)}}});
+    return "command:hlsl.showMemoryLayout?" + percent_encode(arguments.dump());
+}
+
 // NOLINTBEGIN(bugprone-easily-swappable-parameters)
 void append_workspace_symbols(Json& output, const std::vector<dxc::Symbol>& symbols,
                               const workspace::SourceSnapshot& snapshot, std::string_view query,
@@ -1106,6 +1210,9 @@ void Server::register_handlers() {
     dispatcher_.register_request_handler(
         "textDocument/hover",
         [this](const auto& params, const auto& context) { return hover(params, context); });
+    dispatcher_.register_request_handler(
+        "hlsl/memoryLayout",
+        [this](const auto& params, const auto& context) { return memory_layout(params, context); });
     dispatcher_.register_request_handler("textDocument/signatureHelp",
                                          [this](const auto& params, const auto& context) {
                                              return signature_help(params, context);
@@ -1704,6 +1811,9 @@ Json Server::hover(const std::optional<Json>& params, const json_rpc::RequestCon
     const auto [line, column] = dxc_position(snapshot.text(), request_position);
     const auto information = analysis_.hover(snapshot.document_uri().identity(), snapshot.version(),
                                              snapshot.path(), line, column, context.cancellation);
+    const auto layout =
+        analysis_.memory_layout(snapshot.document_uri().identity(), snapshot.version(),
+                                snapshot.path(), line, column, context.cancellation);
     {
         std::scoped_lock state_lock{state_mutex_};
         if (!documents_.contains(snapshot.uri()) ||
@@ -1711,29 +1821,33 @@ Json Server::hover(const std::optional<Json>& params, const json_rpc::RequestCon
             throw HandlerError{json_rpc::content_modified_code, "Hover was superseded"};
         }
     }
-    if (!information.has_value()) {
+    if (!information.has_value() && !layout.has_value()) {
         return nullptr;
     }
 
     std::string contents;
-    if (!information->declaration.empty()) {
+    if (information.has_value() && !information->declaration.empty()) {
         contents += information->declaration;
-    } else if (!information->display_name.empty()) {
+    } else if (information.has_value() && !information->display_name.empty()) {
         contents += information->display_name;
-    } else {
+    } else if (information.has_value()) {
         contents += information->name;
+    } else {
+        contents += layout->selected_type;
+        contents += ' ';
+        contents += layout->selected_name;
     }
-    if (!information->qualified_name.empty() &&
+    if (information.has_value() && !information->qualified_name.empty() &&
         information->qualified_name != information->display_name &&
         information->qualified_name != information->declaration) {
         contents += "\nSymbol: ";
         contents += information->qualified_name;
     }
-    if (!information->type.empty()) {
+    if (information.has_value() && !information->type.empty()) {
         contents += "\nType: ";
         contents += information->type;
     }
-    if (!information->declaration_location.path.empty()) {
+    if (information.has_value() && !information->declaration_location.path.empty()) {
         contents += "\nDeclared at ";
         contents += information->declaration_location.path;
         if (information->declaration_location.line != 0) {
@@ -1745,15 +1859,77 @@ Json Server::hover(const std::optional<Json>& params, const json_rpc::RequestCon
             }
         }
     }
+    if (layout.has_value()) {
+        contents += "\n\n";
+        if (layout->supported) {
+            contents += "Memory layout: size ";
+            contents += std::to_string(layout->selected_size);
+            contents += " bytes, alignment ";
+            contents += std::to_string(layout->selected_alignment);
+            contents += " bytes";
+            if (layout->packed_offset.has_value()) {
+                contents += ", packed offset ";
+                contents += std::to_string(*layout->packed_offset);
+                contents += " bytes";
+            }
+        } else {
+            contents += "Memory layout unavailable: ";
+            contents += layout->explanation;
+        }
+        contents += "\n\n[Memory Layout](";
+        contents += memory_layout_command(uri, request_position);
+        contents += ')';
+    }
 
-    Json result{{"contents", {{"kind", "plaintext"}, {"value", std::move(contents)}}}};
-    if (information->start_offset <= information->end_offset &&
+    Json result{{"contents",
+                 {{"kind", layout.has_value() ? "markdown" : "plaintext"},
+                  {"value", std::move(contents)}}}};
+    if (information.has_value() && information->start_offset <= information->end_offset &&
         information->end_offset <= snapshot.text().size()) {
         result["range"] = lsp_range(
             {.start = workspace::lsp_position_at(snapshot.text(), information->start_offset),
              .end = workspace::lsp_position_at(snapshot.text(), information->end_offset)});
     }
     return result;
+}
+
+Json Server::memory_layout(const std::optional<Json>& params,
+                           const json_rpc::RequestContext& context) {
+    require_running();
+    const auto& value = object_params(params);
+    const auto uri = string_member(object_member(value, "textDocument"), "uri");
+    const auto request_position = position(object_member(value, "position"));
+    workspace::SourceSnapshot snapshot = [&] {
+        std::scoped_lock state_lock{state_mutex_};
+        try {
+            const auto& state = documents_.document(uri);
+            if (!state.open) {
+                invalid_params("Memory layout document is not open");
+            }
+            return documents_.snapshot(uri);
+        } catch (const workspace::DocumentError& error) {
+            invalid_params(error.what());
+        }
+    }();
+    try {
+        static_cast<void>(workspace::utf8_offset_at(snapshot.text(), request_position));
+    } catch (const workspace::DocumentError& error) {
+        invalid_params(error.what());
+    }
+
+    analyze_and_publish(snapshot.uri());
+    const auto [line, column] = dxc_position(snapshot.text(), request_position);
+    const auto layout =
+        analysis_.memory_layout(snapshot.document_uri().identity(), snapshot.version(),
+                                snapshot.path(), line, column, context.cancellation);
+    {
+        std::scoped_lock state_lock{state_mutex_};
+        if (!documents_.contains(snapshot.uri()) ||
+            documents_.snapshot(snapshot.uri()).version() != snapshot.version()) {
+            throw HandlerError{json_rpc::content_modified_code, "Memory layout was superseded"};
+        }
+    }
+    return layout.has_value() ? memory_layout_json(*layout) : Json(nullptr);
 }
 
 Json Server::signature_help(const std::optional<Json>& params,

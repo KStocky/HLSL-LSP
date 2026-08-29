@@ -10,6 +10,7 @@ with:
 - DXC diagnostics for open HLSL documents
 - DXC-backed code completion
 - DXC-backed hover and signature help
+- Natural structure and constant-buffer memory layout inspection
 - DXC-backed semantic colouring and go-to-definition for symbols and include paths
 - Workspace symbol support for Visual Studio's All-In-One Search
 - Hierarchical `shadertoolsconfig.json` compiler configuration
@@ -44,6 +45,10 @@ symbols, templates, and DXC intrinsics. Trigger it with Visual Studio's normal
 Hover reports DXC's symbol name, type, declaration, and source location.
 Signature help reports stable labels and parameters for functions, overloaded
 functions, and methods, including nested call sites and unsaved edits.
+Supported structure and constant-buffer declarations also report byte size,
+alignment, and packed offset, with a Memory Layout action backed by the
+cross-editor `hlsl/memoryLayout` protocol. Layout rules and limitations are
+documented in [`docs/memory-layout.md`](docs/memory-layout.md).
 
 The pinned DXC `1.9.2607.13` API exposes no callable constructor overloads or
 parameter cursors. Scalar casts resolve to an unnamed initializer expression;

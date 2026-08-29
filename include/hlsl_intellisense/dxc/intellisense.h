@@ -69,6 +69,41 @@ struct Hover {
     std::uint32_t end_offset{};
 };
 
+enum class MemoryLayoutKind : std::uint8_t { natural, constant_buffer };
+
+enum class MemoryLayoutElementKind : std::uint8_t { scalar, vector, matrix, array, record };
+
+struct MemoryLayoutElement {
+    std::string name;
+    std::string type;
+    MemoryLayoutElementKind kind{MemoryLayoutElementKind::scalar};
+    std::uint32_t offset{};
+    std::uint32_t size{};
+    std::uint32_t alignment{};
+    std::uint32_t array_stride{};
+    std::uint32_t matrix_stride{};
+    bool row_major{};
+    std::vector<std::uint32_t> array_dimensions;
+    std::vector<MemoryLayoutElement> members;
+};
+
+struct MemoryLayout {
+    std::string name;
+    std::string type;
+    MemoryLayoutKind kind{MemoryLayoutKind::natural};
+    std::uint32_t size{};
+    std::uint32_t allocation_size{};
+    std::uint32_t alignment{};
+    std::optional<std::uint32_t> packed_offset;
+    std::string selected_name;
+    std::string selected_type;
+    std::uint32_t selected_size{};
+    std::uint32_t selected_alignment{};
+    bool supported{true};
+    std::string explanation;
+    std::vector<MemoryLayoutElement> members;
+};
+
 struct SignatureParameter {
     std::string label;
     std::string name;
@@ -126,6 +161,8 @@ class TranslationUnit final {
                                                        std::uint32_t column) const;
     [[nodiscard]] std::optional<Hover> hover_at(std::string_view path, std::uint32_t line,
                                                 std::uint32_t column) const;
+    [[nodiscard]] std::optional<MemoryLayout>
+    memory_layout_at(std::string_view path, std::uint32_t line, std::uint32_t column) const;
     [[nodiscard]] std::vector<Signature> signatures_at(std::string_view path, std::uint32_t line,
                                                        std::uint32_t column) const;
     [[nodiscard]] std::vector<Token> tokens(std::string_view path) const;

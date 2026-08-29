@@ -100,6 +100,10 @@ class Manager final {
                                                   std::string path, std::uint32_t line,
                                                   std::uint32_t column,
                                                   const json_rpc::CancellationToken& cancellation);
+    [[nodiscard]] std::optional<dxc::MemoryLayout>
+    memory_layout(std::string root_identity, std::int64_t version, std::string path,
+                  std::uint32_t line, std::uint32_t column,
+                  const json_rpc::CancellationToken& cancellation);
     [[nodiscard]] std::vector<dxc::Signature>
     signatures(std::string root_identity, std::int64_t version, std::string path,
                std::uint32_t line, std::uint32_t column,
