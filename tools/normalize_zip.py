@@ -74,7 +74,14 @@ def _write_archive(path, entries):
     ) as archive:
         for original, content in sorted(entries, key=lambda value: value[0].filename):
             entry = zipfile.ZipInfo(original.filename, date_time=(1980, 1, 1, 0, 0, 0))
-            entry.compress_type = zipfile.ZIP_DEFLATED
+            # catalog.json contains the archive's own byte size. Storing it
+            # uncompressed makes that self-reference converge once the decimal
+            # width stabilizes instead of oscillating with deflate output.
+            entry.compress_type = (
+                zipfile.ZIP_STORED
+                if original.filename == "catalog.json"
+                else zipfile.ZIP_DEFLATED
+            )
             entry.create_system = original.create_system
             entry.external_attr = original.external_attr
             entry.internal_attr = original.internal_attr

@@ -45,6 +45,9 @@ class NormalizeZipTests(unittest.TestCase):
             with zipfile.ZipFile(first, "r") as archive:
                 catalog = json.loads(archive.read("catalog.json"))
                 package = catalog["packages"][0]
+                self.assertEqual(
+                    archive.getinfo("catalog.json").compress_type, zipfile.ZIP_STORED
+                )
                 self.assertEqual(package["payloads"][0]["size"], os.path.getsize(first))
                 self.assertEqual(
                     package["extensionDir"],
