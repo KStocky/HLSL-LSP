@@ -108,8 +108,11 @@ element and vector.
 Resource and object types, recursive records, anonymous or inline records,
 templates and aliases, non-literal or unsized arrays, initializers, methods,
 bitfields, and explicit `packoffset` controls are reported as unsupported.
-Preprocessor-dependent declarations are laid out from the current unsaved
-source text only when the resulting declaration is unambiguous.
+Records and fields overlapping conditional preprocessing are rejected rather
+than combining declarations from multiple branches. A conditional
+`#pragma pack_matrix` also rejects later unqualified matrix declarations until
+an unconditional matrix-packing pragma establishes an unambiguous default.
+The layout parser deliberately does not evaluate macros.
 
 Requests use the same versioned analysis queue as hover and other interactive
 features. Cancellation returns the standard request-cancelled error, and an

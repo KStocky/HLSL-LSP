@@ -45,6 +45,12 @@ struct Record {
 struct MatrixMajorEvent {
     std::size_t offset{};
     bool row_major{};
+    bool conditional{};
+};
+
+struct ConditionalRange {
+    std::size_t begin{};
+    std::size_t end{};
 };
 
 enum class TypeKind : std::uint8_t { scalar, vector, matrix, record, unsupported };
@@ -178,11 +184,21 @@ struct TypeLayout {
     return result;
 }
 
+[[nodiscard]] bool matrix_type_spelling(std::string_view value) {
+    if (value.starts_with("matrix<")) {
+        return true;
+    }
+    const auto x = value.rfind('x');
+    return x != std::string_view::npos && x > 0 && x + 1 < value.size() && value[x - 1] >= '1' &&
+           value[x - 1] <= '4' && value[x + 1] >= '1' && value[x + 1] <= '4' &&
+           x + 2 == value.size();
+}
+
 class Parser final {
   public:
     Parser(std::string_view source, bool default_row_major)
         : source_{source}, tokens_{lex(source)}, default_row_major_{default_row_major} {
-        parse_matrix_major_pragmas();
+        parse_directives();
     }
 
     [[nodiscard]] std::vector<Record> parse() {
@@ -191,6 +207,13 @@ class Parser final {
             if (tokens_[index].text == "struct" || tokens_[index].text == "cbuffer") {
                 auto [record, next] = parse_record(index);
                 if (record.has_value()) {
+                    if (std::ranges::any_of(conditional_ranges_, [&record](const auto& range) {
+                            return range.begin < record->end && range.end > record->begin;
+                        })) {
+                        record->unsupported =
+                            "Conditional preprocessing overlaps this record; layout is "
+                            "unsupported without evaluating macros";
+                    }
                     records.push_back(std::move(*record));
                 }
                 index = (std::max)(next, index + 1);
@@ -202,7 +225,8 @@ class Parser final {
     }
 
   private:
-    void parse_matrix_major_pragmas() {
+    void parse_directives() {
+        std::vector<std::size_t> conditional_stack;
         std::size_t line_begin{};
         while (line_begin < source_.size()) {
             auto line_end = source_.find_first_of("\r\n", line_begin);
@@ -220,10 +244,23 @@ class Parser final {
                     compact.push_back(character);
                 }
             }
-            if (compact == "#pragmapack_matrix(row_major)") {
-                matrix_major_events_.push_back({.offset = line_begin, .row_major = true});
+            if (compact.starts_with("#ifdef") || compact.starts_with("#ifndef") ||
+                compact.starts_with("#if")) {
+                conditional_stack.push_back(line_begin);
+            } else if (compact.starts_with("#endif")) {
+                if (!conditional_stack.empty()) {
+                    conditional_ranges_.push_back(
+                        {.begin = conditional_stack.back(), .end = line_end});
+                    conditional_stack.pop_back();
+                }
+            } else if (compact == "#pragmapack_matrix(row_major)") {
+                matrix_major_events_.push_back({.offset = line_begin,
+                                                .row_major = true,
+                                                .conditional = !conditional_stack.empty()});
             } else if (compact == "#pragmapack_matrix(column_major)") {
-                matrix_major_events_.push_back({.offset = line_begin, .row_major = false});
+                matrix_major_events_.push_back({.offset = line_begin,
+                                                .row_major = false,
+                                                .conditional = !conditional_stack.empty()});
             }
             line_begin = line_end;
             while (line_begin < source_.size() &&
@@ -231,6 +268,10 @@ class Parser final {
                 ++line_begin;
             }
         }
+        for (const auto begin : conditional_stack) {
+            conditional_ranges_.push_back({.begin = begin, .end = source_.size()});
+        }
+        std::ranges::sort(conditional_ranges_, {}, &ConditionalRange::begin);
     }
 
     [[nodiscard]] bool row_major_at(std::size_t offset) const {
@@ -239,9 +280,22 @@ class Parser final {
             if (event.offset >= offset) {
                 break;
             }
-            result = event.row_major;
+            if (!event.conditional) {
+                result = event.row_major;
+            }
         }
         return result;
+    }
+
+    [[nodiscard]] bool conditional_matrix_major_at(std::size_t offset) const {
+        const MatrixMajorEvent* latest{};
+        for (const auto& event : matrix_major_events_) {
+            if (event.offset >= offset) {
+                break;
+            }
+            latest = &event;
+        }
+        return latest != nullptr && latest->conditional;
     }
 
     [[nodiscard]] std::pair<std::optional<Record>, std::size_t>
@@ -366,6 +420,9 @@ class Parser final {
             explicit_row_major ||
             (!explicit_column_major && row_major_at(tokens_[declaration_begin].begin));
         const auto column_major = explicit_column_major;
+        const auto conditional_matrix_major =
+            !explicit_row_major && !explicit_column_major && matrix_type_spelling(type) &&
+            conditional_matrix_major_at(tokens_[declaration_begin].begin);
         auto declarator_begin = type_end;
         bool first_declarator = true;
         std::size_t square{};
@@ -388,8 +445,8 @@ class Parser final {
                     first_declarator ? tokens_[declaration_begin].begin
                                      : (declarator_begin < end ? tokens_[declarator_begin].begin
                                                                : tokens_[index - 1].end);
-                parse_declarator(record, type, row_major, column_major, declarator_begin, index,
-                                 selection_begin);
+                parse_declarator(record, type, row_major, column_major, conditional_matrix_major,
+                                 declarator_begin, index, selection_begin);
                 first_declarator = false;
                 declarator_begin = index + 1;
             }
@@ -397,8 +454,8 @@ class Parser final {
     }
 
     void parse_declarator(Record& record, const std::string& type, bool row_major,
-                          bool column_major, std::size_t begin, std::size_t end,
-                          std::size_t selection_begin) const {
+                          bool column_major, bool conditional_matrix_major, std::size_t begin,
+                          std::size_t end, std::size_t selection_begin) const {
         if (begin >= end) {
             return;
         }
@@ -411,6 +468,11 @@ class Parser final {
                     .column_major = column_major};
         if (row_major && column_major) {
             field.unsupported = "A matrix cannot be both row_major and column_major";
+        }
+        if (conditional_matrix_major) {
+            field.unsupported =
+                "A conditional #pragma pack_matrix can affect this declaration; layout is "
+                "unsupported without evaluating macros";
         }
         if (!identifier_start(field.name.front())) {
             field.unsupported = "Expected a named field declarator";
@@ -449,6 +511,7 @@ class Parser final {
     std::vector<Token> tokens_;
     bool default_row_major_{};
     std::vector<MatrixMajorEvent> matrix_major_events_;
+    std::vector<ConditionalRange> conditional_ranges_;
 };
 
 [[nodiscard]] std::optional<std::pair<std::uint32_t, std::uint32_t>>

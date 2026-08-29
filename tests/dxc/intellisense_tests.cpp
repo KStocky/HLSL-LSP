@@ -272,6 +272,61 @@ TEST_CASE("Memory layout field type tokens select their declarator",
     CHECK(layout->selected_alignment == 4);
 }
 
+TEST_CASE("Memory layouts reject conditionally preprocessed records and fields",
+          "[dxc][memory-layout][preprocessor]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+
+    const std::string fields_source = "struct ConditionalFields {\n"
+                                      "#if FEATURE\n"
+                                      "    float value;\n"
+                                      "#else\n"
+                                      "    double value;\n"
+                                      "#endif\n"
+                                      "};\n";
+    auto fields_translation = intellisense.parse(shader_path, {{shader_path, fields_source}});
+    const auto fields_layout = fields_translation.memory_layout_at(shader_path, 1, 10);
+    REQUIRE(fields_layout.has_value());
+    CHECK_FALSE(fields_layout->supported);
+    CHECK(fields_layout->explanation.find("Conditional preprocessing") != std::string::npos);
+
+    const std::string record_source = "#ifdef FEATURE\n"
+                                      "struct ConditionalRecord { float value; };\n"
+                                      "#endif\n";
+    auto record_translation = intellisense.parse(shader_path, {{shader_path, record_source}});
+    const auto record_layout = record_translation.memory_layout_at(shader_path, 2, 10);
+    REQUIRE(record_layout.has_value());
+    CHECK_FALSE(record_layout->supported);
+    CHECK(record_layout->explanation.find("Conditional preprocessing") != std::string::npos);
+}
+
+TEST_CASE("Memory layouts reject conditional matrix pragmas without evaluating macros",
+          "[dxc][memory-layout][preprocessor][matrix]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    const std::string conditional_source = "#if 0\n"
+                                           "#pragma pack_matrix(row_major)\n"
+                                           "#endif\n"
+                                           "cbuffer Constants { float2x3 transform; };\n";
+    auto conditional_translation =
+        intellisense.parse(shader_path, {{shader_path, conditional_source}});
+    const auto conditional_layout = conditional_translation.memory_layout_at(shader_path, 4, 22);
+    REQUIRE(conditional_layout.has_value());
+    CHECK_FALSE(conditional_layout->supported);
+    CHECK(conditional_layout->explanation.find("conditional #pragma pack_matrix") !=
+          std::string::npos);
+
+    const std::string reset_source = "#if FEATURE\n"
+                                     "#pragma pack_matrix(row_major)\n"
+                                     "#endif\n"
+                                     "#pragma pack_matrix(column_major)\n"
+                                     "cbuffer Constants { float2x3 transform; };\n";
+    auto reset_translation = intellisense.parse(shader_path, {{shader_path, reset_source}});
+    const auto reset_layout = reset_translation.memory_layout_at(shader_path, 5, 22);
+    REQUIRE(reset_layout.has_value());
+    REQUIRE(reset_layout->supported);
+    CHECK_FALSE(reset_layout->members[0].row_major);
+    CHECK(reset_layout->members[0].size == 48);
+}
+
 TEST_CASE("Constant-buffer root size includes the final register row",
           "[dxc][memory-layout][cbuffer]") {
     hlsl_intellisense::dxc::Intellisense intellisense;

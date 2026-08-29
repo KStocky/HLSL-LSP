@@ -326,6 +326,30 @@ TEST_CASE("Memory layout protocol explains unsupported declarations",
     REQUIRE(result->result["diagnostics"].size() == 1);
     CHECK(result->result["diagnostics"][0].get<std::string>().find("packoffset") !=
           std::string::npos);
+
+    const std::string conditional = "struct Conditional {\n"
+                                    "#if FEATURE\n"
+                                    "    float value;\n"
+                                    "#else\n"
+                                    "    double value;\n"
+                                    "#endif\n"
+                                    "};\n";
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didChange",
+        .params = Json{{"textDocument", {{"uri", uri}, {"version", 2}}},
+                       {"contentChanges", Json::array({Json{{"text", conditional}}})}}}));
+    const auto conditional_response = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{3},
+        .method = "hlsl/memoryLayout",
+        .params =
+            Json{{"textDocument", {{"uri", uri}}}, {"position", {{"line", 0}, {"character", 9}}}}});
+    REQUIRE(conditional_response.has_value());
+    const auto* conditional_result =
+        std::get_if<hlsl_intellisense::json_rpc::Response>(&*conditional_response);
+    REQUIRE(conditional_result != nullptr);
+    REQUIRE(conditional_result->result["diagnostics"].size() == 1);
+    CHECK(conditional_result->result["diagnostics"][0].get<std::string>().find(
+              "Conditional preprocessing") != std::string::npos);
 }
 
 TEST_CASE("Server provides hierarchical document and searchable workspace symbols",
