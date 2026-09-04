@@ -89,6 +89,18 @@ Show Language Server Output**, and **HLSL: Show Client Diagnostics** to manage
 and inspect the selected process. Shutdown is performed through the language
 client and is scoped to the child process launched by this extension.
 
+## Shader variants
+
+When a `shadertoolsconfig.json` declares named compilation variants under
+`hlsl.variants`, run **HLSL: Select Shader Variant** (or click the variant
+indicator in the status bar) to choose the active variant. The picker lists the
+variants the server reports for the active document. The choice is stored in the
+`hlsl.activeVariant` setting; changing it reanalyzes open documents and restarts
+the server only when the variant selects a different DXC runtime. See the
+repository's
+[named compilation variants](../../docs/shadertoolsconfig.md#named-compilation-variants)
+reference for the schema and behavior.
+
 ## DXC runtime selection
 
 By default the extension loads the bundled, pinned DXC runtime. Set

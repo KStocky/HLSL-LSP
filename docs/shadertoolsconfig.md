@@ -137,12 +137,113 @@ when the current shader would not match that group. Changes to a watched
 `shadertoolsconfig.json` cause open shaders in its directory tree to be
 reanalyzed so their effective groups are refreshed.
 
+## Named compilation variants
+
+A single shader file often supports several compilation permutations, such as
+distinct entry points, stage/target profiles, macro sets, or platform switches.
+`hlsl.variants` declares those permutations by name so an editor can select the
+active one instead of hand-editing settings. The active variant is applied when
+analyzing each document it applies to, and changing it reanalyzes open
+documents.
+
+```jsonc
+{
+  "root": true,
+
+  // Required whenever hlsl.variants is present. Only version 1 is supported.
+  "hlsl.variantsVersion": 1,
+
+  "hlsl.variants": [
+    {
+      "name": "Base",
+      "description": "Shared defines for every permutation.",
+      "hlsl.preprocessorDefinitions": { "PLATFORM_PC": 1 }
+    },
+    {
+      "name": "Vertex",
+      "inherits": "Base",
+      "hlsl.entryPoint": "MainVS",
+      "hlsl.targetProfile": "vs_6_6"
+    },
+    {
+      "name": "Pixel Debug",
+      "inherits": ["Base", "Vertex"],
+      "default": true,
+      "files": ["Materials/**/*.hlsl"],
+      "hlsl.entryPoint": "MainPS",
+      "hlsl.targetProfile": "ps_6_6",
+      "hlsl.preprocessorDefinitions": { "DEBUG": 1 },
+      "hlsl.additionalArguments": ["-Zi"]
+    }
+  ]
+}
+```
+
+Each variant object has this shape:
+
+- `name` is required, non-empty, and unique across every discovered
+  configuration file. It is the identifier used to select the variant.
+- `description` is an optional human-readable string shown by the editor
+  pickers.
+- `default` is an optional Boolean that marks a suggested default variant.
+- `inherits` is an optional variant name, or array of names, whose resolved
+  settings are applied before this variant's own settings. Later entries and the
+  variant's own settings win. Inheritance is resolved deterministically;
+  unknown bases and inheritance cycles are configuration errors.
+- `files` is an optional, non-empty array of the same glob patterns used by
+  `hlsl.fileGroups`. When present, the variant only applies to matching shaders
+  (relative to the declaring configuration's directory). When omitted, the
+  variant applies to every shader under that directory.
+- Any normal HLSL setting may appear directly in the variant, including
+  `hlsl.dxcRuntimeDirectory`. Unlike file groups, a variant may select a DXC
+  runtime because selecting a variant is a workspace-wide action, not a per-file
+  one.
+
+Selecting a variant applies its settings on top of the file-derived
+configuration but below explicit editor overrides:
+
+- Definition and virtual-mapping objects merge by key.
+- `languageVersion`, `targetProfile`, `entryPoint`, and `additionalArguments`
+  are replaced as a whole when the variant declares them.
+- Include directories combine, with the variant's directories searched first.
+- A variant's `dxcRuntimeDirectory` replaces the file-derived selection.
+
+Changing the active variant reanalyzes open documents. It does not restart the
+language server unless the newly selected variant chooses a different DXC
+runtime, in which case the same controlled restart used by
+[DXC runtime selection](#dxc-runtime-selection) loads it.
+
+### Selecting the active variant
+
+- **Visual Studio Code:** run **HLSL: Select Shader Variant** (also available in
+  the status bar) or set `hlsl.activeVariant`.
+- **Visual Studio:** run **Tools > HLSL Select Shader Variant**.
+
+Both clients read the available variants from the server, so the picker only
+lists variants declared for the current document.
+
+### Invalid and conflicting variants
+
+Problems are reported clearly rather than applied silently:
+
+- Missing or unsupported `hlsl.variantsVersion`, duplicate variant names,
+  unknown or cyclic `inherits`, and malformed variant objects are configuration
+  errors surfaced as editor messages.
+- Selecting a variant that is not defined for, or not applicable to, the open
+  documents leaves those documents on their default configuration and reports
+  the selection as unavailable.
+- If open documents resolve the active variant to different DXC runtimes, the
+  active runtime is left unchanged and the conflict is reported, exactly as for
+  `hlsl.dxcRuntimeDirectory`.
+
 ## Properties
 
 | Property | Type | Behavior |
 | --- | --- | --- |
 | `root` | Boolean | Stops discovery above this file when `true`. |
 | `hlsl.fileGroups` | Array of file-group objects | Applies file-specific settings using the ordered matching and precedence rules above. |
+| `hlsl.variantsVersion` | Integer | Declares the named-variants schema version. Required when `hlsl.variants` is present; only `1` is supported. |
+| `hlsl.variants` | Array of variant objects | Declares selectable named compilation variants; see [Named compilation variants](#named-compilation-variants). |
 | `hlsl.preprocessorDefinitions` | Object | Adds DXC defines. Values may be strings, numbers, or Booleans. An empty string emits a value-less define. |
 | `hlsl.additionalIncludeDirectories` | String array | Adds existing directories to DXC's include search path. Relative paths are resolved from this config file. |
 | `hlsl.virtualDirectoryMappings` | Object of string paths | Maps virtual include roots to existing directories, primarily for Unreal-style paths. Each virtual key must begin with `/` or `\`. |
@@ -198,7 +299,8 @@ highest, is:
 3. Normal settings from discovered configuration files, outermost to nearest.
 4. Matching file groups, by config from outermost to nearest and then by
    declaration order.
-5. Editor workspace settings.
+5. The active named variant, when one is selected and applies to the document.
+6. Editor workspace settings.
 
 An editor property replaces the corresponding file-derived property. Empty
 arrays and objects deliberately clear inherited values, while omitted

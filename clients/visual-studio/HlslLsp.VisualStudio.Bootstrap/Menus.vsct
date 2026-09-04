@@ -15,6 +15,12 @@
           <ButtonText>HLSL Memory Layout</ButtonText>
         </Strings>
       </Button>
+      <Button guid="guidHlslLspCommands" id="SelectVariant" priority="0x0101" type="Button">
+        <Parent guid="guidHlslLspCommands" id="HlslLspGroup"/>
+        <Strings>
+          <ButtonText>HLSL Select Shader Variant</ButtonText>
+        </Strings>
+      </Button>
     </Buttons>
   </Commands>
   <Symbols>
@@ -22,6 +28,7 @@
     <GuidSymbol name="guidHlslLspCommands" value="{cedfa85a-cd51-4825-af1f-0e05bd475426}">
       <IDSymbol name="HlslLspGroup" value="0x1020"/>
       <IDSymbol name="ShowMemoryLayout" value="0x0100"/>
+      <IDSymbol name="SelectVariant" value="0x0101"/>
     </GuidSymbol>
   </Symbols>
 </CommandTable>

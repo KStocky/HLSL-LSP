@@ -35,7 +35,8 @@
     "onCommand:hlsl.stopServer",
     "onCommand:hlsl.showOutput",
     "onCommand:hlsl.showDiagnostics",
-    "onCommand:hlsl.showMemoryLayout"
+    "onCommand:hlsl.showMemoryLayout",
+    "onCommand:hlsl.selectVariant"
   ],
   "capabilities": {
     "untrustedWorkspaces": {
@@ -84,6 +85,11 @@
       {
         "command": "hlsl.showMemoryLayout",
         "title": "HLSL: Show Memory Layout",
+        "category": "HLSL"
+      },
+      {
+        "command": "hlsl.selectVariant",
+        "title": "HLSL: Select Shader Variant",
         "category": "HLSL"
       }
     ],
@@ -170,6 +176,12 @@
             "type": "string"
           },
           "description": "Additional DXC arguments, for example -enable-16bit-types. An explicitly configured array replaces file-derived arguments."
+        },
+        "hlsl.activeVariant": {
+          "type": "string",
+          "default": "",
+          "scope": "window",
+          "description": "Name of the active shader compilation variant declared under hlsl.variants in shadertoolsconfig.json. The variant's entry point, target profile, macros, and platform settings are applied when analyzing matching documents. Use the \"HLSL: Select Shader Variant\" command to change it. Empty selects no variant. Changing it reanalyzes open documents (and restarts only if the variant selects a different DXC runtime)."
         }
       }
     }

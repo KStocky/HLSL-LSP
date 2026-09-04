@@ -81,11 +81,11 @@ public sealed class HlslBootstrapPackage : AsyncPackage
                 JoinableTaskFactory.RunAsync(
                         () => ShowMemoryLayoutAsync(uri, line, character, DisposalToken))
                     .FileAndForget("HlslLsp/ShowMemoryLayout"));
-        await RegisterMemoryLayoutCommandAsync(cancellationToken);
+        await RegisterCommandsAsync(cancellationToken);
         await TryActivateLanguageClientAsync(cancellationToken);
     }
 
-    private async Task RegisterMemoryLayoutCommandAsync(CancellationToken cancellationToken)
+    private async Task RegisterCommandsAsync(CancellationToken cancellationToken)
     {
         await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
         var commands = await GetServiceAsync(typeof(IMenuCommandService))
@@ -95,14 +95,19 @@ public sealed class HlslBootstrapPackage : AsyncPackage
             throw new InvalidOperationException(
                 "Visual Studio's command service is unavailable.");
         }
+        var commandSet = new Guid("cedfa85a-cd51-4825-af1f-0e05bd475426");
         commands.AddCommand(
             new OleMenuCommand(
                 (_, _) => JoinableTaskFactory.RunAsync(
                         () => ShowMemoryLayoutAsync(DisposalToken))
                     .FileAndForget("HlslLsp/ShowMemoryLayout"),
-                new CommandID(
-                    new Guid("cedfa85a-cd51-4825-af1f-0e05bd475426"),
-                    0x0100)));
+                new CommandID(commandSet, 0x0100)));
+        commands.AddCommand(
+            new OleMenuCommand(
+                (_, _) => JoinableTaskFactory.RunAsync(
+                        () => SelectVariantAsync(DisposalToken))
+                    .FileAndForget("HlslLsp/SelectVariant"),
+                new CommandID(commandSet, 0x0101)));
     }
 
     private async Task ShowMemoryLayoutAsync(CancellationToken cancellationToken)
@@ -155,6 +160,69 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         {
             window?.SetLayout(layout);
         }
+    }
+
+    private async Task SelectVariantAsync(CancellationToken cancellationToken)
+    {
+        var uri = await GetActiveDocumentUriAsync(cancellationToken);
+        VariantListModel variants = null;
+        try
+        {
+            variants = await VariantBridge.ListAsync(uri, cancellationToken);
+        }
+        catch (Exception)
+        {
+            // A missing or failed server connection is reported below.
+        }
+        if (variants?.Variants == null || variants.Variants.Count == 0)
+        {
+            await ShowInformationAsync(
+                VariantBridge.IsAvailable
+                    ? "No shader variants are declared under hlsl.variants in shadertoolsconfig.json."
+                    : "Open an HLSL document so the language server can load shader variants.",
+                cancellationToken);
+            return;
+        }
+
+        await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+        var dialog = new VariantSelectionDialog(variants);
+        if (dialog.ShowModal() == true)
+        {
+            await VariantBridge.SetActiveAsync(dialog.SelectedVariant, cancellationToken);
+        }
+    }
+
+    private async Task<Uri> GetActiveDocumentUriAsync(CancellationToken cancellationToken)
+    {
+        await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+        var textManager = await GetServiceAsync(typeof(SVsTextManager)) as IVsTextManager;
+        if (textManager == null ||
+            ErrorHandler.Failed(textManager.GetActiveView(1, null, out var view)) ||
+            view == null ||
+            ErrorHandler.Failed(view.GetBuffer(out var lines)) ||
+            lines is not IVsUserData userData)
+        {
+            return null;
+        }
+        var monikerKey = VSConstants.VsTextBufferUserDataGuid.VsBufferMoniker_guid;
+        if (ErrorHandler.Failed(userData.GetData(ref monikerKey, out var value)) ||
+            value is not string moniker)
+        {
+            return null;
+        }
+        return new Uri(Path.GetFullPath(moniker));
+    }
+
+    private async Task ShowInformationAsync(string message, CancellationToken cancellationToken)
+    {
+        await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+        VsShellUtilities.ShowMessageBox(
+            this,
+            message,
+            "HLSL-LSP",
+            OLEMSGICON.OLEMSGICON_INFO,
+            OLEMSGBUTTON.OLEMSGBUTTON_OK,
+            OLEMSGDEFBUTTON.OLEMSGDEFBUTTON_FIRST);
     }
 
     private async Task TryActivateLanguageClientAsync(

@@ -11,6 +11,7 @@ import {
 
 import {
   HlslServerSettings,
+  readActiveVariant,
   readDefaultLanguageVersion,
   readServerSettings,
   readTraceSetting,
@@ -41,6 +42,7 @@ interface ManagedClient extends LifecycleClient {
     position: vscode.Position,
   ): Promise<MemoryLayout | null>;
   dxcRuntime(): Promise<DxcRuntimeInfo | null>;
+  variants(uri: vscode.Uri | undefined): Promise<VariantList | null>;
 }
 
 export interface HlslExtensionApi {
@@ -56,6 +58,18 @@ interface DxcRuntimeInfo {
   readonly error?: string;
 }
 
+interface VariantInfo {
+  readonly name: string;
+  readonly description: string;
+  readonly default: boolean;
+  readonly applicable: boolean;
+}
+
+interface VariantList {
+  readonly activeVariant: string | null;
+  readonly variants: readonly VariantInfo[];
+}
+
 interface RuntimeRestartRequest {
   readonly directory?: string;
   readonly reason?: string;
@@ -64,6 +78,7 @@ interface RuntimeRestartRequest {
 interface ClientSettings {
   readonly trace: TraceSetting;
   readonly languageVersion: string;
+  readonly activeVariant: string;
   readonly server: HlslServerSettings;
 }
 
@@ -87,6 +102,7 @@ function clientSettings(): ClientSettings {
   return {
     trace: readTraceSetting(reader),
     languageVersion: readDefaultLanguageVersion(reader),
+    activeVariant: readActiveVariant(reader),
     server: readServerSettings(reader),
   };
 }
@@ -167,6 +183,7 @@ class VscodeLanguageClient implements ManagedClient {
       initializationOptions: {
         hlsl: {
           languageVersion: initialSettings.languageVersion,
+          activeVariant: initialSettings.activeVariant || undefined,
         },
         commandLinks: true,
       },
@@ -271,6 +288,13 @@ class VscodeLanguageClient implements ManagedClient {
     );
   }
 
+  public variants(uri: vscode.Uri | undefined): Promise<VariantList | null> {
+    return this.client.sendRequest<VariantList | null>(
+      "hlsl/variants",
+      uri ? { textDocument: { uri: uri.toString() } } : {},
+    );
+  }
+
   private async applySettings(
     settings: ClientSettings,
     isCurrentConnection: () => boolean,
@@ -290,6 +314,12 @@ class VscodeLanguageClient implements ManagedClient {
     }
     await this.client.sendNotification("workspace/didChangeConfiguration", {
       settings: { hlsl: settings.server },
+    });
+    if (!isCurrentConnection() || !this.clientIsRunning()) {
+      return false;
+    }
+    await this.client.sendNotification("hlsl/didChangeActiveVariant", {
+      variant: settings.activeVariant !== "" ? settings.activeVariant : null,
     });
     return isCurrentConnection() && this.clientIsRunning();
   }
@@ -363,6 +393,13 @@ export async function activate(
   });
   context.subscriptions.push(outputChannel);
 
+  const variantStatus = vscode.window.createStatusBarItem(
+    vscode.StatusBarAlignment.Right,
+    100,
+  );
+  variantStatus.command = "hlsl.selectVariant";
+  context.subscriptions.push(variantStatus);
+
   let workspaceRuntimeDirectory: string | undefined;
 
   const lifecycle = new ClientLifecycle<ManagedClient>(async () => {
@@ -371,6 +408,7 @@ export async function activate(
     const initialSettings: ClientSettings = {
       trace: readTraceSetting(reader),
       languageVersion: readDefaultLanguageVersion(reader),
+      activeVariant: readActiveVariant(reader),
       server: readServerSettings(reader),
     };
     const runtime = await resolveServerRuntime(
@@ -414,6 +452,32 @@ export async function activate(
   });
   activeLifecycle = lifecycle;
 
+  const updateVariantStatus = async (): Promise<void> => {
+    const editor = vscode.window.activeTextEditor;
+    if (editor?.document.languageId !== "hlsl") {
+      variantStatus.hide();
+      return;
+    }
+    const documentUri = editor.document.uri;
+    let list: VariantList | null | undefined;
+    try {
+      list = await lifecycle.withClient((client) =>
+        client.variants(documentUri),
+      );
+    } catch {
+      list = undefined;
+    }
+    if (list === undefined || list === null || list.variants.length === 0) {
+      variantStatus.hide();
+      return;
+    }
+    const active = list.activeVariant ?? "";
+    variantStatus.text = `$(versions) HLSL: ${active !== "" ? active : "Default"}`;
+    variantStatus.tooltip =
+      "Active HLSL shader compilation variant. Click to change.";
+    variantStatus.show();
+  };
+
   const restart = async (): Promise<void> => {
     try {
       await lifecycle.restart();
@@ -425,6 +489,7 @@ export async function activate(
         error,
       );
     }
+    await updateVariantStatus();
   };
 
   // The server requests a controlled restart when shadertoolsconfig.json selects
@@ -562,6 +627,92 @@ export async function activate(
         panel.webview.html = memoryLayoutHtml(layout);
       },
     ),
+    vscode.commands.registerCommand("hlsl.selectVariant", async () => {
+      const editor = vscode.window.activeTextEditor;
+      const documentUri =
+        editor?.document.languageId === "hlsl"
+          ? editor.document.uri
+          : undefined;
+      let list: VariantList | null | undefined;
+      try {
+        list = await lifecycle.withClient((client) =>
+          client.variants(documentUri),
+        );
+      } catch (error) {
+        await reportError(
+          outputChannel,
+          "Unable to list HLSL shader variants",
+          error,
+        );
+        return;
+      }
+      if (list === undefined || list === null) {
+        await vscode.window.showInformationMessage(
+          "The HLSL language server is not running.",
+        );
+        return;
+      }
+      if (list.variants.length === 0) {
+        await vscode.window.showInformationMessage(
+          "No shader variants are declared under hlsl.variants in shadertoolsconfig.json.",
+        );
+        return;
+      }
+      const active = list.activeVariant ?? "";
+      const items: (vscode.QuickPickItem & { value: string | null })[] = [
+        {
+          label: "$(circle-slash) No variant",
+          description: active === "" ? "current" : "",
+          value: null,
+        },
+      ];
+      for (const variant of list.variants) {
+        const notes: string[] = [];
+        if (variant.name === active) {
+          notes.push("current");
+        }
+        if (!variant.applicable) {
+          notes.push("not applicable to this file");
+        }
+        const item: vscode.QuickPickItem & { value: string | null } = {
+          label: variant.name,
+          description: notes.join(", "),
+          value: variant.name,
+        };
+        if (variant.description !== "") {
+          item.detail = variant.description;
+        }
+        items.push(item);
+      }
+      const selection = await vscode.window.showQuickPick(items, {
+        title: "Select HLSL Shader Variant",
+        placeHolder: "Choose the active shader compilation variant",
+      });
+      if (selection === undefined) {
+        return;
+      }
+      const target =
+        vscode.workspace.workspaceFolders &&
+        vscode.workspace.workspaceFolders.length > 0
+          ? vscode.ConfigurationTarget.Workspace
+          : vscode.ConfigurationTarget.Global;
+      try {
+        await configuration().update(
+          "activeVariant",
+          selection.value ?? "",
+          target,
+        );
+      } catch (error) {
+        await reportError(
+          outputChannel,
+          "Unable to update the active HLSL shader variant",
+          error,
+        );
+      }
+    }),
+    vscode.window.onDidChangeActiveTextEditor(() => {
+      void updateVariantStatus();
+    }),
     vscode.workspace.onDidChangeConfiguration(async (event) => {
       const resource = configurationResource();
       if (!event.affectsConfiguration("hlsl", resource)) {
@@ -595,6 +746,7 @@ export async function activate(
           error,
         );
       }
+      await updateVariantStatus();
     }),
     vscode.workspace.onDidChangeWorkspaceFolders(restart),
     {
@@ -617,6 +769,7 @@ export async function activate(
       );
     });
   }
+  await updateVariantStatus();
 
   return {
     get state(): LifecycleState {

@@ -1244,6 +1244,8 @@ void Server::register_handlers() {
                                          });
     dispatcher_.register_request_handler(
         "hlsl/dxcRuntime", [this](const auto& params) { return dxc_runtime(params); });
+    dispatcher_.register_request_handler("hlsl/variants",
+                                         [this](const auto& params) { return variants(params); });
     if (options_.semantic_tokens) {
         dispatcher_.register_request_handler("textDocument/semanticTokens/full",
                                              [this](const auto& params, const auto& context) {
@@ -1266,6 +1268,9 @@ void Server::register_handlers() {
     dispatcher_.register_notification_handler(
         "hlsl/didChangeClientDefaults",
         [this](const auto& params) { did_change_client_defaults(params); });
+    dispatcher_.register_notification_handler(
+        "hlsl/didChangeActiveVariant",
+        [this](const auto& params) { did_change_active_variant(params); });
     dispatcher_.register_notification_handler(
         "workspace/didChangeWorkspaceFolders",
         [this](const auto& params) { did_change_workspace_folders(params); });
@@ -1348,12 +1353,21 @@ Json Server::initialize(const std::optional<Json>& params) {
     }
     const auto& value = object_params(params);
     std::optional<std::string> client_default_language_version;
+    std::optional<std::string> initial_active_variant;
     bool client_command_links = false;
     if (const auto initialization_options = value.find("initializationOptions");
         initialization_options != value.end() && !initialization_options->is_null()) {
         const auto defaults = configuration_overrides(*initialization_options);
         if (defaults.language_version) {
             client_default_language_version = *defaults.language_version;
+        }
+        if (const auto hlsl = initialization_options->find("hlsl");
+            hlsl != initialization_options->end() && hlsl->is_object()) {
+            if (const auto variant = hlsl->find("activeVariant");
+                variant != hlsl->end() && variant->is_string() &&
+                !variant->get_ref<const std::string&>().empty()) {
+                initial_active_variant = variant->get<std::string>();
+            }
         }
         if (const auto links = initialization_options->find("commandLinks");
             links != initialization_options->end() && links->is_boolean()) {
@@ -1384,6 +1398,7 @@ Json Server::initialize(const std::optional<Json>& params) {
     }
     workspace_folders_ = std::move(workspace_folders);
     client_default_language_version_ = std::move(client_default_language_version);
+    active_variant_ = std::move(initial_active_variant);
     command_links_ = client_command_links;
     state_ = State::awaiting_initialized;
     Json capabilities = {
@@ -2168,6 +2183,7 @@ void Server::did_open(const std::optional<Json>& params) {
         }
         analyze_affected(uri);
         reevaluate_runtime_selection();
+        reevaluate_variant_selection();
     } catch (const std::exception& error) {
         log(error.what());
     }
@@ -2264,6 +2280,7 @@ void Server::did_close(const std::optional<Json>& params) {
             .method = "textDocument/publishDiagnostics",
             .params = Json{{"uri", snapshot.uri()}, {"diagnostics", Json::array()}}});
         reevaluate_runtime_selection();
+        reevaluate_variant_selection();
     } catch (const std::exception& error) {
         log(error.what());
     }
@@ -2283,6 +2300,7 @@ void Server::did_change_configuration(const std::optional<Json>& params) {
         }
         reanalyze_all();
         reevaluate_runtime_selection();
+        reevaluate_variant_selection();
     } catch (const std::exception& error) {
         log(error.what());
     }
@@ -2300,6 +2318,41 @@ void Server::did_change_client_defaults(const std::optional<Json>& params) {
             client_default_language_version_ = *defaults.language_version;
         }
         reanalyze_all();
+    } catch (const std::exception& error) {
+        log(error.what());
+    }
+}
+
+void Server::did_change_active_variant(const std::optional<Json>& params) {
+    try {
+        require_running();
+        const auto& value = object_params(params);
+        std::optional<std::string> variant;
+        if (const auto item = value.find("variant"); item != value.end() && !item->is_null()) {
+            if (!item->is_string()) {
+                invalid_params("variant must be a string or null");
+            }
+            auto name = item->get<std::string>();
+            if (!name.empty()) {
+                variant = std::move(name);
+            }
+        }
+        bool changed{};
+        {
+            std::scoped_lock state_lock{state_mutex_};
+            changed = active_variant_ != variant;
+            active_variant_ = variant;
+            if (changed) {
+                reported_variant_issue_key_.reset();
+            }
+        }
+        if (changed) {
+            // A variant change reanalyzes open documents; only a differing runtime
+            // selection escalates to the controlled restart shared with issue #14.
+            reanalyze_all();
+            reevaluate_runtime_selection();
+        }
+        reevaluate_variant_selection();
     } catch (const std::exception& error) {
         log(error.what());
     }
@@ -2332,6 +2385,7 @@ void Server::did_change_workspace_folders(const std::optional<Json>& params) {
         }
         reanalyze_all();
         reevaluate_runtime_selection();
+        reevaluate_variant_selection();
     } catch (const std::exception& error) {
         log(error.what());
     }
@@ -2413,6 +2467,7 @@ void Server::did_change_watched_files(const std::optional<Json>& params) {
             analyze_and_publish(root_uri);
         }
         reevaluate_runtime_selection();
+        reevaluate_variant_selection();
     } catch (const std::exception& error) {
         log(error.what());
     }
@@ -2474,6 +2529,13 @@ Server::configuration_for(const workspace::SourceSnapshot& snapshot,
     } else if (error && error != std::errc::no_such_file_or_directory) {
         throw std::filesystem::filesystem_error{"Unable to inspect shader directory",
                                                 shader_directory, error};
+    }
+    // The active variant is applied on top of the file-derived configuration but
+    // below editor overrides, so a selected variant beats client defaults while an
+    // explicit editor setting still wins. Unknown or inapplicable selections are
+    // reported by reevaluate_variant_selection rather than throwing here.
+    if (active_variant_) {
+        static_cast<void>(workspace::apply_variant(configuration, *active_variant_));
     }
     if (!configuration.language_version && client_default_language_version_) {
         configuration.language_version = client_default_language_version_;
@@ -2646,6 +2708,157 @@ Json Server::dxc_runtime(const std::optional<Json>& params) {
         result["error"] = error_message;
     }
     return result;
+}
+
+void Server::reevaluate_variant_selection() {
+    std::string issue_message;
+    bool issue_is_error = false;
+    std::string issue_key;
+    {
+        std::scoped_lock state_lock{state_mutex_};
+        if (state_ != State::running) {
+            return;
+        }
+        const auto open_documents = documents_.open_snapshots();
+        if (open_documents.empty()) {
+            return;
+        }
+
+        std::string schema_error;
+        bool has_variants = false;
+        bool active_defined = false;
+        bool active_applicable = false;
+        for (const auto& snapshot : open_documents) {
+            workspace::WorkspaceConfiguration configuration;
+            try {
+                configuration = configuration_for(snapshot, editor_settings_);
+            } catch (const workspace::ConfigurationError& error) {
+                if (error.code() == workspace::ConfigurationErrorCode::invalid_variant &&
+                    schema_error.empty()) {
+                    schema_error = error.what();
+                }
+                continue;
+            } catch (const std::exception&) {
+                continue;
+            }
+            if (!configuration.variants.empty()) {
+                has_variants = true;
+            }
+            if (active_variant_) {
+                for (const auto& variant : configuration.variants) {
+                    if (variant.name == *active_variant_) {
+                        active_defined = true;
+                        active_applicable = active_applicable || variant.applicable;
+                    }
+                }
+            }
+        }
+
+        if (!schema_error.empty()) {
+            issue_key = "schema:" + schema_error;
+            issue_message = "Invalid shader variant configuration: " + schema_error;
+            issue_is_error = true;
+        } else if (active_variant_ && !active_applicable && (active_defined || has_variants)) {
+            issue_key = (active_defined ? "inapplicable:" : "undefined:") + *active_variant_;
+            issue_message =
+                active_defined
+                    ? "The selected shader variant '" + *active_variant_ +
+                          "' is not applicable to any open HLSL document; those documents use "
+                          "their default configuration."
+                    : "The selected shader variant '" + *active_variant_ +
+                          "' is not defined for the open HLSL documents.";
+        }
+
+        if (issue_key.empty()) {
+            reported_variant_issue_key_.reset();
+            return;
+        }
+        if (reported_variant_issue_key_ == issue_key) {
+            return;
+        }
+        reported_variant_issue_key_ = issue_key;
+    }
+
+    log(issue_message);
+    sender_(json_rpc::Notification{
+        .method = "window/showMessage",
+        .params = Json{{"type", issue_is_error ? 1 : 2}, {"message", issue_message}}});
+}
+
+Json Server::variants(const std::optional<Json>& params) {
+    require_running();
+    std::optional<std::string> target_uri;
+    if (params.has_value() && !params->is_null()) {
+        if (!params->is_object()) {
+            invalid_params("hlsl/variants parameters must be an object");
+        }
+        if (const auto document = params->find("textDocument");
+            document != params->end() && document->is_object()) {
+            if (const auto uri = document->find("uri");
+                uri != document->end() && uri->is_string()) {
+                target_uri = uri->get<std::string>();
+            }
+        } else if (const auto uri = params->find("uri"); uri != params->end() && uri->is_string()) {
+            target_uri = uri->get<std::string>();
+        }
+    }
+
+    struct Aggregate {
+        std::string name;
+        std::string description;
+        bool is_default{};
+        bool applicable{};
+    };
+    std::vector<Aggregate> aggregates;
+    std::unordered_map<std::string, std::size_t> index;
+    std::optional<std::string> active;
+    {
+        std::scoped_lock state_lock{state_mutex_};
+        active = active_variant_;
+        std::vector<workspace::SourceSnapshot> snapshots;
+        if (target_uri) {
+            if (documents_.contains(*target_uri)) {
+                snapshots.push_back(documents_.snapshot(*target_uri));
+            }
+        } else {
+            snapshots = documents_.open_snapshots();
+        }
+        for (const auto& snapshot : snapshots) {
+            workspace::WorkspaceConfiguration configuration;
+            try {
+                configuration = configuration_for(snapshot, editor_settings_);
+            } catch (const std::exception&) {
+                continue;
+            }
+            for (const auto& variant : configuration.variants) {
+                const auto found = index.find(variant.name);
+                if (found == index.end()) {
+                    index.emplace(variant.name, aggregates.size());
+                    aggregates.push_back(Aggregate{.name = variant.name,
+                                                   .description = variant.description,
+                                                   .is_default = variant.is_default,
+                                                   .applicable = variant.applicable});
+                } else {
+                    auto& aggregate = aggregates[found->second];
+                    aggregate.applicable = aggregate.applicable || variant.applicable;
+                    aggregate.is_default = aggregate.is_default || variant.is_default;
+                    if (aggregate.description.empty()) {
+                        aggregate.description = variant.description;
+                    }
+                }
+            }
+        }
+    }
+
+    Json variant_list = Json::array();
+    for (const auto& aggregate : aggregates) {
+        variant_list.push_back(Json{{"name", aggregate.name},
+                                    {"description", aggregate.description},
+                                    {"default", aggregate.is_default},
+                                    {"applicable", aggregate.applicable}});
+    }
+    return Json{{"activeVariant", active ? Json(*active) : Json(nullptr)},
+                {"variants", std::move(variant_list)}};
 }
 
 void Server::analysis_completed(const workspace::SourceSnapshot& snapshot,

@@ -695,3 +695,219 @@ TEST_CASE("Editor overrides replace and clear the DXC runtime directory",
                                                                   std::filesystem::current_path());
     CHECK_FALSE(cleared.dxc_runtime_directory.has_value());
 }
+
+namespace {
+
+[[nodiscard]] const workspace::ResolvedVariant*
+find_variant(const workspace::WorkspaceConfiguration& configuration, std::string_view name) {
+    for (const auto& variant : configuration.variants) {
+        if (variant.name == name) {
+            return &variant;
+        }
+    }
+    return nullptr;
+}
+
+} // namespace
+
+TEST_CASE("Variants apply inherited settings deterministically", "[configuration][variants]") {
+    const TestTree tree;
+    tree.file("shadertoolsconfig.json", R"({
+        "root": true,
+        "hlsl.variantsVersion": 1,
+        "hlsl.variants": [
+            {
+                "name": "Base",
+                "description": "Shared defines",
+                "hlsl.languageVersion": "2021",
+                "hlsl.preprocessorDefinitions": { "PLATFORM_PC": 1 }
+            },
+            {
+                "name": "Vertex",
+                "default": true,
+                "inherits": "Base",
+                "hlsl.entryPoint": "MainVS",
+                "hlsl.targetProfile": "vs_6_6",
+                "hlsl.preprocessorDefinitions": { "STAGE_VERTEX": 1 }
+            }
+        ]
+    })");
+    tree.file("shader.hlsl", "");
+    auto configuration = workspace::load_workspace_configuration_for_file(tree.path("shader.hlsl"));
+
+    REQUIRE(configuration.variants.size() == 2);
+    const auto* base = find_variant(configuration, "Base");
+    REQUIRE(base != nullptr);
+    CHECK(base->description == "Shared defines");
+    CHECK(base->applicable);
+    const auto* vertex = find_variant(configuration, "Vertex");
+    REQUIRE(vertex != nullptr);
+    CHECK(vertex->is_default);
+
+    CHECK(workspace::apply_variant(configuration, "Vertex") ==
+          workspace::VariantSelection::applied);
+    REQUIRE(configuration.entry_point.has_value());
+    CHECK(*configuration.entry_point == "MainVS");
+    REQUIRE(configuration.target_profile.has_value());
+    CHECK(*configuration.target_profile == "vs_6_6");
+    REQUIRE(configuration.language_version.has_value());
+    CHECK(*configuration.language_version == "2021");
+    REQUIRE(configuration.preprocessor_definitions.contains("PLATFORM_PC"));
+    REQUIRE(configuration.preprocessor_definitions.contains("STAGE_VERTEX"));
+}
+
+TEST_CASE("Variant file patterns gate applicability", "[configuration][variants]") {
+    const TestTree tree;
+    tree.file("shadertoolsconfig.json", R"({
+        "root": true,
+        "hlsl.variantsVersion": 1,
+        "hlsl.variants": [
+            { "name": "Pixel", "files": ["materials/*.hlsl"], "hlsl.entryPoint": "PSMain" }
+        ]
+    })");
+    tree.file("materials/mat.hlsl", "");
+    tree.file("other/util.hlsl", "");
+
+    auto matching =
+        workspace::load_workspace_configuration_for_file(tree.path("materials/mat.hlsl"));
+    REQUIRE(matching.variants.size() == 1);
+    CHECK(matching.variants.front().applicable);
+    CHECK(workspace::apply_variant(matching, "Pixel") == workspace::VariantSelection::applied);
+    REQUIRE(matching.entry_point.has_value());
+    CHECK(*matching.entry_point == "PSMain");
+    CHECK(workspace::apply_variant(matching, "Missing") == workspace::VariantSelection::undefined);
+
+    auto nonmatching =
+        workspace::load_workspace_configuration_for_file(tree.path("other/util.hlsl"));
+    REQUIRE(nonmatching.variants.size() == 1);
+    CHECK_FALSE(nonmatching.variants.front().applicable);
+    CHECK(workspace::apply_variant(nonmatching, "Pixel") ==
+          workspace::VariantSelection::not_applicable);
+    CHECK_FALSE(nonmatching.entry_point.has_value());
+}
+
+TEST_CASE("Variants inherit across configuration files", "[configuration][variants]") {
+    const TestTree tree;
+    tree.file("shadertoolsconfig.json", R"({
+        "root": true,
+        "hlsl.variantsVersion": 1,
+        "hlsl.variants": [ { "name": "Base", "hlsl.targetProfile": "lib_6_6" } ]
+    })");
+    tree.file("child/shadertoolsconfig.json", R"({
+        "hlsl.variantsVersion": 1,
+        "hlsl.variants": [ { "name": "Child", "inherits": "Base", "hlsl.entryPoint": "Go" } ]
+    })");
+    tree.file("child/shader.hlsl", "");
+    auto configuration =
+        workspace::load_workspace_configuration_for_file(tree.path("child/shader.hlsl"));
+    REQUIRE(configuration.variants.size() == 2);
+    CHECK(workspace::apply_variant(configuration, "Child") == workspace::VariantSelection::applied);
+    REQUIRE(configuration.entry_point.has_value());
+    CHECK(*configuration.entry_point == "Go");
+    REQUIRE(configuration.target_profile.has_value());
+    CHECK(*configuration.target_profile == "lib_6_6");
+}
+
+TEST_CASE("A variant may select a workspace-relative DXC runtime",
+          "[configuration][variants][runtime]") {
+    const TestTree tree;
+    tree.file("shadertoolsconfig.json", R"({
+        "root": true,
+        "hlsl.variantsVersion": 1,
+        "hlsl.variants": [ { "name": "Custom", "hlsl.dxcRuntimeDirectory": "dxc/bin" } ]
+    })");
+    tree.file("shader.hlsl", "");
+    auto configuration = workspace::load_workspace_configuration_for_file(tree.path("shader.hlsl"));
+    CHECK_FALSE(configuration.dxc_runtime_directory.has_value());
+    CHECK(workspace::apply_variant(configuration, "Custom") ==
+          workspace::VariantSelection::applied);
+    REQUIRE(configuration.dxc_runtime_directory.has_value());
+    CHECK(configuration.dxc_runtime_directory->filename().string() == "bin");
+}
+
+TEST_CASE("Variants require a supported schema version", "[configuration][variants]") {
+    const TestTree missing_version;
+    missing_version.file("shadertoolsconfig.json",
+                         R"({ "root": true, "hlsl.variants": [ { "name": "A" } ] })");
+    missing_version.file("shader.hlsl", "");
+    const auto missing = configuration_failure(missing_version.path("shader.hlsl"));
+    CHECK(missing.code == workspace::ConfigurationErrorCode::invalid_variant);
+    CHECK(missing.message.find("hlsl.variantsVersion") != std::string::npos);
+
+    const TestTree bad_version;
+    bad_version.file(
+        "shadertoolsconfig.json",
+        R"({ "root": true, "hlsl.variantsVersion": 2, "hlsl.variants": [ { "name": "A" } ] })");
+    bad_version.file("shader.hlsl", "");
+    const auto unsupported = configuration_failure(bad_version.path("shader.hlsl"));
+    CHECK(unsupported.code == workspace::ConfigurationErrorCode::invalid_variant);
+    CHECK(unsupported.message.find("Unsupported") != std::string::npos);
+}
+
+TEST_CASE("Duplicate variant names are rejected", "[configuration][variants]") {
+    const TestTree tree;
+    tree.file("shadertoolsconfig.json", R"({
+        "root": true,
+        "hlsl.variantsVersion": 1,
+        "hlsl.variants": [ { "name": "A" }, { "name": "A" } ]
+    })");
+    tree.file("shader.hlsl", "");
+    const auto failure = configuration_failure(tree.path("shader.hlsl"));
+    CHECK(failure.code == workspace::ConfigurationErrorCode::invalid_variant);
+    CHECK(failure.message.find("Duplicate variant name") != std::string::npos);
+}
+
+TEST_CASE("Unknown variant inheritance is rejected", "[configuration][variants]") {
+    const TestTree tree;
+    tree.file("shadertoolsconfig.json", R"({
+        "root": true,
+        "hlsl.variantsVersion": 1,
+        "hlsl.variants": [ { "name": "A", "inherits": "Missing" } ]
+    })");
+    tree.file("shader.hlsl", "");
+    const auto failure = configuration_failure(tree.path("shader.hlsl"));
+    CHECK(failure.code == workspace::ConfigurationErrorCode::invalid_variant);
+    CHECK(failure.message.find("unknown variant") != std::string::npos);
+}
+
+TEST_CASE("Variant inheritance cycles are rejected", "[configuration][variants]") {
+    const TestTree tree;
+    tree.file("shadertoolsconfig.json", R"({
+        "root": true,
+        "hlsl.variantsVersion": 1,
+        "hlsl.variants": [
+            { "name": "A", "inherits": "B" },
+            { "name": "B", "inherits": "A" }
+        ]
+    })");
+    tree.file("shader.hlsl", "");
+    const auto failure = configuration_failure(tree.path("shader.hlsl"));
+    CHECK(failure.code == workspace::ConfigurationErrorCode::invalid_variant);
+    CHECK(failure.message.find("cycle") != std::string::npos);
+}
+
+TEST_CASE("Unsupported variant properties are rejected", "[configuration][variants]") {
+    const TestTree tree;
+    tree.file("shadertoolsconfig.json", R"({
+        "root": true,
+        "hlsl.variantsVersion": 1,
+        "hlsl.variants": [ { "name": "A", "hlsl.mystery": 1 } ]
+    })");
+    tree.file("shader.hlsl", "");
+    const auto failure = configuration_failure(tree.path("shader.hlsl"));
+    CHECK(failure.code == workspace::ConfigurationErrorCode::invalid_variant);
+    CHECK(failure.message.find("Unsupported variant property") != std::string::npos);
+}
+
+TEST_CASE("A variant without a name is rejected", "[configuration][variants]") {
+    const TestTree tree;
+    tree.file("shadertoolsconfig.json", R"({
+        "root": true,
+        "hlsl.variantsVersion": 1,
+        "hlsl.variants": [ { "hlsl.entryPoint": "Main" } ]
+    })");
+    tree.file("shader.hlsl", "");
+    const auto failure = configuration_failure(tree.path("shader.hlsl"));
+    CHECK(failure.code == workspace::ConfigurationErrorCode::invalid_variant);
+    CHECK(failure.message.find("name") != std::string::npos);
+}
