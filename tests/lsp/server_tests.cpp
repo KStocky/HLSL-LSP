@@ -1005,7 +1005,7 @@ TEST_CASE("Server can disable semantic tokens for incompatible clients", "[lsp][
     REQUIRE(initialized.has_value());
     const auto* response = std::get_if<hlsl_intellisense::json_rpc::Response>(&*initialized);
     REQUIRE(response != nullptr);
-    CHECK(response->result["serverInfo"]["version"] == "0.6.1");
+    CHECK(response->result["serverInfo"]["version"] == "0.7.0");
     CHECK_FALSE(response->result["capabilities"].contains("semanticTokensProvider"));
     CHECK(response->result["capabilities"]["definitionProvider"] == true);
     CHECK(response->result["capabilities"]["referencesProvider"] == true);
