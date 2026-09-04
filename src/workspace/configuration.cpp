@@ -37,6 +37,7 @@ struct ConfigurationSettings {
     std::optional<std::string> target_profile;
     std::optional<std::string> entry_point;
     std::optional<std::vector<std::string>> additional_arguments;
+    std::optional<std::filesystem::path> dxc_runtime_directory;
 };
 
 struct GlobPattern {
@@ -105,6 +106,20 @@ struct ConfigFile {
                                      "' is not a directory"};
     }
     return std::filesystem::weakly_canonical(path);
+}
+
+// The DXC runtime directory is resolved relative to the declaring configuration
+// file so checked-in, workspace-relative paths remain environment independent.
+// Existence and compiler-library compatibility are validated by the DXC layer
+// immediately before a controlled restart, so this only normalizes the path for
+// deterministic conflict comparison.
+[[nodiscard]] std::filesystem::path
+resolve_runtime_directory(const std::filesystem::path& config_path, const std::string& value) {
+    auto path = std::filesystem::path{value};
+    if (path.is_relative()) {
+        path = config_path.parent_path() / path;
+    }
+    return std::filesystem::absolute(path).lexically_normal();
 }
 
 [[nodiscard]] std::string definition_value(const std::filesystem::path& path, std::string_view key,
@@ -218,6 +233,18 @@ parse_settings(const Json& json, const std::filesystem::path& path, std::string_
             values.push_back(argument.get<std::string>());
         }
         result.additional_arguments = std::move(values);
+    }
+
+    constexpr std::string_view runtime_key = "hlsl.dxcRuntimeDirectory";
+    if (const auto runtime = json.find(runtime_key); runtime != json.end()) {
+        const auto diagnostic_key = contextual_key(context, runtime_key);
+        if (!runtime->is_string()) {
+            throw_type_error(path, diagnostic_key, "a string");
+        }
+        const auto& value = runtime->get_ref<const std::string&>();
+        if (!value.empty()) {
+            result.dxc_runtime_directory = resolve_runtime_directory(path, value);
+        }
     }
 
     return result;
@@ -655,6 +682,31 @@ merge_configurations(const std::vector<ConfigFile>& configs,
             }
         }
     }
+
+    // The DXC runtime is loaded once per process and therefore cannot vary per
+    // file. Nested configuration files must not disagree; a conflict is reported
+    // as an actionable diagnostic rather than silently switching runtimes.
+    std::optional<std::filesystem::path> selected_runtime;
+    std::filesystem::path selected_runtime_file;
+    for (const auto& config : configs) {
+        if (!config.settings.dxc_runtime_directory) {
+            continue;
+        }
+        const auto& candidate = *config.settings.dxc_runtime_directory;
+        if (!selected_runtime) {
+            selected_runtime = candidate;
+            selected_runtime_file = config.path;
+        } else if (*selected_runtime != candidate) {
+            throw ConfigurationError{
+                ConfigurationErrorCode::conflicting_runtime, config.path,
+                "hlsl.dxcRuntimeDirectory",
+                "Conflicting DXC runtime selections: '" + selected_runtime->string() + "' in '" +
+                    selected_runtime_file.string() + "' and '" + candidate.string() + "' in '" +
+                    config.path.string() +
+                    "'. DXC IntelliSense is loaded per process and cannot vary per file."};
+        }
+    }
+    result.dxc_runtime_directory = std::move(selected_runtime);
     return result;
 }
 
@@ -785,6 +837,18 @@ auto apply_configuration_overrides(WorkspaceConfiguration configuration,
     }
     if (overrides.additional_arguments) {
         configuration.additional_arguments = *overrides.additional_arguments;
+    }
+    if (overrides.dxc_runtime_directory) {
+        // An explicitly configured editor runtime replaces any file-derived
+        // selection; an empty value clears it and restores the bundled default.
+        // Relative editor paths resolve from the workspace folder so checked-in
+        // settings stay environment independent.
+        if (*overrides.dxc_runtime_directory) {
+            configuration.dxc_runtime_directory = resolve_runtime_directory(
+                settings_path, (*overrides.dxc_runtime_directory)->string());
+        } else {
+            configuration.dxc_runtime_directory.reset();
+        }
     }
     return configuration;
 }

@@ -22,6 +22,11 @@ export interface ServerRuntime {
   runtimeFiles: readonly string[];
 }
 
+export interface DxcRuntime {
+  directory: string;
+  runtimeFiles: readonly string[];
+}
+
 export class RuntimeResolutionError extends Error {
   public constructor(message: string) {
     super(message);
@@ -40,9 +45,10 @@ const nodeFileSystem: RuntimeFileSystem = {
   },
 };
 
-function configuredServerPath(
+function resolveConfiguredPath(
   value: string,
   workspaceFolders: readonly string[],
+  setting: string,
 ): string {
   const configured = value.trim();
   if (path.isAbsolute(configured)) {
@@ -51,10 +57,17 @@ function configuredServerPath(
   const workspace = workspaceFolders[0];
   if (workspace === undefined) {
     throw new RuntimeResolutionError(
-      "hlsl.server.path is relative, but no workspace folder is open. Configure an absolute path.",
+      `${setting} is relative, but no workspace folder is open. Configure an absolute path.`,
     );
   }
   return path.resolve(workspace, configured);
+}
+
+function configuredServerPath(
+  value: string,
+  workspaceFolders: readonly string[],
+): string {
+  return resolveConfiguredPath(value, workspaceFolders, "hlsl.server.path");
 }
 
 async function requireFile(
@@ -85,11 +98,10 @@ async function validateExecutable(
   }
 }
 
-async function validateWindowsRuntime(
+async function validateWindowsRuntimeDirectory(
   fileSystem: RuntimeFileSystem,
-  executablePath: string,
+  directory: string,
 ): Promise<readonly string[]> {
-  const directory = path.dirname(executablePath);
   const runtimeFiles = [
     path.join(directory, "dxcompiler.dll"),
     path.join(directory, "dxil.dll"),
@@ -107,13 +119,47 @@ async function validateWindowsRuntime(
   return runtimeFiles;
 }
 
+async function validateLinuxRuntimeDirectory(
+  fileSystem: RuntimeFileSystem,
+  directory: string,
+): Promise<readonly string[]> {
+  const runtime = path.join(directory, "libdxcompiler.so");
+  await requireFile(fileSystem, runtime, "The DXC runtime");
+  return [runtime];
+}
+
+async function validateRuntimeDirectory(
+  fileSystem: RuntimeFileSystem,
+  directory: string,
+  platform: NodeJS.Platform,
+): Promise<readonly string[]> {
+  if (platform === "win32") {
+    return validateWindowsRuntimeDirectory(fileSystem, directory);
+  }
+  if (platform === "linux") {
+    return validateLinuxRuntimeDirectory(fileSystem, directory);
+  }
+  return [];
+}
+
+async function validateWindowsRuntime(
+  fileSystem: RuntimeFileSystem,
+  executablePath: string,
+): Promise<readonly string[]> {
+  return validateWindowsRuntimeDirectory(
+    fileSystem,
+    path.dirname(executablePath),
+  );
+}
+
 async function validateLinuxRuntime(
   fileSystem: RuntimeFileSystem,
   executablePath: string,
 ): Promise<readonly string[]> {
-  const runtime = path.join(path.dirname(executablePath), "libdxcompiler.so");
-  await requireFile(fileSystem, runtime, "The DXC runtime");
-  return [runtime];
+  return validateLinuxRuntimeDirectory(
+    fileSystem,
+    path.dirname(executablePath),
+  );
 }
 
 async function validateRuntimeFiles(
@@ -128,6 +174,33 @@ async function validateRuntimeFiles(
     return validateLinuxRuntime(fileSystem, executablePath);
   }
   return [];
+}
+
+// Resolves the optional DXC runtime directory an editor client selects. An empty
+// value keeps the bundled runtime. A relative value resolves from the first
+// workspace folder so checked-in settings stay environment independent. The
+// directory must contain the platform DXC library before it is passed to the
+// server, so an incompatible selection fails fast instead of restart looping.
+export async function resolveDxcRuntimeDirectory(
+  configuredValue: string | undefined,
+  environment: RuntimeEnvironment,
+): Promise<DxcRuntime | undefined> {
+  const configured = configuredValue?.trim();
+  if (!configured) {
+    return undefined;
+  }
+  const fileSystem = environment.fileSystem ?? nodeFileSystem;
+  const directory = resolveConfiguredPath(
+    configured,
+    environment.workspaceFolders,
+    "hlsl.dxcRuntimeDirectory",
+  );
+  const runtimeFiles = await validateRuntimeDirectory(
+    fileSystem,
+    directory,
+    environment.platform,
+  );
+  return { directory, runtimeFiles };
 }
 
 export async function resolveServerRuntime(

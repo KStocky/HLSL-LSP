@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -13,6 +14,44 @@ struct SourceFile {
     std::string path;
     std::string text;
 };
+
+// Selects the DXC runtime a language-server process loads. An empty directory
+// selects the bundled runtime resolved through the platform loader's default
+// search path (the directory that contains the executable). A non-empty
+// directory loads the platform DXC library from that directory instead. Because
+// DXC IntelliSense is loaded once per process, this selection is process-wide
+// and cannot vary per file.
+struct RuntimeConfiguration {
+    std::string directory;
+};
+
+// Describes the DXC runtime actually loaded into the process, for client and
+// server diagnostics.
+struct RuntimeInfo {
+    std::string directory;
+    std::string library_path;
+    std::string version;
+    bool bundled{true};
+};
+
+// Thrown when a selected DXC runtime cannot be validated or loaded. Callers turn
+// this into an actionable configuration diagnostic rather than restarting.
+class RuntimeError final : public std::runtime_error {
+  public:
+    explicit RuntimeError(const std::string& message);
+};
+
+// The platform-specific file name of the DXC compiler library that a runtime
+// directory must provide (dxcompiler.dll on Windows, libdxcompiler.so
+// elsewhere).
+[[nodiscard]] std::string_view runtime_library_name() noexcept;
+
+// Validates that `directory` contains a DXC runtime compatible with this
+// platform and returns the absolute path of the compiler library. Throws
+// RuntimeError with an actionable message when the directory is empty, missing,
+// not a directory, or lacks the required library. An empty `directory` is
+// rejected; the bundled default is selected by loading without a directory.
+[[nodiscard]] std::string validate_runtime_directory(std::string_view directory);
 
 struct CompilerOptions {
     std::string language_version{"2021"};
@@ -184,6 +223,7 @@ class TranslationUnit final {
 class Intellisense final {
   public:
     Intellisense();
+    explicit Intellisense(const RuntimeConfiguration& runtime);
     Intellisense(Intellisense&&) noexcept;
     Intellisense& operator=(Intellisense&&) noexcept;
     Intellisense(const Intellisense&) = delete;
@@ -192,6 +232,8 @@ class Intellisense final {
 
     [[nodiscard]] TranslationUnit parse(std::string root_path, std::vector<SourceFile> files,
                                         const CompilerOptions& options = {}) const;
+
+    [[nodiscard]] RuntimeInfo runtime_info() const;
 
   private:
     struct Impl;

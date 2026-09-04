@@ -14,12 +14,14 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <filesystem>
 #include <iterator>
 #include <limits>
 #include <regex>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -66,22 +68,51 @@ template <typename Interface> class ComPtr final {
     Interface* pointer_{};
 };
 
+[[nodiscard]] std::string loader_error() {
+#ifdef _WIN32
+    return {};
+#else
+    const auto* error = ::dlerror();
+    return error != nullptr ? std::string{error} : std::string{};
+#endif
+}
+
+#ifdef _WIN32
+[[nodiscard]] std::string module_file_name(HMODULE handle) {
+    if (handle == nullptr) {
+        return {};
+    }
+    std::wstring buffer(MAX_PATH, L'\0');
+    for (;;) {
+        const auto length =
+            ::GetModuleFileNameW(handle, buffer.data(), static_cast<DWORD>(buffer.size()));
+        if (length == 0) {
+            return {};
+        }
+        if (length < buffer.size()) {
+            buffer.resize(length);
+            break;
+        }
+        if (buffer.size() >= std::size_t{1} << 16U) {
+            return {};
+        }
+        buffer.resize(buffer.size() * 2U);
+    }
+    try {
+        return std::filesystem::path{buffer}.string();
+    } catch (const std::exception&) {
+        return {};
+    }
+}
+#endif
+
 class Module final {
   public:
-    Module() {
-#ifdef _WIN32
-        handle_ = ::LoadLibraryW(L"dxcompiler.dll");
-#else
-        handle_ = ::dlopen("libdxcompiler.so", RTLD_NOW | RTLD_LOCAL);
-#endif
-        if (handle_ == nullptr) {
-#ifdef _WIN32
-            throw std::runtime_error{"Unable to load the DXC runtime"};
-#else
-            const auto* error = ::dlerror();
-            throw std::runtime_error{std::string{"Unable to load the DXC runtime: "} +
-                                     (error != nullptr ? error : "unknown error")};
-#endif
+    explicit Module(std::string_view directory) {
+        if (directory.empty()) {
+            load_bundled();
+        } else {
+            load_from_directory(directory);
         }
     }
 
@@ -111,12 +142,54 @@ class Module final {
         return reinterpret_cast<Function>(address);
     }
 
+    [[nodiscard]] auto library_path() const noexcept -> const std::string& { return library_path_; }
+
+    [[nodiscard]] auto bundled() const noexcept -> bool { return bundled_; }
+
   private:
+    void load_bundled() {
+        bundled_ = true;
+#ifdef _WIN32
+        handle_ = ::LoadLibraryW(L"dxcompiler.dll");
+#else
+        handle_ = ::dlopen("libdxcompiler.so", RTLD_NOW | RTLD_LOCAL);
+#endif
+        if (handle_ == nullptr) {
+            const auto detail = loader_error();
+            throw RuntimeError{std::string{"Unable to load the bundled DXC runtime"} +
+                               (detail.empty() ? "" : ": " + detail)};
+        }
+#ifdef _WIN32
+        library_path_ = module_file_name(handle_);
+#endif
+        if (library_path_.empty()) {
+            library_path_ = std::string{runtime_library_name()};
+        }
+    }
+
+    void load_from_directory(std::string_view directory) {
+        bundled_ = false;
+        library_path_ = validate_runtime_directory(directory);
+        const std::filesystem::path library{library_path_};
+#ifdef _WIN32
+        handle_ = ::LoadLibraryExW(library.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+#else
+        handle_ = ::dlopen(library.c_str(), RTLD_NOW | RTLD_LOCAL);
+#endif
+        if (handle_ == nullptr) {
+            const auto detail = loader_error();
+            throw RuntimeError{"Unable to load the selected DXC runtime '" + library_path_ + "'" +
+                               (detail.empty() ? "" : ": " + detail)};
+        }
+    }
+
 #ifdef _WIN32
     HMODULE handle_{};
 #else
     void* handle_{};
 #endif
+    std::string library_path_;
+    bool bundled_{true};
 };
 
 void check(HRESULT result, std::string_view operation) {
@@ -816,18 +889,110 @@ void append_named_callables(IDxcCursor& parent, std::string_view name,
     }
 }
 
+[[nodiscard]] std::string query_runtime_version(DxcCreateInstanceProc create_instance) {
+    try {
+        auto compiler = create<IDxcCompiler>(create_instance, CLSID_DxcCompiler);
+        ComPtr<IDxcVersionInfo> version;
+        if (FAILED(compiler->QueryInterface(__uuidof(IDxcVersionInfo), version.put_void())) ||
+            version.get() == nullptr) {
+            return "unknown";
+        }
+        std::uint32_t major{};
+        std::uint32_t minor{};
+        if (FAILED(version->GetVersion(&major, &minor))) {
+            return "unknown";
+        }
+        std::string result = std::to_string(major) + "." + std::to_string(minor);
+        ComPtr<IDxcVersionInfo2> version2;
+        if (SUCCEEDED(version->QueryInterface(__uuidof(IDxcVersionInfo2), version2.put_void())) &&
+            version2.get() != nullptr) {
+            std::uint32_t commit_count{};
+            char* commit_hash{};
+            if (SUCCEEDED(version2->GetCommitInfo(&commit_count, &commit_hash)) &&
+                commit_hash != nullptr) {
+                result += "." + std::to_string(commit_count) + " (" + commit_hash + ")";
+            }
+            ::CoTaskMemFree(commit_hash);
+        }
+        return result;
+    } catch (const std::exception&) {
+        return "unknown";
+    }
+}
+
 } // namespace
 
+RuntimeError::RuntimeError(const std::string& message) : std::runtime_error{message} {}
+
+std::string_view runtime_library_name() noexcept {
+#ifdef _WIN32
+    return "dxcompiler.dll";
+#else
+    return "libdxcompiler.so";
+#endif
+}
+
+std::string validate_runtime_directory(std::string_view directory) {
+    if (directory.empty()) {
+        throw RuntimeError{"A DXC runtime directory was not provided"};
+    }
+
+    std::error_code error;
+    const auto resolved =
+        std::filesystem::absolute(std::filesystem::path{std::string{directory}}, error)
+            .lexically_normal();
+    if (error) {
+        throw RuntimeError{"Unable to resolve the DXC runtime directory '" +
+                           std::string{directory} + "'"};
+    }
+    if (!std::filesystem::exists(resolved, error) || error) {
+        throw RuntimeError{"The DXC runtime directory '" + resolved.string() + "' does not exist"};
+    }
+    if (!std::filesystem::is_directory(resolved, error) || error) {
+        throw RuntimeError{"The DXC runtime path '" + resolved.string() + "' is not a directory"};
+    }
+
+    const auto library = resolved / std::filesystem::path{std::string{runtime_library_name()}};
+    if (!std::filesystem::is_regular_file(library, error) || error) {
+        throw RuntimeError{"The DXC runtime directory '" + resolved.string() +
+                           "' does not contain the required '" +
+                           std::string{runtime_library_name()} +
+                           "' compiler library for this platform"};
+    }
+#ifdef _WIN32
+    // The Windows DXC runtime depends on dxil.dll for validation support; the
+    // bundled default and both editor clients require it, so validate it here to
+    // keep the server and clients consistent about which runtimes are usable.
+    const auto validator = resolved / std::filesystem::path{"dxil.dll"};
+    if (!std::filesystem::is_regular_file(validator, error) || error) {
+        throw RuntimeError{"The DXC runtime directory '" + resolved.string() +
+                           "' does not contain the required 'dxil.dll' platform dependency"};
+    }
+#endif
+    return library.string();
+}
+
 struct Intellisense::Impl final {
-    Impl()
-        : create_instance{module.get<DxcCreateInstanceProc>("DxcCreateInstance")},
-          intellisense{create<IDxcIntelliSense>(create_instance, CLSID_DxcIntelliSense)} {
+    explicit Impl(const RuntimeConfiguration& runtime)
+        : configured_directory{runtime.directory}, module{runtime.directory},
+          create_instance{module.get<DxcCreateInstanceProc>("DxcCreateInstance")},
+          intellisense{create<IDxcIntelliSense>(create_instance, CLSID_DxcIntelliSense)},
+          version{query_runtime_version(create_instance)} {
         check(intellisense->CreateIndex(index.put()), "CreateIndex");
     }
 
+    [[nodiscard]] RuntimeInfo runtime_info() const {
+        return {.directory = module.bundled() ? std::string{} : configured_directory,
+                .library_path = module.library_path(),
+                .version = version,
+                .bundled = module.bundled()};
+    }
+
+    std::string configured_directory;
     Module module;
     DxcCreateInstanceProc create_instance;
     ComPtr<IDxcIntelliSense> intellisense;
+    std::string version;
     ComPtr<IDxcIndex> index;
 };
 
@@ -1500,11 +1665,16 @@ void TranslationUnit::reparse(std::vector<SourceFile> files) {
 #endif
 }
 
-Intellisense::Intellisense() : implementation_{std::make_shared<Impl>()} {}
+Intellisense::Intellisense() : implementation_{std::make_shared<Impl>(RuntimeConfiguration{})} {}
+
+Intellisense::Intellisense(const RuntimeConfiguration& runtime)
+    : implementation_{std::make_shared<Impl>(runtime)} {}
 
 Intellisense::Intellisense(Intellisense&&) noexcept = default;
 auto Intellisense::operator=(Intellisense&&) noexcept -> Intellisense& = default;
 Intellisense::~Intellisense() = default;
+
+auto Intellisense::runtime_info() const -> RuntimeInfo { return implementation_->runtime_info(); }
 
 auto Intellisense::parse(std::string root_path, std::vector<SourceFile> files,
                          const CompilerOptions& options) const -> TranslationUnit {

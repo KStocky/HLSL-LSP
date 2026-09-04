@@ -47,6 +47,8 @@ public sealed class HlslLspActivator :
     private HashSet<string> configuredExtensions =
         new(StringComparer.OrdinalIgnoreCase);
     private bool servicesReady;
+    private string workspaceRuntimeDirectory = string.Empty;
+    private string lastRuntimeDirectory = string.Empty;
 
     private HlslLspActivator(
         HlslBootstrapPackage host,
@@ -140,7 +142,12 @@ public sealed class HlslLspActivator :
         await ApplyOpenDocumentMappingsAsync(cancellationToken);
 
         var broker = componentModel.GetService<ILanguageClientBroker>();
-        languageClient = new HlslLanguageClient(GetOptions().LanguageVersion);
+        var initialOptions = GetOptions();
+        lastRuntimeDirectory = EffectiveRuntimeDirectory(initialOptions);
+        languageClient = new HlslLanguageClient(
+            initialOptions.LanguageVersion,
+            lastRuntimeDirectory,
+            OnServerRuntimeRestartRequestedAsync);
         MemoryLayoutBridge.Register(languageClient.GetMemoryLayoutAsync);
         await broker.LoadAsync(new HlslLanguageClientMetadata(), languageClient);
 
@@ -258,10 +265,75 @@ public sealed class HlslLspActivator :
         var options = GetOptions();
         ApplyFileExtensions(options.FileExtensions);
         await ApplyOpenDocumentMappingsAsync(disposalToken);
-        if (languageClient != null)
+        if (languageClient == null)
+        {
+            return;
+        }
+
+        var effectiveRuntime = EffectiveRuntimeDirectory(options);
+        if (!string.Equals(
+                effectiveRuntime,
+                lastRuntimeDirectory,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            // An explicit editor option supersedes any workspace-driven runtime.
+            if (!string.IsNullOrWhiteSpace(options.DxcRuntimeDirectory))
+            {
+                workspaceRuntimeDirectory = string.Empty;
+                effectiveRuntime = EffectiveRuntimeDirectory(options);
+            }
+            lastRuntimeDirectory = effectiveRuntime;
+            await languageClient.RestartWithRuntimeAsync(
+                options.LanguageVersion,
+                effectiveRuntime);
+        }
+        else
         {
             await languageClient.UpdateLanguageVersionAsync(options.LanguageVersion);
         }
+    }
+
+    private string EffectiveRuntimeDirectory(HlslOptionsSnapshot options)
+    {
+        var option = options.DxcRuntimeDirectory?.Trim() ?? string.Empty;
+        return option.Length > 0 ? option : workspaceRuntimeDirectory;
+    }
+
+    // The server requests a controlled restart when shadertoolsconfig.json selects
+    // a different DXC runtime. An explicit editor option wins, and an already
+    // applied selection is ignored, so this cannot form a restart loop.
+    private Task OnServerRuntimeRestartRequestedAsync(string directory, string reason)
+    {
+        joinableTaskFactory.RunAsync(async () =>
+            {
+                await joinableTaskFactory.SwitchToMainThreadAsync();
+                if (languageClient == null)
+                {
+                    return;
+                }
+                var options = GetOptions();
+                if (!string.IsNullOrWhiteSpace(options.DxcRuntimeDirectory))
+                {
+                    return;
+                }
+                var requested = string.IsNullOrWhiteSpace(directory)
+                    ? string.Empty
+                    : directory.Trim();
+                if (string.Equals(
+                        workspaceRuntimeDirectory,
+                        requested,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    return;
+                }
+                workspaceRuntimeDirectory = requested;
+                lastRuntimeDirectory = requested;
+                await languageClient.RestartWithRuntimeAsync(
+                    options.LanguageVersion,
+                    requested);
+            })
+            .FileAndForget("HlslLsp/RuntimeRestart");
+        return Task.CompletedTask;
     }
 
     private HlslOptionsSnapshot GetOptions()

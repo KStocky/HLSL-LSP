@@ -93,6 +93,14 @@ int main(int argc, char* argv[]) {
             options.trace_source = true;
             continue;
         }
+        if (argument == "--dxc-runtime") {
+            if (index + 1 >= argc) {
+                std::cerr << "HLSL-LSP: missing value for argument: " << argument << '\n';
+                return EXIT_FAILURE;
+            }
+            options.analysis.runtime.directory = argv[++index];
+            continue;
+        }
         if (index + 1 >= argc) {
             std::cerr << "HLSL-LSP: missing value for argument: " << argument << '\n';
             return EXIT_FAILURE;

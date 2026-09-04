@@ -8,6 +8,7 @@
 #include <limits>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <type_traits>
 #include <unordered_map>
@@ -135,7 +136,9 @@ struct Manager::Impl final {
     };
 
     struct WorkerState final {
-        WorkerState(workspace::IncludeCacheLimits include_limits) : include_cache{include_limits} {}
+        WorkerState(const dxc::RuntimeConfiguration& runtime,
+                    workspace::IncludeCacheLimits include_limits)
+            : intellisense{runtime}, include_cache{include_limits} {}
 
         dxc::Intellisense intellisense;
         workspace::IncludeMetadataCache include_cache;
@@ -147,7 +150,7 @@ struct Manager::Impl final {
     Impl(DiagnosticsHandler diagnostics_handler, AnalysisOptions value,
          std::shared_ptr<AnalysisHooks> analysis_hooks, ErrorHandler error_handler)
         : diagnostics{std::move(diagnostics_handler)}, errors{std::move(error_handler)},
-          options{validate_options(value)}, hooks{std::move(analysis_hooks)},
+          options{validate_options(std::move(value))}, hooks{std::move(analysis_hooks)},
           worker_states(options.scheduler.worker_count),
           scheduler{options.scheduler,
                     [this](std::size_t index) { worker_states[index].reset(); }} {
@@ -166,7 +169,7 @@ struct Manager::Impl final {
                 worker_share(limits.max_entries, options.scheduler.worker_count, index);
             limits.max_estimated_bytes =
                 worker_share(limits.max_estimated_bytes, options.scheduler.worker_count, index);
-            state = std::make_unique<WorkerState>(limits);
+            state = std::make_unique<WorkerState>(options.runtime, limits);
         }
         return *state;
     }
@@ -454,11 +457,24 @@ struct Manager::Impl final {
         }
     }
 
+    // Reports the DXC runtime the workers load. The runtime is process-wide and
+    // fixed for the lifetime of the manager, so a validated probe is loaded once
+    // and its description cached for later diagnostics requests.
+    [[nodiscard]] dxc::RuntimeInfo runtime_info() const {
+        std::scoped_lock lock{runtime_info_mutex};
+        if (!cached_runtime_info) {
+            cached_runtime_info = dxc::Intellisense{options.runtime}.runtime_info();
+        }
+        return *cached_runtime_info;
+    }
+
     DiagnosticsHandler diagnostics;
     ErrorHandler errors;
     AnalysisOptions options;
     std::shared_ptr<AnalysisHooks> hooks;
     std::vector<std::unique_ptr<WorkerState>> worker_states;
+    mutable std::mutex runtime_info_mutex;
+    mutable std::optional<dxc::RuntimeInfo> cached_runtime_info;
     mutable std::mutex metadata_mutex;
     std::unordered_map<std::string, RootMetadata> metadata;
     std::unordered_map<std::string, std::uint64_t> root_epochs;
@@ -484,8 +500,8 @@ struct Manager::Impl final {
 
 Manager::Manager(DiagnosticsHandler diagnostics, AnalysisOptions options,
                  std::shared_ptr<AnalysisHooks> hooks, ErrorHandler errors)
-    : implementation_{std::make_unique<Impl>(std::move(diagnostics), options, std::move(hooks),
-                                             std::move(errors))} {}
+    : implementation_{std::make_unique<Impl>(std::move(diagnostics), std::move(options),
+                                             std::move(hooks), std::move(errors))} {}
 
 Manager::~Manager() = default;
 
@@ -720,5 +736,7 @@ Manager::configuration_fingerprint(const workspace::WorkspaceConfiguration& conf
     }
     return result;
 }
+
+dxc::RuntimeInfo Manager::dxc_runtime_info() const { return implementation_->runtime_info(); }
 
 } // namespace hlsl_intellisense::analysis

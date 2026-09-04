@@ -89,6 +89,25 @@ Show Language Server Output**, and **HLSL: Show Client Diagnostics** to manage
 and inspect the selected process. Shutdown is performed through the language
 client and is scoped to the child process launched by this extension.
 
+## DXC runtime selection
+
+By default the extension loads the bundled, pinned DXC runtime. Set
+`hlsl.dxcRuntimeDirectory` to a directory containing a compatible DXC runtime
+(`dxcompiler.dll` and `dxil.dll` on Windows, `libdxcompiler.so` on Linux) to
+load that runtime instead. Relative values resolve from the first workspace
+folder, so a checked-in path such as `Tools/dxc/bin` stays environment
+independent. The directory and its compiler library are validated before the
+server starts, and an incompatible selection is reported without repeatedly
+retrying.
+
+An explicit `hlsl.dxcRuntimeDirectory` overrides any `shadertoolsconfig.json`
+runtime selection. When the editor setting is empty, the server resolves the
+runtime from `shadertoolsconfig.json` and asks the client to restart so it
+loads. Because DXC is loaded once per process, changing the runtime restarts the
+language server; open documents are re-analyzed against the new runtime and no
+restart loop can form. **HLSL: Show Client Diagnostics** reports the selected and
+active runtime directory and the loaded DXC version.
+
 ## Configuration
 
 `hlsl.languageVersion` defaults to `2021` as a _client default_. It remains

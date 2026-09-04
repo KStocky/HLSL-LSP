@@ -19,12 +19,19 @@ internal sealed class HlslLanguageClient :
 {
     private Process serverProcess;
     private string languageVersion;
+    private string dxcRuntimeDirectory;
     private JsonRpc rpc;
     private readonly AsyncManualResetEvent rpcAttached = new();
+    private readonly HlslCustomMessageTarget customMessageTarget;
 
-    internal HlslLanguageClient(string languageVersion)
+    internal HlslLanguageClient(
+        string languageVersion,
+        string dxcRuntimeDirectory,
+        Func<string, string, Task> onRuntimeRestartRequested)
     {
         this.languageVersion = languageVersion;
+        this.dxcRuntimeDirectory = dxcRuntimeDirectory ?? string.Empty;
+        customMessageTarget = new HlslCustomMessageTarget(onRuntimeRestartRequested);
     }
 
     public string Name => "HLSL-LSP";
@@ -40,6 +47,7 @@ internal sealed class HlslLanguageClient :
             hlsl = new
             {
                 languageVersion = Volatile.Read(ref languageVersion),
+                dxcRuntimeDirectory = Volatile.Read(ref dxcRuntimeDirectory),
             },
         };
 
@@ -54,7 +62,7 @@ internal sealed class HlslLanguageClient :
 
     public object MiddleLayer => null;
 
-    public object CustomMessageTarget => null;
+    public object CustomMessageTarget => customMessageTarget;
 
     public Task AttachForCustomMessageAsync(JsonRpc jsonRpc)
     {
@@ -80,6 +88,28 @@ internal sealed class HlslLanguageClient :
                         languageVersion = value,
                     },
                 });
+    }
+
+    internal string RuntimeDirectory => Volatile.Read(ref dxcRuntimeDirectory);
+
+    // The DXC runtime is loaded into the server process, so changing it requires
+    // recreating that process. Stopping and re-raising StartAsync makes the shell
+    // call ActivateAsync again with the updated selection.
+    internal async Task RestartWithRuntimeAsync(
+        string languageVersion,
+        string dxcRuntimeDirectory)
+    {
+        Volatile.Write(ref this.languageVersion, languageVersion);
+        Volatile.Write(
+            ref this.dxcRuntimeDirectory,
+            dxcRuntimeDirectory ?? string.Empty);
+        rpcAttached.Reset();
+        Volatile.Write(ref rpc, null);
+        await StopServerAsync().ConfigureAwait(false);
+        if (StartAsync != null)
+        {
+            await StartAsync.InvokeAsync(this, EventArgs.Empty).ConfigureAwait(false);
+        }
     }
 
     internal async Task<JArray> GetDocumentSymbolsAsync(
@@ -179,10 +209,18 @@ internal sealed class HlslLanguageClient :
             throw new FileNotFoundException("The bundled HLSL-LSP server was not found.", serverPath);
         }
 
+        var arguments = "--disable-semantic-tokens";
+        var runtimeDirectory = Volatile.Read(ref dxcRuntimeDirectory);
+        if (!string.IsNullOrWhiteSpace(runtimeDirectory))
+        {
+            var resolved = ResolveRuntimeDirectory(runtimeDirectory);
+            arguments += $" --dxc-runtime \"{resolved}\"";
+        }
+
         var startInfo = new ProcessStartInfo
         {
             FileName = serverPath,
-            Arguments = "--disable-semantic-tokens",
+            Arguments = arguments,
             WorkingDirectory = serverDirectory,
             UseShellExecute = false,
             CreateNoWindow = true,
@@ -251,6 +289,65 @@ internal sealed class HlslLanguageClient :
             {
                 await stop.ConfigureAwait(false);
             }
+        }
+    }
+
+    private static string ResolveRuntimeDirectory(string directory)
+    {
+        var resolved = Path.GetFullPath(directory);
+        if (!Directory.Exists(resolved))
+        {
+            throw new DirectoryNotFoundException(
+                $"The configured DXC runtime directory was not found: {resolved}");
+        }
+
+        var compiler = Path.Combine(resolved, "dxcompiler.dll");
+        if (!File.Exists(compiler))
+        {
+            throw new FileNotFoundException(
+                $"The DXC runtime directory does not contain dxcompiler.dll: {resolved}",
+                compiler);
+        }
+
+        var dxil = Path.Combine(resolved, "dxil.dll");
+        if (!File.Exists(dxil))
+        {
+            throw new FileNotFoundException(
+                $"The DXC runtime directory does not contain dxil.dll: {resolved}",
+                dxil);
+        }
+
+        return resolved;
+    }
+
+    public sealed class RuntimeRestartParams
+    {
+        public string Directory { get; set; }
+
+        public string Reason { get; set; }
+    }
+
+    private sealed class HlslCustomMessageTarget
+    {
+        private readonly Func<string, string, Task> onRuntimeRestartRequested;
+
+        public HlslCustomMessageTarget(Func<string, string, Task> handler)
+        {
+            onRuntimeRestartRequested = handler;
+        }
+
+        [JsonRpcMethod(
+            "hlsl/dxcRuntimeRestartRequired",
+            UseSingleObjectParameterDeserialization = true)]
+        public Task RuntimeRestartRequiredAsync(RuntimeRestartParams parameters)
+        {
+            if (onRuntimeRestartRequested == null)
+            {
+                return Task.CompletedTask;
+            }
+            return onRuntimeRestartRequested(
+                parameters?.Directory ?? string.Empty,
+                parameters?.Reason ?? string.Empty);
         }
     }
 }

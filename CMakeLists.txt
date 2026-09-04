@@ -150,7 +150,8 @@ if(BUILD_TESTING)
         hlsl_project_options)
     hlsl_enable_clang_tidy(hlsl-intellisense-tests)
     target_compile_definitions(hlsl-intellisense-tests PRIVATE
-        HLSL_TEST_CORPUS_DIR="${PROJECT_SOURCE_DIR}/tests/corpus")
+        HLSL_TEST_CORPUS_DIR="${PROJECT_SOURCE_DIR}/tests/corpus"
+        HLSL_TEST_DXC_RUNTIME_DIR="${DXC_RUNTIME_DIR}")
     hlsl_copy_dxc_runtime(hlsl-intellisense-tests)
 
     add_executable(hlsl-lsp-tests
@@ -162,6 +163,8 @@ if(BUILD_TESTING)
         hlsl_lsp
         hlsl_project_options)
     hlsl_enable_clang_tidy(hlsl-lsp-tests)
+    target_compile_definitions(hlsl-lsp-tests PRIVATE
+        HLSL_TEST_DXC_RUNTIME_DIR="${DXC_RUNTIME_DIR}")
     hlsl_copy_dxc_runtime(hlsl-lsp-tests)
 
     add_executable(hlsl-json-rpc-tests

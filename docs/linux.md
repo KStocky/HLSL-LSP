@@ -60,6 +60,18 @@ out/package/linux-x64/hlsl-lsp
 The build-tree executables similarly use a CMake-managed build RPATH to the
 checksum-verified runtime staging directory.
 
+## Selecting a custom DXC runtime
+
+By default the server loads the bundled `libdxcompiler.so` through its RPATH. An
+editor client or `shadertoolsconfig.json` can select a different runtime with
+`hlsl.dxcRuntimeDirectory` (see the
+[`shadertoolsconfig.json` reference](shadertoolsconfig.md#dxc-runtime-selection)).
+The server then loads `libdxcompiler.so` from that directory by absolute path
+with `RTLD_NOW | RTLD_LOCAL`. The directory must contain a `libdxcompiler.so`
+that satisfies the same glibc, `GLIBCXX`, and `IDxcIntelliSense` ABI
+requirements as the bundled runtime; the directory is validated before the
+server restarts, and an incompatible selection is reported without looping.
+
 ## Reparse limitation
 
 DXC `1.9.2607` native `IDxcTranslationUnit::Reparse` has been observed to crash

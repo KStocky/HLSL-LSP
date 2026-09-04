@@ -791,6 +791,19 @@ std::optional<MemoryLayout> memory_layout_from_probe(DxcCreateInstanceProc creat
 
     // Step 3: Build compiler arguments.
     bool has_16bit = false;
+    std::string shader_model;
+    for (std::size_t index = 0; index < arguments.size(); ++index) {
+        std::string_view profile;
+        if (arguments[index] == "-T" && index + 1 < arguments.size()) {
+            profile = arguments[index + 1];
+        } else if (arguments[index].starts_with("-T") && arguments[index].size() > 2) {
+            profile = std::string_view{arguments[index]}.substr(2);
+        }
+        const auto separator = profile.find('_');
+        if (separator != std::string_view::npos) {
+            shader_model = profile.substr(separator);
+        }
+    }
     std::vector<std::wstring> wide_args;
     const auto source_directory = std::filesystem::path{main_path}.parent_path();
     if (!source_directory.empty()) {
@@ -820,7 +833,9 @@ std::optional<MemoryLayout> memory_layout_from_probe(DxcCreateInstanceProc creat
     wide_args.push_back(L"-E");
     wide_args.push_back(wide_entry);
     wide_args.push_back(L"-T");
-    wide_args.push_back(has_16bit ? L"cs_6_2" : L"cs_6_0");
+    wide_args.push_back(utf8_to_wide(
+        "cs" + (shader_model.empty() ? (has_16bit ? std::string{"_6_2"} : std::string{"_6_0"})
+                                     : shader_model)));
     wide_args.push_back(L"-Od");
     wide_args.push_back(L"-Vd");
     // Remove SPIRV flags.

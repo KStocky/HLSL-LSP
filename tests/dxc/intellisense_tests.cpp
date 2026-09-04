@@ -145,9 +145,12 @@ TEST_CASE("DXC IntelliSense computes natural HLSL record layouts", "[dxc][memory
 TEST_CASE("Memory layout probes replace configured target profiles", "[dxc][memory-layout]") {
     hlsl_intellisense::dxc::Intellisense intellisense;
     hlsl_intellisense::dxc::CompilerOptions options;
-    options.target_profile = "ps_6_6";
+    options.target_profile = "lib_6_6";
     const std::string source = "struct Data { float3 value; };\n"
-                               "float4 main() : SV_Target { return float4(0, 0, 0, 0); }\n";
+                               "void useHeap(uint index) {\n"
+                               "    RWByteAddressBuffer buffer = ResourceDescriptorHeap[index];\n"
+                               "    buffer.Store(0, 0);\n"
+                               "}\n";
     auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
 
     const auto layout = translation_unit.memory_layout_at(shader_path, 1, 9);
@@ -155,6 +158,45 @@ TEST_CASE("Memory layout probes replace configured target profiles", "[dxc][memo
     REQUIRE(layout->supported);
     CHECK(layout->name == "Data");
     CHECK(layout->size == 12);
+}
+
+TEST_CASE("Memory layout probes preserve Shader Model 6.6 for unrelated framework code",
+          "[dxc][memory-layout][regression]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.language_version = "202x";
+    options.target_profile = "lib_6_6";
+    options.additional_arguments = {"-enable-16bit-types"};
+    const std::string source = "#include \"framework.hlsli\"\n"
+                               "struct MyStruct {\n"
+                               "    float3 Vec3;\n"
+                               "    int2 IntPoint;\n"
+                               "};\n"
+                               "MyStruct GlobalBinding;\n"
+                               "ConstantBuffer<MyStruct> CBuffer;\n";
+    const std::string framework =
+        "void useHeap(uint index) {\n"
+        "    RWByteAddressBuffer buffer = ResourceDescriptorHeap[index];\n"
+        "    buffer.Store(0, 0);\n"
+        "}\n";
+    const auto root_path =
+        (std::filesystem::current_path() / "shader-model-layout.hlsl").generic_string();
+    const auto framework_path =
+        (std::filesystem::current_path() / "framework.hlsli").generic_string();
+    auto translation_unit =
+        intellisense.parse(root_path, {{root_path, source}, {framework_path, framework}}, options);
+
+    const auto layout = translation_unit.memory_layout_at(root_path, 2, 10);
+    REQUIRE(layout.has_value());
+    INFO(layout->explanation);
+    REQUIRE(layout->supported);
+    CHECK(layout->size == 20);
+    REQUIRE(layout->members.size() == 2);
+    CHECK(layout->members[0].name == "Vec3");
+    CHECK(layout->members[0].size == 12);
+    CHECK(layout->members[1].name == "IntPoint");
+    CHECK(layout->members[1].offset == 12);
+    CHECK(layout->members[1].size == 8);
 }
 
 TEST_CASE("DXC IntelliSense computes constant-buffer packing", "[dxc][memory-layout][cbuffer]") {
@@ -1059,3 +1101,98 @@ TEST_CASE("Pinned DXC exposes built-in type declarations but not constructor ove
     CHECK(std::ranges::find(completions, "float4", &hlsl_intellisense::dxc::Completion::label) ==
           completions.end());
 }
+
+namespace {
+
+[[nodiscard]] auto test_runtime_directory() -> std::filesystem::path {
+    return std::filesystem::path{HLSL_TEST_DXC_RUNTIME_DIR};
+}
+
+} // namespace
+
+TEST_CASE("DXC runtime library name matches the platform", "[dxc][runtime]") {
+#ifdef _WIN32
+    CHECK(std::string{hlsl_intellisense::dxc::runtime_library_name()} == "dxcompiler.dll");
+#else
+    CHECK(std::string{hlsl_intellisense::dxc::runtime_library_name()} == "libdxcompiler.so");
+#endif
+}
+
+TEST_CASE("Bundled DXC runtime reports version information", "[dxc][runtime][integration]") {
+    const hlsl_intellisense::dxc::Intellisense intellisense;
+    const auto info = intellisense.runtime_info();
+    CHECK(info.bundled);
+    CHECK(info.directory.empty());
+    CHECK_FALSE(info.version.empty());
+}
+
+TEST_CASE("Validating a DXC runtime directory locates the compiler library", "[dxc][runtime]") {
+    const auto directory = test_runtime_directory();
+    const auto library = hlsl_intellisense::dxc::validate_runtime_directory(directory.string());
+    const std::filesystem::path resolved{library};
+    CHECK(resolved.filename().string() ==
+          std::string{hlsl_intellisense::dxc::runtime_library_name()});
+    CHECK(std::filesystem::exists(resolved));
+}
+
+TEST_CASE("Selecting an explicit DXC runtime loads and analyzes HLSL",
+          "[dxc][runtime][integration]") {
+    const auto directory = test_runtime_directory();
+    const hlsl_intellisense::dxc::Intellisense intellisense{
+        hlsl_intellisense::dxc::RuntimeConfiguration{directory.string()}};
+    const auto info = intellisense.runtime_info();
+    CHECK_FALSE(info.bundled);
+    CHECK(info.directory == directory.string());
+    CHECK_FALSE(info.library_path.empty());
+    CHECK_FALSE(info.version.empty());
+
+    auto unit =
+        intellisense.parse(shader_path, {{shader_path, hlsl_2021_source("Number", "combine")}});
+    CHECK(unit.diagnostics().empty());
+}
+
+TEST_CASE("An explicit runtime reports the same version as the bundled default",
+          "[dxc][runtime][integration]") {
+    const hlsl_intellisense::dxc::Intellisense bundled;
+    const hlsl_intellisense::dxc::Intellisense configured{
+        hlsl_intellisense::dxc::RuntimeConfiguration{test_runtime_directory().string()}};
+    CHECK(bundled.runtime_info().version == configured.runtime_info().version);
+}
+
+TEST_CASE("An empty DXC runtime directory is rejected", "[dxc][runtime]") {
+    CHECK_THROWS_AS(hlsl_intellisense::dxc::validate_runtime_directory(""),
+                    hlsl_intellisense::dxc::RuntimeError);
+}
+
+TEST_CASE("A missing DXC runtime directory is rejected", "[dxc][runtime]") {
+    const auto missing = std::filesystem::current_path() / "hlsl-lsp-nonexistent-runtime";
+    std::filesystem::remove_all(missing);
+    CHECK_THROWS_AS(hlsl_intellisense::dxc::validate_runtime_directory(missing.string()),
+                    hlsl_intellisense::dxc::RuntimeError);
+    CHECK_THROWS_AS((hlsl_intellisense::dxc::Intellisense{
+                        hlsl_intellisense::dxc::RuntimeConfiguration{missing.string()}}),
+                    hlsl_intellisense::dxc::RuntimeError);
+}
+
+TEST_CASE("A directory without the DXC compiler library is rejected", "[dxc][runtime]") {
+    const auto empty = std::filesystem::current_path() / "hlsl-lsp-empty-runtime";
+    std::filesystem::remove_all(empty);
+    std::filesystem::create_directories(empty);
+    CHECK_THROWS_AS(hlsl_intellisense::dxc::validate_runtime_directory(empty.string()),
+                    hlsl_intellisense::dxc::RuntimeError);
+    std::filesystem::remove_all(empty);
+}
+
+#ifdef _WIN32
+TEST_CASE("A Windows runtime directory without dxil.dll is rejected", "[dxc][runtime]") {
+    const auto directory = std::filesystem::current_path() / "hlsl-lsp-runtime-without-dxil";
+    std::filesystem::remove_all(directory);
+    std::filesystem::create_directories(directory);
+    std::filesystem::copy_file(test_runtime_directory() / "dxcompiler.dll",
+                               directory / "dxcompiler.dll",
+                               std::filesystem::copy_options::overwrite_existing);
+    CHECK_THROWS_AS(hlsl_intellisense::dxc::validate_runtime_directory(directory.string()),
+                    hlsl_intellisense::dxc::RuntimeError);
+    std::filesystem::remove_all(directory);
+}
+#endif

@@ -27,6 +27,12 @@
         "Latest experimental (202x)"
       ],
       "allowsFreeformInput": true
+    },
+    "hlslLsp.general.dxcRuntimeDirectory": {
+      "type": "string",
+      "title": "DXC runtime directory",
+      "description": "Directory containing a compatible DXC runtime (dxcompiler.dll and dxil.dll) to load instead of the bundled one. An explicit value overrides shadertoolsconfig.json. Empty uses the bundled runtime. Changing it restarts the language server.",
+      "default": ""
     }
   },
   "categories": {

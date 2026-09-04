@@ -1,6 +1,7 @@
 #include <hlsl_intellisense/json_rpc/framing.h>
 #include <hlsl_intellisense/json_rpc/message.h>
 #include <hlsl_intellisense/lsp/server.h>
+#include <hlsl_intellisense/workspace/document_uri.h>
 #include <hlsl_intellisense/workspace/text_position.h>
 
 #include <catch2/catch_test_macros.hpp>
@@ -1880,4 +1881,196 @@ TEST_CASE("Configuration file invalidation reparses only roots in its hierarchy"
     CHECK(server.analysis_metrics().parse_count == 3);
     REQUIRE(notifications.size() == 3);
     CHECK((*notifications.back().params)["uri"] == first.uri());
+}
+
+namespace {
+
+[[nodiscard]] std::string runtime_json_path(std::string value) {
+    std::ranges::replace(value, '\\', '/');
+    return value;
+}
+
+[[nodiscard]] std::size_t
+count_method(const std::vector<hlsl_intellisense::json_rpc::Notification>& items,
+             std::string_view method) {
+    std::size_t total{};
+    for (const auto& item : items) {
+        if (item.method == method) {
+            ++total;
+        }
+    }
+    return total;
+}
+
+[[nodiscard]] const hlsl_intellisense::json_rpc::Notification*
+find_last(const std::vector<hlsl_intellisense::json_rpc::Notification>& items,
+          std::string_view method) {
+    const hlsl_intellisense::json_rpc::Notification* found{};
+    for (const auto& item : items) {
+        if (item.method == method) {
+            found = &item;
+        }
+    }
+    return found;
+}
+
+} // namespace
+
+TEST_CASE("Server requests a controlled restart for a shadertoolsconfig DXC runtime",
+          "[lsp][runtime][integration]") {
+    TestDirectory directory;
+    {
+        std::ofstream config{directory.path() / "shadertoolsconfig.json"};
+        REQUIRE(config);
+        config << R"({"root":true,"hlsl.dxcRuntimeDirectory":")"
+               << runtime_json_path(HLSL_TEST_DXC_RUNTIME_DIR) << R"("})";
+        REQUIRE(config);
+    }
+    const auto document = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "shader.hlsl").string());
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    hlsl_intellisense::lsp::Server server{
+        [&notifications](const auto& value) { notifications.push_back(value); }};
+
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(
+        hlsl_intellisense::json_rpc::Notification{.method = "textDocument/didOpen",
+                                                  .params = Json{{"textDocument",
+                                                                  {{"uri", document.uri()},
+                                                                   {"languageId", "hlsl"},
+                                                                   {"version", 1},
+                                                                   {"text", valid_hlsl()}}}}}));
+
+    REQUIRE(count_method(notifications, "hlsl/dxcRuntimeRestartRequired") == 1);
+    const auto* restart = find_last(notifications, "hlsl/dxcRuntimeRestartRequired");
+    REQUIRE(restart != nullptr);
+    const auto restart_directory = (*restart->params)["directory"].get<std::string>();
+    CHECK_FALSE(restart_directory.empty());
+    CHECK_NOTHROW(hlsl_intellisense::dxc::validate_runtime_directory(restart_directory));
+
+    const auto runtime = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{2}, .method = "hlsl/dxcRuntime", .params = Json::object()});
+    REQUIRE(runtime.has_value());
+    const auto* runtime_response = std::get_if<hlsl_intellisense::json_rpc::Response>(&*runtime);
+    REQUIRE(runtime_response != nullptr);
+    CHECK(runtime_response->result["source"] == "bundled");
+    CHECK(runtime_response->result["requiresRestart"] == true);
+    CHECK_FALSE(runtime_response->result["version"].get<std::string>().empty());
+
+    // A repeat evaluation of the same selection must not request another restart.
+    static_cast<void>(server.handle(
+        hlsl_intellisense::json_rpc::Notification{.method = "workspace/didChangeConfiguration",
+                                                  .params = Json{{"settings", Json::object()}}}));
+    CHECK(count_method(notifications, "hlsl/dxcRuntimeRestartRequired") == 1);
+}
+
+TEST_CASE("Server reports an invalid shadertoolsconfig DXC runtime without restarting",
+          "[lsp][runtime][integration]") {
+    TestDirectory directory;
+    const auto missing = directory.path() / "no-such-runtime";
+    {
+        std::ofstream config{directory.path() / "shadertoolsconfig.json"};
+        REQUIRE(config);
+        config << R"({"root":true,"hlsl.dxcRuntimeDirectory":")"
+               << runtime_json_path(missing.string()) << R"("})";
+        REQUIRE(config);
+    }
+    const auto document = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "shader.hlsl").string());
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    hlsl_intellisense::lsp::Server server{
+        [&notifications](const auto& value) { notifications.push_back(value); }};
+
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(
+        hlsl_intellisense::json_rpc::Notification{.method = "textDocument/didOpen",
+                                                  .params = Json{{"textDocument",
+                                                                  {{"uri", document.uri()},
+                                                                   {"languageId", "hlsl"},
+                                                                   {"version", 1},
+                                                                   {"text", valid_hlsl()}}}}}));
+
+    CHECK(count_method(notifications, "hlsl/dxcRuntimeRestartRequired") == 0);
+    const auto* message = find_last(notifications, "window/showMessage");
+    REQUIRE(message != nullptr);
+    CHECK((*message->params)["type"] == 1);
+
+    // The same invalid selection must not be reported repeatedly.
+    static_cast<void>(server.handle(
+        hlsl_intellisense::json_rpc::Notification{.method = "workspace/didChangeConfiguration",
+                                                  .params = Json{{"settings", Json::object()}}}));
+    CHECK(count_method(notifications, "window/showMessage") == 1);
+    CHECK(count_method(notifications, "hlsl/dxcRuntimeRestartRequired") == 0);
+}
+
+TEST_CASE("Server reevaluates DXC runtime conflicts when a document closes",
+          "[lsp][runtime][integration]") {
+    TestDirectory bundled_directory;
+    TestDirectory configured_directory;
+    {
+        std::ofstream config{configured_directory.path() / "shadertoolsconfig.json"};
+        REQUIRE(config);
+        config << R"({"root":true,"hlsl.dxcRuntimeDirectory":")"
+               << runtime_json_path(HLSL_TEST_DXC_RUNTIME_DIR) << R"("})";
+        REQUIRE(config);
+    }
+    const auto bundled_document = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (bundled_directory.path() / "bundled.hlsl").string());
+    const auto configured_document = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (configured_directory.path() / "configured.hlsl").string());
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    hlsl_intellisense::lsp::Server server{
+        [&notifications](const auto& value) { notifications.push_back(value); }};
+
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    for (const auto& document : {bundled_document, configured_document}) {
+        static_cast<void>(server.handle(
+            hlsl_intellisense::json_rpc::Notification{.method = "textDocument/didOpen",
+                                                      .params = Json{{"textDocument",
+                                                                      {{"uri", document.uri()},
+                                                                       {"languageId", "hlsl"},
+                                                                       {"version", 1},
+                                                                       {"text", valid_hlsl()}}}}}));
+    }
+    CHECK(count_method(notifications, "hlsl/dxcRuntimeRestartRequired") == 0);
+
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didClose",
+        .params = Json{{"textDocument", {{"uri", bundled_document.uri()}}}}}));
+
+    REQUIRE(count_method(notifications, "hlsl/dxcRuntimeRestartRequired") == 1);
+    const auto* restart = find_last(notifications, "hlsl/dxcRuntimeRestartRequired");
+    REQUIRE(restart != nullptr);
+    CHECK(std::filesystem::equivalent((*restart->params)["directory"].get<std::string>(),
+                                      HLSL_TEST_DXC_RUNTIME_DIR));
+}
+
+TEST_CASE("Server reports the bundled DXC runtime through hlsl/dxcRuntime",
+          "[lsp][runtime][integration]") {
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    hlsl_intellisense::lsp::Server server{
+        [&notifications](const auto& value) { notifications.push_back(value); }};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+
+    const auto runtime = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{2}, .method = "hlsl/dxcRuntime", .params = Json::object()});
+    REQUIRE(runtime.has_value());
+    const auto* response = std::get_if<hlsl_intellisense::json_rpc::Response>(&*runtime);
+    REQUIRE(response != nullptr);
+    CHECK(response->result["source"] == "bundled");
+    CHECK(response->result["requiresRestart"] == false);
+    CHECK_FALSE(response->result["version"].get<std::string>().empty());
+    CHECK_FALSE(response->result["libraryPath"].get<std::string>().empty());
 }
