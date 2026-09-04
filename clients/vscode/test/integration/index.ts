@@ -201,6 +201,76 @@ export async function run(): Promise<void> {
     await vscode.workspace.fs.writeFile(dependency, originalDependency);
   }
 
+  const variantDirectory = vscode.Uri.joinPath(folder.uri, "variants");
+  const variantConfig = vscode.Uri.joinPath(
+    variantDirectory,
+    "shadertoolsconfig.json",
+  );
+  const variantShader = vscode.Uri.joinPath(
+    variantDirectory,
+    "variantShader.hlsl",
+  );
+  const encoder = new TextEncoder();
+  await vscode.workspace.fs.createDirectory(variantDirectory);
+  await vscode.workspace.fs.writeFile(
+    variantConfig,
+    encoder.encode(
+      JSON.stringify({
+        root: true,
+        "hlsl.variantsVersion": 1,
+        "hlsl.variants": [
+          {
+            name: "Alpha",
+            description: "Alpha permutation",
+            "hlsl.additionalArguments": ["-D", "VARIANT_ALPHA=1"],
+          },
+          {
+            name: "Beta",
+            "hlsl.additionalArguments": ["-D", "VARIANT_BETA=1"],
+          },
+        ],
+      }),
+    ),
+  );
+  await vscode.workspace.fs.writeFile(
+    variantShader,
+    encoder.encode(
+      "float4 Main() : SV_Target {\n" +
+        "#if defined(VARIANT_ALPHA)\n    return marker_alpha;\n" +
+        "#elif defined(VARIANT_BETA)\n    return marker_beta;\n" +
+        "#else\n    return marker_none;\n#endif\n" +
+        "}\n",
+    ),
+  );
+  const setActiveVariant = (value: string): Thenable<void> =>
+    vscode.workspace
+      .getConfiguration("hlsl")
+      .update("activeVariant", value, vscode.ConfigurationTarget.Global);
+  const waitForVariantMarker = (marker: string): Promise<unknown> =>
+    waitFor(`variant reanalysis for ${marker}`, () =>
+      vscode.languages
+        .getDiagnostics(variantShader)
+        .some((item) => item.message.includes(marker))
+        ? true
+        : undefined,
+    );
+  try {
+    await setActiveVariant("Alpha");
+    const variantDocument =
+      await vscode.workspace.openTextDocument(variantShader);
+    await vscode.window.showTextDocument(variantDocument);
+    // The active variant's macros must reach DXC; switching variants must
+    // reanalyze the open document with the new definitions.
+    await waitForVariantMarker("marker_alpha");
+    await setActiveVariant("Beta");
+    await waitForVariantMarker("marker_beta");
+    await setActiveVariant("");
+    await waitForVariantMarker("marker_none");
+  } finally {
+    await setActiveVariant("");
+    await vscode.workspace.fs.delete(variantDirectory, { recursive: true });
+  }
+
   await vscode.commands.executeCommand("hlsl.stopServer");
   await waitFor("clean language-server shutdown", () =>
     api.state === "stopped" ? true : undefined,

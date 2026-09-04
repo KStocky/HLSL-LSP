@@ -64,6 +64,11 @@ export function readDefaultLanguageVersion(
   return typeof value === "string" ? value : "2021";
 }
 
+export function readActiveVariant(reader: ConfigurationReader): string {
+  const value = reader.get("activeVariant");
+  return typeof value === "string" ? value.trim() : "";
+}
+
 export function readTraceSetting(reader: ConfigurationReader): TraceSetting {
   const value = reader.get("trace.server");
   return value === "messages" || value === "verbose" ? value : "off";

@@ -50,11 +50,23 @@ struct FileGroup {
     ConfigurationSettings settings;
 };
 
+struct Variant {
+    std::filesystem::path declaring_file;
+    std::string name;
+    std::string description;
+    bool is_default{};
+    std::vector<std::string> inherits;
+    bool has_files{};
+    std::vector<GlobPattern> patterns;
+    ConfigurationSettings settings;
+};
+
 struct ConfigFile {
     std::filesystem::path path;
     bool root{};
     ConfigurationSettings settings;
     std::vector<FileGroup> file_groups;
+    std::vector<Variant> variants;
 };
 
 [[noreturn]] void throw_type_error(const std::filesystem::path& file, std::string_view key,
@@ -384,6 +396,161 @@ parse_settings(const Json& json, const std::filesystem::path& path, std::string_
     return result;
 }
 
+[[nodiscard]] bool supported_variant_key(std::string_view key) {
+    constexpr std::array keys{
+        std::string_view{"name"},
+        std::string_view{"description"},
+        std::string_view{"default"},
+        std::string_view{"inherits"},
+        std::string_view{"files"},
+        std::string_view{"hlsl.preprocessorDefinitions"},
+        std::string_view{"hlsl.additionalIncludeDirectories"},
+        std::string_view{"hlsl.virtualDirectoryMappings"},
+        std::string_view{"hlsl.languageVersion"},
+        std::string_view{"hlsl.targetProfile"},
+        std::string_view{"hlsl.entryPoint"},
+        std::string_view{"hlsl.additionalArguments"},
+        std::string_view{"hlsl.dxcRuntimeDirectory"},
+    };
+    return std::ranges::find(keys, key) != keys.end();
+}
+
+[[nodiscard]] std::vector<GlobPattern>
+parse_glob_array(const Json& array, const std::filesystem::path& path, const std::string& key) {
+    std::vector<GlobPattern> patterns;
+    patterns.reserve(array.size());
+    for (std::size_t index = 0; index < array.size(); ++index) {
+        const auto& pattern = array[index];
+        const auto pattern_key = key + "[" + std::to_string(index) + "]";
+        if (!pattern.is_string()) {
+            throw_type_error(path, pattern_key, "a string");
+        }
+        patterns.push_back(parse_glob(path, pattern_key, pattern.get<std::string>()));
+    }
+    return patterns;
+}
+
+[[nodiscard]] std::vector<std::string> parse_inherits(const Json& variant,
+                                                      const std::filesystem::path& path,
+                                                      const std::string& variant_key) {
+    const auto inherits = variant.find("inherits");
+    if (inherits == variant.end()) {
+        return {};
+    }
+    const auto inherits_key = variant_key + ".inherits";
+    std::vector<std::string> result;
+    if (inherits->is_string()) {
+        if (inherits->get_ref<const std::string&>().empty()) {
+            throw ConfigurationError{ConfigurationErrorCode::invalid_variant, path, inherits_key,
+                                     "Variant inheritance names must not be empty"};
+        }
+        result.push_back(inherits->get<std::string>());
+        return result;
+    }
+    if (!inherits->is_array()) {
+        throw ConfigurationError{
+            ConfigurationErrorCode::invalid_variant, path, inherits_key,
+            "Variant 'inherits' must be a string or a non-empty array of variant names"};
+    }
+    for (const auto& base : *inherits) {
+        if (!base.is_string() || base.get_ref<const std::string&>().empty()) {
+            throw ConfigurationError{
+                ConfigurationErrorCode::invalid_variant, path, inherits_key,
+                "Variant 'inherits' must be a string or a non-empty array of variant names"};
+        }
+        result.push_back(base.get<std::string>());
+    }
+    return result;
+}
+
+[[nodiscard]] std::vector<Variant> parse_variants(const Json& json,
+                                                  const std::filesystem::path& path) {
+    const auto variants = json.find("hlsl.variants");
+    const auto version = json.find("hlsl.variantsVersion");
+    if (version != json.end() &&
+        (!version->is_number_integer() || version->get<int>() != supported_variants_version)) {
+        throw ConfigurationError{
+            ConfigurationErrorCode::invalid_variant, path, "hlsl.variantsVersion",
+            "Unsupported 'hlsl.variantsVersion' in '" + path.string() +
+                "'; this build supports version " + std::to_string(supported_variants_version)};
+    }
+    if (variants == json.end()) {
+        return {};
+    }
+    if (version == json.end()) {
+        throw ConfigurationError{ConfigurationErrorCode::invalid_variant, path,
+                                 "hlsl.variantsVersion",
+                                 "'hlsl.variants' in '" + path.string() +
+                                     "' requires 'hlsl.variantsVersion' to be set to " +
+                                     std::to_string(supported_variants_version)};
+    }
+    if (!variants->is_array()) {
+        throw_type_error(path, "hlsl.variants", "an array of objects");
+    }
+
+    std::vector<Variant> result;
+    result.reserve(variants->size());
+    for (std::size_t variant_index = 0; variant_index < variants->size(); ++variant_index) {
+        const auto& variant = (*variants)[variant_index];
+        const auto variant_key = "hlsl.variants[" + std::to_string(variant_index) + "]";
+        if (!variant.is_object()) {
+            throw_type_error(path, variant_key, "an object");
+        }
+        for (const auto& [key, value] : variant.items()) {
+            static_cast<void>(value);
+            if (!supported_variant_key(key)) {
+                auto property_key = variant_key;
+                property_key.push_back('.');
+                property_key += key;
+                throw ConfigurationError{
+                    ConfigurationErrorCode::invalid_variant, path, std::move(property_key),
+                    "Unsupported variant property '" + key + "' in '" + path.string() + "'"};
+            }
+        }
+
+        Variant parsed;
+        parsed.declaring_file = path;
+
+        const auto name = variant.find("name");
+        if (name == variant.end() || !name->is_string() ||
+            name->get_ref<const std::string&>().empty()) {
+            throw ConfigurationError{ConfigurationErrorCode::invalid_variant, path,
+                                     variant_key + ".name",
+                                     "Variant '" + variant_key + "' in '" + path.string() +
+                                         "' must declare a non-empty 'name'"};
+        }
+        parsed.name = name->get<std::string>();
+
+        if (const auto description = variant.find("description"); description != variant.end()) {
+            if (!description->is_string()) {
+                throw_type_error(path, variant_key + ".description", "a string");
+            }
+            parsed.description = description->get<std::string>();
+        }
+
+        if (const auto is_default = variant.find("default"); is_default != variant.end()) {
+            if (!is_default->is_boolean()) {
+                throw_type_error(path, variant_key + ".default", "a boolean");
+            }
+            parsed.is_default = is_default->get<bool>();
+        }
+
+        parsed.inherits = parse_inherits(variant, path, variant_key);
+
+        if (const auto files = variant.find("files"); files != variant.end()) {
+            if (!files->is_array() || files->empty()) {
+                throw_type_error(path, variant_key + ".files", "a non-empty array of strings");
+            }
+            parsed.has_files = true;
+            parsed.patterns = parse_glob_array(*files, path, variant_key + ".files");
+        }
+
+        parsed.settings = parse_settings(variant, path, variant_key);
+        result.push_back(std::move(parsed));
+    }
+    return result;
+}
+
 [[nodiscard]] ConfigFile parse_config_file(const std::filesystem::path& path) {
     const auto json = read_json(path);
     if (!json.is_object()) {
@@ -402,6 +569,7 @@ parse_settings(const Json& json, const std::filesystem::path& path, std::string_
 
     result.settings = parse_settings(json, path, {});
     result.file_groups = parse_file_groups(json, path);
+    result.variants = parse_variants(json, path);
     return result;
 }
 
@@ -612,16 +780,172 @@ struct FilePathSegment {
     return matched.back();
 }
 
-[[nodiscard]] bool matches(const FileGroup& group,
-                           const std::filesystem::path& relative_shader_path) {
+[[nodiscard]] bool matches_any(const std::vector<GlobPattern>& patterns,
+                               const std::filesystem::path& relative_shader_path) {
     const auto utf8_path = relative_shader_path.generic_u8string();
     auto normalized =
         std::string{reinterpret_cast<const char*>(utf8_path.data()), utf8_path.size()};
     std::ranges::replace(normalized, '\\', '/');
     const auto path_segments = split_path(normalized);
-    return std::ranges::any_of(group.patterns, [&path_segments](const auto& pattern) {
+    return std::ranges::any_of(patterns, [&path_segments](const auto& pattern) {
         return matches(pattern, path_segments);
     });
+}
+
+[[nodiscard]] bool matches(const FileGroup& group,
+                           const std::filesystem::path& relative_shader_path) {
+    return matches_any(group.patterns, relative_shader_path);
+}
+
+// Combines include directories so that the higher-precedence layer is searched
+// first, mirroring the file-hierarchy merge rule. Duplicate resolved paths keep
+// their earliest (highest-precedence) position.
+void combine_include_directories(std::vector<std::filesystem::path>& target,
+                                 const std::vector<std::filesystem::path>& higher_precedence) {
+    std::vector<std::filesystem::path> combined;
+    combined.reserve(higher_precedence.size() + target.size());
+    std::set<std::filesystem::path> seen;
+    for (const auto& directory : higher_precedence) {
+        if (seen.insert(directory).second) {
+            combined.push_back(directory);
+        }
+    }
+    for (const auto& directory : target) {
+        if (seen.insert(directory).second) {
+            combined.push_back(directory);
+        }
+    }
+    target = std::move(combined);
+}
+
+// Merges `higher_precedence` settings into `target`. Definition and virtual-
+// mapping maps merge by key, include directories combine (higher precedence
+// first), and scalar or replaced settings overwrite when declared.
+void merge_settings(ConfigurationSettings& target, const ConfigurationSettings& higher_precedence) {
+    for (const auto& [name, value] : higher_precedence.definitions) {
+        target.definitions[name] = value;
+    }
+    for (const auto& [virtual_directory, real_directory] : higher_precedence.virtual_mappings) {
+        target.virtual_mappings[virtual_directory] = real_directory;
+    }
+    combine_include_directories(target.include_directories, higher_precedence.include_directories);
+    if (higher_precedence.language_version) {
+        target.language_version = higher_precedence.language_version;
+    }
+    if (higher_precedence.target_profile) {
+        target.target_profile = higher_precedence.target_profile;
+    }
+    if (higher_precedence.entry_point) {
+        target.entry_point = higher_precedence.entry_point;
+    }
+    if (higher_precedence.additional_arguments) {
+        target.additional_arguments = higher_precedence.additional_arguments;
+    }
+    if (higher_precedence.dxc_runtime_directory) {
+        target.dxc_runtime_directory = higher_precedence.dxc_runtime_directory;
+    }
+}
+
+[[nodiscard]] VariantSettings to_variant_settings(const ConfigurationSettings& settings) {
+    return VariantSettings{.preprocessor_definitions = settings.definitions,
+                           .additional_include_directories = settings.include_directories,
+                           .virtual_directory_mappings = settings.virtual_mappings,
+                           .language_version = settings.language_version,
+                           .target_profile = settings.target_profile,
+                           .entry_point = settings.entry_point,
+                           .additional_arguments = settings.additional_arguments,
+                           .dxc_runtime_directory = settings.dxc_runtime_directory};
+}
+
+// Resolves a variant's settings by applying its inherited variants first, then
+// its own settings. Detects inheritance cycles and memoizes results.
+const ConfigurationSettings&
+resolve_variant_settings(const Variant& variant,
+                         const std::map<std::string, const Variant*, std::less<>>& by_name,
+                         std::map<std::string, ConfigurationSettings, std::less<>>& resolved,
+                         std::vector<std::string>& stack) {
+    if (const auto cached = resolved.find(variant.name); cached != resolved.end()) {
+        return cached->second;
+    }
+    if (std::ranges::find(stack, variant.name) != stack.end()) {
+        throw ConfigurationError{
+            ConfigurationErrorCode::invalid_variant, variant.declaring_file, "hlsl.variants",
+            "Variant inheritance cycle detected involving '" + variant.name + "'"};
+    }
+    stack.push_back(variant.name);
+    ConfigurationSettings merged;
+    for (const auto& base : variant.inherits) {
+        merge_settings(merged,
+                       resolve_variant_settings(*by_name.at(base), by_name, resolved, stack));
+    }
+    merge_settings(merged, variant.settings);
+    stack.pop_back();
+    return resolved.emplace(variant.name, std::move(merged)).first->second;
+}
+
+[[nodiscard]] std::vector<ResolvedVariant>
+resolve_variants(const std::vector<ConfigFile>& configs,
+                 const std::optional<std::filesystem::path>& canonical_shader) {
+    // Collect declarations outermost configuration first, in declaration order.
+    // Variant names are unique across the whole discovered hierarchy so a
+    // selection resolves deterministically regardless of which file declared it.
+    std::vector<const Variant*> declarations;
+    std::map<std::string, const Variant*, std::less<>> by_name;
+    for (auto iterator = configs.rbegin(); iterator != configs.rend(); ++iterator) {
+        for (const auto& variant : iterator->variants) {
+            const auto [entry, inserted] = by_name.emplace(variant.name, &variant);
+            if (!inserted) {
+                throw ConfigurationError{ConfigurationErrorCode::invalid_variant,
+                                         variant.declaring_file, "hlsl.variants",
+                                         "Duplicate variant name '" + variant.name +
+                                             "' declared in '" +
+                                             entry->second->declaring_file.string() + "' and '" +
+                                             variant.declaring_file.string() + "'"};
+            }
+            declarations.push_back(&variant);
+        }
+    }
+    if (declarations.empty()) {
+        return {};
+    }
+
+    for (const auto* variant : declarations) {
+        for (const auto& base : variant->inherits) {
+            if (!by_name.contains(base)) {
+                throw ConfigurationError{ConfigurationErrorCode::invalid_variant,
+                                         variant->declaring_file, "hlsl.variants",
+                                         "Variant '" + variant->name +
+                                             "' inherits unknown variant '" + base + "'"};
+            }
+        }
+    }
+
+    std::map<std::string, ConfigurationSettings, std::less<>> resolved;
+    std::vector<ResolvedVariant> result;
+    result.reserve(declarations.size());
+    for (const auto* variant : declarations) {
+        std::vector<std::string> stack;
+        const auto& settings = resolve_variant_settings(*variant, by_name, resolved, stack);
+
+        bool applicable = !variant->has_files;
+        if (variant->has_files && canonical_shader) {
+            const auto relative_shader =
+                canonical_shader->lexically_relative(variant->declaring_file.parent_path());
+            if (!relative_shader.empty() && !relative_shader.is_absolute() &&
+                *relative_shader.begin() != "..") {
+                applicable = matches_any(variant->patterns, relative_shader);
+            } else {
+                applicable = false;
+            }
+        }
+
+        result.push_back(ResolvedVariant{.name = variant->name,
+                                         .description = variant->description,
+                                         .is_default = variant->is_default,
+                                         .applicable = applicable,
+                                         .settings = to_variant_settings(settings)});
+    }
+    return result;
 }
 
 void apply_settings(WorkspaceConfiguration& result, const ConfigurationSettings& settings) {
@@ -707,6 +1031,7 @@ merge_configurations(const std::vector<ConfigFile>& configs,
         }
     }
     result.dxc_runtime_directory = std::move(selected_runtime);
+    result.variants = resolve_variants(configs, canonical_shader);
     return result;
 }
 
@@ -851,6 +1176,48 @@ auto apply_configuration_overrides(WorkspaceConfiguration configuration,
         }
     }
     return configuration;
+}
+
+auto apply_variant(WorkspaceConfiguration& configuration, std::string_view name)
+    -> VariantSelection {
+    const auto variant =
+        std::ranges::find_if(configuration.variants, [name](const ResolvedVariant& candidate) {
+            return candidate.name == name;
+        });
+    if (variant == configuration.variants.end()) {
+        return VariantSelection::undefined;
+    }
+    if (!variant->applicable) {
+        return VariantSelection::not_applicable;
+    }
+
+    const auto& settings = variant->settings;
+    for (const auto& [key, value] : settings.preprocessor_definitions) {
+        configuration.preprocessor_definitions[key] = value;
+    }
+    for (const auto& [virtual_directory, real_directory] : settings.virtual_directory_mappings) {
+        configuration.virtual_directory_mappings[virtual_directory] = real_directory;
+    }
+    if (settings.language_version) {
+        configuration.language_version = settings.language_version;
+    }
+    if (settings.target_profile) {
+        configuration.target_profile = settings.target_profile;
+    }
+    if (settings.entry_point) {
+        configuration.entry_point = settings.entry_point;
+    }
+    if (settings.additional_arguments) {
+        configuration.additional_arguments = *settings.additional_arguments;
+    }
+    if (!settings.additional_include_directories.empty()) {
+        combine_include_directories(configuration.additional_include_directories,
+                                    settings.additional_include_directories);
+    }
+    if (settings.dxc_runtime_directory) {
+        configuration.dxc_runtime_directory = settings.dxc_runtime_directory;
+    }
+    return VariantSelection::applied;
 }
 
 } // namespace hlsl_intellisense::workspace

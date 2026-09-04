@@ -20,6 +20,7 @@ internal sealed class HlslLanguageClient :
     private Process serverProcess;
     private string languageVersion;
     private string dxcRuntimeDirectory;
+    private string activeVariant;
     private JsonRpc rpc;
     private readonly AsyncManualResetEvent rpcAttached = new();
     private readonly HlslCustomMessageTarget customMessageTarget;
@@ -27,10 +28,12 @@ internal sealed class HlslLanguageClient :
     internal HlslLanguageClient(
         string languageVersion,
         string dxcRuntimeDirectory,
+        string activeVariant,
         Func<string, string, Task> onRuntimeRestartRequested)
     {
         this.languageVersion = languageVersion;
         this.dxcRuntimeDirectory = dxcRuntimeDirectory ?? string.Empty;
+        this.activeVariant = activeVariant ?? string.Empty;
         customMessageTarget = new HlslCustomMessageTarget(onRuntimeRestartRequested);
     }
 
@@ -41,15 +44,22 @@ internal sealed class HlslLanguageClient :
         get { yield return "hlsl"; }
     }
 
-    public object InitializationOptions =>
-        new
+    public object InitializationOptions
+    {
+        get
         {
-            hlsl = new
+            var variant = Volatile.Read(ref activeVariant);
+            return new
             {
-                languageVersion = Volatile.Read(ref languageVersion),
-                dxcRuntimeDirectory = Volatile.Read(ref dxcRuntimeDirectory),
-            },
-        };
+                hlsl = new
+                {
+                    languageVersion = Volatile.Read(ref languageVersion),
+                    dxcRuntimeDirectory = Volatile.Read(ref dxcRuntimeDirectory),
+                    activeVariant = string.IsNullOrEmpty(variant) ? null : variant,
+                },
+            };
+        }
+    }
 
     public IEnumerable<string> FilesToWatch { get; } =
         new[] { "**/shadertoolsconfig.json" };
@@ -88,6 +98,57 @@ internal sealed class HlslLanguageClient :
                         languageVersion = value,
                     },
                 });
+    }
+
+    // The active variant is remembered so it is reapplied through
+    // InitializationOptions after a runtime restart. Changing it only notifies the
+    // server, which reanalyzes open documents rather than restarting.
+    internal Task UpdateActiveVariantAsync(string variant)
+    {
+        var value = variant ?? string.Empty;
+        Volatile.Write(ref activeVariant, value);
+        var currentRpc = Volatile.Read(ref rpc);
+        return currentRpc == null
+            ? Task.CompletedTask
+            : currentRpc.NotifyAsync(
+                "hlsl/didChangeActiveVariant",
+                new
+                {
+                    variant = value.Length == 0 ? null : value,
+                });
+    }
+
+    internal string ActiveVariant => Volatile.Read(ref activeVariant);
+
+    internal async Task<VariantListModel> GetVariantsAsync(
+        Uri documentUri,
+        CancellationToken cancellationToken)
+    {
+        var currentRpc = Volatile.Read(ref rpc);
+        if (currentRpc == null)
+        {
+            await rpcAttached.WaitAsync(cancellationToken).ConfigureAwait(false);
+            currentRpc = Volatile.Read(ref rpc);
+            if (currentRpc == null)
+            {
+                throw new InvalidOperationException(
+                    "The HLSL language server connection is unavailable.");
+            }
+        }
+        var parameters = documentUri == null
+            ? (object)new { }
+            : new
+            {
+                textDocument = new
+                {
+                    uri = documentUri.AbsoluteUri,
+                },
+            };
+        return await currentRpc.InvokeWithParameterObjectAsync<VariantListModel>(
+                "hlsl/variants",
+                parameters,
+                cancellationToken)
+            .ConfigureAwait(false);
     }
 
     internal string RuntimeDirectory => Volatile.Read(ref dxcRuntimeDirectory);

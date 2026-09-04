@@ -41,6 +41,14 @@ to set:
 Changes apply to open and future documents. Shutdown never waits for a failed
 LSP broker operation and bounds child-process cleanup.
 
+When a `shadertoolsconfig.json` declares named compilation variants under
+`hlsl.variants`, run **Tools > HLSL Select Shader Variant** to pick the active
+variant for the current document. Changing the active variant reanalyzes open
+documents and restarts the language server only if the variant selects a
+different DXC runtime. See the repository's
+[named compilation variants](../../docs/shadertoolsconfig.md#named-compilation-variants)
+reference for details.
+
 ## Install
 
 Download `HlslLsp.VisualStudio.vsix` from the

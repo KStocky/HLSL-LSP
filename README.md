@@ -14,6 +14,7 @@ with:
 - DXC-backed semantic colouring and go-to-definition for symbols and include paths
 - Workspace symbol support for Visual Studio's All-In-One Search
 - Hierarchical `shadertoolsconfig.json` compiler configuration
+- Named compilation variants selectable per document from either editor
 - Selectable DXC runtime: the bundled default or an explicit compatible runtime
 - Transitive, virtual, open-buffer, and dependency-aware include handling
 - Bounded, cancellable, version-coalesced background analysis
@@ -329,6 +330,16 @@ process, the selection is process-wide, is validated before a controlled
 restart, and reports invalid or conflicting choices without looping. See the
 [DXC runtime selection](docs/shadertoolsconfig.md#dxc-runtime-selection) section
 for precedence, workspace-relative paths, and diagnostics.
+
+A shader file can also declare named compilation variants under `hlsl.variants`,
+combining an entry point, stage/target profile, macros, and platform settings
+with deterministic inheritance and per-file applicability. Select the active
+variant with **HLSL: Select Shader Variant** in Visual Studio Code (or the
+`hlsl.activeVariant` setting) or **Tools > HLSL Select Shader Variant** in Visual
+Studio. Changing the active variant reanalyzes open documents, restarting only
+when the variant selects a different DXC runtime. See
+[Named compilation variants](docs/shadertoolsconfig.md#named-compilation-variants)
+for the schema, inheritance, and reporting of invalid or conflicting variants.
 
 ## License
 

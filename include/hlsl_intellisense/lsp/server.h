@@ -87,6 +87,7 @@ class Server final {
     [[nodiscard]] json_rpc::Json semantic_tokens(const std::optional<json_rpc::Json>& params,
                                                  const json_rpc::RequestContext& context);
     [[nodiscard]] json_rpc::Json dxc_runtime(const std::optional<json_rpc::Json>& params);
+    [[nodiscard]] json_rpc::Json variants(const std::optional<json_rpc::Json>& params);
     void initialized(const std::optional<json_rpc::Json>& params);
     void did_open(const std::optional<json_rpc::Json>& params);
     void did_change(const std::optional<json_rpc::Json>& params);
@@ -94,6 +95,7 @@ class Server final {
     void did_close(const std::optional<json_rpc::Json>& params);
     void did_change_configuration(const std::optional<json_rpc::Json>& params);
     void did_change_client_defaults(const std::optional<json_rpc::Json>& params);
+    void did_change_active_variant(const std::optional<json_rpc::Json>& params);
     void did_change_workspace_folders(const std::optional<json_rpc::Json>& params);
     void did_change_watched_files(const std::optional<json_rpc::Json>& params);
     void exit(const std::optional<json_rpc::Json>& params);
@@ -105,6 +107,11 @@ class Server final {
     // triggers a single controlled-restart request; invalid or conflicting
     // selections are reported without a restart so no restart loop can form.
     void reevaluate_runtime_selection();
+    // Checks whether the active variant is defined, applicable, and free of
+    // schema errors for the open documents. Problems surface as a single
+    // deduplicated window/showMessage; a variant change reanalyzes rather than
+    // restarts, so this never triggers a restart on its own.
+    void reevaluate_variant_selection();
     [[nodiscard]] std::string loaded_runtime_directory() const;
     void analysis_completed(const workspace::SourceSnapshot& snapshot,
                             const std::vector<dxc::Diagnostic>& diagnostics,
@@ -124,6 +131,10 @@ class Server final {
     std::unordered_map<std::string, std::filesystem::path> workspace_folders_;
     workspace::ConfigurationOverrides editor_settings_;
     std::optional<std::string> client_default_language_version_;
+    // The compilation variant the editor has selected as active, applied to each
+    // open document for which it is defined and applicable. Empty selects the
+    // file-derived configuration with no variant.
+    std::optional<std::string> active_variant_;
     NotificationSender sender_;
     Logger logger_;
     ServerOptions options_;
@@ -136,6 +147,9 @@ class Server final {
     // already reported, both stored as normalized comparison keys.
     std::optional<std::string> requested_runtime_key_;
     std::optional<std::string> reported_runtime_issue_key_;
+    // The variant problem already reported, so an unchanged issue is not shown
+    // repeatedly on every reanalysis or configuration event.
+    std::optional<std::string> reported_variant_issue_key_;
     std::atomic_bool exit_requested_{};
     bool clean_shutdown_{};
 };

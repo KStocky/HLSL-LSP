@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   ConfigurationInspection,
   ConfigurationReader,
+  readActiveVariant,
   readDefaultLanguageVersion,
   readServerSettings,
 } from "../../src/configuration";
@@ -62,4 +63,13 @@ void test("resource and language-specific settings follow VS Code precedence", (
   assert.deepEqual(readServerSettings(reader), {
     targetProfile: "cs_6_8",
   });
+});
+
+void test("active variant is empty when unset and trimmed when set", () => {
+  const unset = new FakeConfiguration();
+  assert.equal(readActiveVariant(unset), "");
+
+  const set = new FakeConfiguration();
+  set.values.set("activeVariant", "  Debug  ");
+  assert.equal(readActiveVariant(set), "Debug");
 });

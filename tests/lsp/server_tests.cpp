@@ -2074,3 +2074,244 @@ TEST_CASE("Server reports the bundled DXC runtime through hlsl/dxcRuntime",
     CHECK_FALSE(response->result["version"].get<std::string>().empty());
     CHECK_FALSE(response->result["libraryPath"].get<std::string>().empty());
 }
+
+namespace {
+
+void write_variant_config(const TestDirectory& directory) {
+    std::ofstream config{directory.path() / "shadertoolsconfig.json"};
+    REQUIRE(config);
+    config << R"({
+        "root": true,
+        "hlsl.variantsVersion": 1,
+        "hlsl.variants": [
+            { "name": "Alpha", "description": "Alpha permutation",
+              "hlsl.preprocessorDefinitions": { "VARIANT_ALPHA": 1 } },
+            { "name": "Beta",
+              "hlsl.preprocessorDefinitions": { "VARIANT_BETA": 1 } }
+        ]
+    })";
+    REQUIRE(config);
+}
+
+[[nodiscard]] std::string variant_shader() {
+    // Each branch references a distinct undeclared identifier, so DXC reports a
+    // recoverable "undeclared identifier" diagnostic that names the active
+    // variant's macro. Unlike a fatal #error combined with an entry point, this
+    // keeps the IntelliSense translation unit analyzable.
+    return "float4 Main() : SV_Target {\n"
+           "#if defined(VARIANT_ALPHA)\n    return marker_alpha;\n"
+           "#elif defined(VARIANT_BETA)\n    return marker_beta;\n"
+           "#else\n    return marker_none;\n#endif\n"
+           "}\n";
+}
+
+[[nodiscard]] std::vector<std::string>
+last_diagnostics(const std::vector<hlsl_intellisense::json_rpc::Notification>& items,
+                 std::string_view uri) {
+    std::vector<std::string> messages;
+    for (const auto& item : items) {
+        if (item.method == "textDocument/publishDiagnostics" && item.params &&
+            item.params->value("uri", std::string{}) == uri) {
+            messages.clear();
+            for (const auto& diagnostic : item.params->value("diagnostics", Json::array())) {
+                messages.push_back(diagnostic.value("message", std::string{}));
+            }
+        }
+    }
+    return messages;
+}
+
+[[nodiscard]] bool mentions(const std::vector<std::string>& messages, std::string_view marker) {
+    return std::ranges::any_of(messages, [marker](const std::string& message) {
+        return message.find(marker) != std::string::npos;
+    });
+}
+
+} // namespace
+
+TEST_CASE("Server applies and reanalyzes shader variants on an unsaved buffer",
+          "[lsp][variants][integration]") {
+    TestDirectory directory;
+    write_variant_config(directory);
+    const auto document = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "variant.hlsl").string());
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    hlsl_intellisense::lsp::Server server{
+        [&notifications](const auto& value) { notifications.push_back(value); }};
+
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(
+        hlsl_intellisense::json_rpc::Notification{.method = "textDocument/didOpen",
+                                                  .params = Json{{"textDocument",
+                                                                  {{"uri", document.uri()},
+                                                                   {"languageId", "hlsl"},
+                                                                   {"version", 1},
+                                                                   {"text", variant_shader()}}}}}));
+    CHECK(mentions(last_diagnostics(notifications, document.uri()), "marker_none"));
+
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "hlsl/didChangeActiveVariant", .params = Json{{"variant", "Alpha"}}}));
+    CHECK(mentions(last_diagnostics(notifications, document.uri()), "marker_alpha"));
+
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "hlsl/didChangeActiveVariant", .params = Json{{"variant", "Beta"}}}));
+    CHECK(mentions(last_diagnostics(notifications, document.uri()), "marker_beta"));
+
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "hlsl/didChangeActiveVariant", .params = Json{{"variant", Json()}}}));
+    CHECK(mentions(last_diagnostics(notifications, document.uri()), "marker_none"));
+}
+
+TEST_CASE("Server honors an initial active variant from initializationOptions",
+          "[lsp][variants][integration]") {
+    TestDirectory directory;
+    write_variant_config(directory);
+    const auto document = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "variant.hlsl").string());
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    hlsl_intellisense::lsp::Server server{
+        [&notifications](const auto& value) { notifications.push_back(value); }};
+
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1},
+        .method = "initialize",
+        .params = Json{{"initializationOptions", {{"hlsl", {{"activeVariant", "Alpha"}}}}}}}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(
+        hlsl_intellisense::json_rpc::Notification{.method = "textDocument/didOpen",
+                                                  .params = Json{{"textDocument",
+                                                                  {{"uri", document.uri()},
+                                                                   {"languageId", "hlsl"},
+                                                                   {"version", 1},
+                                                                   {"text", variant_shader()}}}}}));
+    CHECK(mentions(last_diagnostics(notifications, document.uri()), "marker_alpha"));
+}
+
+TEST_CASE("Server reports an invalid variant selection without applying it",
+          "[lsp][variants][integration]") {
+    TestDirectory directory;
+    write_variant_config(directory);
+    const auto document = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "variant.hlsl").string());
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    hlsl_intellisense::lsp::Server server{
+        [&notifications](const auto& value) { notifications.push_back(value); }};
+
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(
+        hlsl_intellisense::json_rpc::Notification{.method = "textDocument/didOpen",
+                                                  .params = Json{{"textDocument",
+                                                                  {{"uri", document.uri()},
+                                                                   {"languageId", "hlsl"},
+                                                                   {"version", 1},
+                                                                   {"text", variant_shader()}}}}}));
+
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "hlsl/didChangeActiveVariant", .params = Json{{"variant", "Ghost"}}}));
+    const auto* message = find_last(notifications, "window/showMessage");
+    REQUIRE(message != nullptr);
+    CHECK((*message->params)["type"] == 2);
+    // The unknown variant is not applied, so the document keeps its default macros.
+    CHECK(mentions(last_diagnostics(notifications, document.uri()), "marker_none"));
+
+    // The same unresolved selection must not be reported repeatedly.
+    static_cast<void>(server.handle(
+        hlsl_intellisense::json_rpc::Notification{.method = "workspace/didChangeConfiguration",
+                                                  .params = Json{{"settings", Json::object()}}}));
+    CHECK(count_method(notifications, "window/showMessage") == 1);
+}
+
+TEST_CASE("Server lists shader variants through hlsl/variants", "[lsp][variants][integration]") {
+    TestDirectory directory;
+    write_variant_config(directory);
+    const auto document = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "variant.hlsl").string());
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    hlsl_intellisense::lsp::Server server{
+        [&notifications](const auto& value) { notifications.push_back(value); }};
+
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(
+        hlsl_intellisense::json_rpc::Notification{.method = "textDocument/didOpen",
+                                                  .params = Json{{"textDocument",
+                                                                  {{"uri", document.uri()},
+                                                                   {"languageId", "hlsl"},
+                                                                   {"version", 1},
+                                                                   {"text", variant_shader()}}}}}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "hlsl/didChangeActiveVariant", .params = Json{{"variant", "Alpha"}}}));
+
+    const auto response = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{2},
+        .method = "hlsl/variants",
+        .params = Json{{"textDocument", {{"uri", document.uri()}}}}});
+    REQUIRE(response.has_value());
+    const auto* result = std::get_if<hlsl_intellisense::json_rpc::Response>(&*response);
+    REQUIRE(result != nullptr);
+    CHECK(result->result["activeVariant"] == "Alpha");
+    const auto& variants = result->result["variants"];
+    REQUIRE(variants.size() == 2);
+    bool found_alpha = false;
+    bool found_beta = false;
+    for (const auto& variant : variants) {
+        if (variant["name"] == "Alpha") {
+            found_alpha = true;
+            CHECK(variant["applicable"] == true);
+            CHECK(variant["description"] == "Alpha permutation");
+        }
+        if (variant["name"] == "Beta") {
+            found_beta = true;
+        }
+    }
+    CHECK(found_alpha);
+    CHECK(found_beta);
+}
+
+TEST_CASE("A variant DXC runtime selection triggers a controlled restart",
+          "[lsp][variants][runtime][integration]") {
+    TestDirectory directory;
+    {
+        std::ofstream config{directory.path() / "shadertoolsconfig.json"};
+        REQUIRE(config);
+        config
+            << R"({"root":true,"hlsl.variantsVersion":1,"hlsl.variants":[{"name":"Custom","hlsl.dxcRuntimeDirectory":")"
+            << runtime_json_path(HLSL_TEST_DXC_RUNTIME_DIR) << R"("}]})";
+        REQUIRE(config);
+    }
+    const auto document = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "shader.hlsl").string());
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    hlsl_intellisense::lsp::Server server{
+        [&notifications](const auto& value) { notifications.push_back(value); }};
+
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(
+        hlsl_intellisense::json_rpc::Notification{.method = "textDocument/didOpen",
+                                                  .params = Json{{"textDocument",
+                                                                  {{"uri", document.uri()},
+                                                                   {"languageId", "hlsl"},
+                                                                   {"version", 1},
+                                                                   {"text", valid_hlsl()}}}}}));
+    CHECK(count_method(notifications, "hlsl/dxcRuntimeRestartRequired") == 0);
+
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "hlsl/didChangeActiveVariant", .params = Json{{"variant", "Custom"}}}));
+    REQUIRE(count_method(notifications, "hlsl/dxcRuntimeRestartRequired") == 1);
+    const auto* restart = find_last(notifications, "hlsl/dxcRuntimeRestartRequired");
+    REQUIRE(restart != nullptr);
+    CHECK(std::filesystem::equivalent((*restart->params)["directory"].get<std::string>(),
+                                      HLSL_TEST_DXC_RUNTIME_DIR));
+}

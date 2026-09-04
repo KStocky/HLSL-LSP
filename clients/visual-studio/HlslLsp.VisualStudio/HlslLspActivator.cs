@@ -49,6 +49,7 @@ public sealed class HlslLspActivator :
     private bool servicesReady;
     private string workspaceRuntimeDirectory = string.Empty;
     private string lastRuntimeDirectory = string.Empty;
+    private string workspaceActiveVariant = string.Empty;
 
     private HlslLspActivator(
         HlslBootstrapPackage host,
@@ -147,8 +148,12 @@ public sealed class HlslLspActivator :
         languageClient = new HlslLanguageClient(
             initialOptions.LanguageVersion,
             lastRuntimeDirectory,
+            workspaceActiveVariant,
             OnServerRuntimeRestartRequestedAsync);
         MemoryLayoutBridge.Register(languageClient.GetMemoryLayoutAsync);
+        VariantBridge.Register(
+            languageClient.GetVariantsAsync,
+            OnActiveVariantSelectedAsync);
         await broker.LoadAsync(new HlslLanguageClientMetadata(), languageClient);
 
         navigationBars = new HlslNavigationBarManager(
@@ -334,6 +339,21 @@ public sealed class HlslLspActivator :
             })
             .FileAndForget("HlslLsp/RuntimeRestart");
         return Task.CompletedTask;
+    }
+
+    // Persists the workspace's active variant so it survives a controlled runtime
+    // restart, then notifies the running server. A variant change reanalyzes open
+    // documents rather than restarting.
+    private Task OnActiveVariantSelectedAsync(
+        string variant,
+        CancellationToken cancellationToken)
+    {
+        _ = cancellationToken;
+        workspaceActiveVariant = variant ?? string.Empty;
+        var client = languageClient;
+        return client == null
+            ? Task.CompletedTask
+            : client.UpdateActiveVariantAsync(workspaceActiveVariant);
     }
 
     private HlslOptionsSnapshot GetOptions()
