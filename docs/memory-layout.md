@@ -47,6 +47,7 @@ declaration. Otherwise the result has this shape:
       "kind": "vector",
       "offset": 0,
       "size": 12,
+      "allocationSize": 12,
       "alignment": 4,
       "paddingBefore": 0,
       "members": []
@@ -57,7 +58,10 @@ declaration. Otherwise the result has this shape:
 
 `mode` is `natural` for structure layouts and `constantBuffer` for cbuffers.
 Every recursive member contains `name`, `type`, `kind`, `offset`, `size`,
-`alignment`, `paddingBefore`, and `members`. Expanded array elements may
+`alignment`, `allocationSize`, `paddingBefore`, and `members`. `size` is the
+value or aggregate extent; `allocationSize` is the byte span reserved for that
+entry, so a 2-byte `int16_t` array element with a 16-byte stride reports
+`size: 2` and `allocationSize: 16`. Expanded array elements may
 additionally contain a nonnegative `arrayIndex`. Array parents expose
 `arrayStride` and `arrayDimensions`; matrix parents expose `matrixStride` and
 `rowMajor`. Editor diagrams qualify leaf labels with their complete hierarchy,
@@ -102,6 +106,11 @@ Constant-buffer layouts additionally apply these rules:
   enclosing member still begins on the next 16-byte row.
 - `size` ends at the final cbuffer member; `allocationSize` includes padding
   through the final 16-byte row.
+
+Editor diagrams render occupied values separately from padding. Hatched blocks
+mark padding inside an array element or matrix vector, warning-coloured blocks
+mark gaps between members, and subdued blocks mark trailing aggregate padding.
+These spans partition the compiler-reported allocation without overlaps.
 
 ## Supported syntax and limitations
 

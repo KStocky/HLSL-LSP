@@ -15,9 +15,9 @@ public sealed class MemoryLayoutModel
 
     public long Size { get; set; }
 
-    public long Alignment { get; set; }
-
     public long AllocationSize { get; set; }
+
+    public long Alignment { get; set; }
 
     public IReadOnlyList<MemoryLayoutMemberModel> Members { get; set; } =
         Array.Empty<MemoryLayoutMemberModel>();
@@ -37,6 +37,8 @@ public sealed class MemoryLayoutMemberModel
     public long Offset { get; set; }
 
     public long Size { get; set; }
+
+    public long AllocationSize { get; set; }
 
     public long Alignment { get; set; }
 

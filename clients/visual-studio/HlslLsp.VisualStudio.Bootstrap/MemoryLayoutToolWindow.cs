@@ -96,7 +96,13 @@ internal sealed class MemoryLayoutControl : UserControl
     {
         const int bytesPerRow = 16;
         const double pixelsPerByte = 34;
-        var segments = Flatten(layout.Members ?? Array.Empty<MemoryLayoutMemberModel>(), 0, 0, null)
+        var segments = Flatten(
+                layout.Members ?? Array.Empty<MemoryLayoutMemberModel>(),
+                0,
+                0,
+                null,
+                string.Empty,
+                layout.AllocationSize)
             .ToArray();
         var total = Math.Max(bytesPerRow, Math.Max(layout.Size, layout.AllocationSize));
         var rows = (int)((total + bytesPerRow - 1) / bytesPerRow);
@@ -143,9 +149,14 @@ internal sealed class MemoryLayoutControl : UserControl
                 var segmentEnd = Math.Min(segment.Offset + segment.Size, start + bytesPerRow);
                 var border = new Border
                 {
-                    BorderBrush = MemberBrushes[segment.Depth % MemberBrushes.Length],
-                    BorderThickness = new Thickness(2),
-                    Background = new SolidColorBrush(Color.FromArgb(35, 128, 128, 128)),
+                    BorderBrush = segment.IsPadding
+                        ? Brushes.Gray
+                        : MemberBrushes[segment.Depth % MemberBrushes.Length],
+                    BorderThickness = new Thickness(segment.IsPadding ? 1 : 2),
+                    Background = new SolidColorBrush(
+                        segment.IsPadding
+                            ? Color.FromArgb(22, 128, 128, 128)
+                            : Color.FromArgb(35, 128, 128, 128)),
                     Width = Math.Max(2, (segmentEnd - segmentStart) * pixelsPerByte),
                     Height = 38,
                     ToolTip = $"{segment.Name}: offset {segment.Offset}, {segment.Size} bytes",
@@ -236,11 +247,24 @@ internal sealed class MemoryLayoutControl : UserControl
         long baseOffset,
         int depth,
         MemoryLayoutMemberModel parent,
-        string parentName = "")
+        string parentName,
+        long extent)
     {
+        long previousEnd = 0;
         foreach (var member in members)
         {
             var offset = baseOffset + member.Offset;
+            if (member.Offset > previousEnd)
+            {
+                var internalPadding = string.Equals(parent?.Kind, "array", StringComparison.Ordinal)
+                    || string.Equals(parent?.Kind, "matrix", StringComparison.Ordinal);
+                yield return new LayoutSegment(
+                    internalPadding ? "internal padding" : "inter-member padding",
+                    baseOffset + previousEnd,
+                    member.Offset - previousEnd,
+                    depth,
+                    true);
+            }
             var name = MemoryLayoutDisplayName.Qualify(
                 parentName,
                 member.Name,
@@ -248,13 +272,40 @@ internal sealed class MemoryLayoutControl : UserControl
                 parent?.RowMajor == true);
             if (member.Members == null || member.Members.Count == 0)
             {
-                yield return new LayoutSegment(name, offset, member.Size, depth);
-                continue;
+                yield return new LayoutSegment(name, offset, member.Size, depth, false);
+                if (member.AllocationSize > member.Size)
+                {
+                    yield return new LayoutSegment(
+                        "internal padding",
+                        offset + member.Size,
+                        member.AllocationSize - member.Size,
+                        depth + 1,
+                        true);
+                }
             }
-            foreach (var nested in Flatten(member.Members, offset, depth + 1, member, name))
+            else
             {
-                yield return nested;
+                foreach (var nested in Flatten(
+                             member.Members,
+                             offset,
+                             depth + 1,
+                             member,
+                             name,
+                             member.AllocationSize))
+                {
+                    yield return nested;
+                }
             }
+            previousEnd = Math.Max(previousEnd, member.Offset + member.AllocationSize);
+        }
+        if (extent > previousEnd)
+        {
+            yield return new LayoutSegment(
+                "trailing padding",
+                baseOffset + previousEnd,
+                extent - previousEnd,
+                depth,
+                true);
         }
     }
 
@@ -265,12 +316,13 @@ internal sealed class MemoryLayoutControl : UserControl
 
     private sealed class LayoutSegment
     {
-        internal LayoutSegment(string name, long offset, long size, int depth)
+        internal LayoutSegment(string name, long offset, long size, int depth, bool isPadding)
         {
             Name = name;
             Offset = offset;
             Size = size;
             Depth = depth;
+            IsPadding = isPadding;
         }
 
         internal string Name { get; }
@@ -280,5 +332,7 @@ internal sealed class MemoryLayoutControl : UserControl
         internal long Size { get; }
 
         internal int Depth { get; }
+
+        internal bool IsPadding { get; }
     }
 }

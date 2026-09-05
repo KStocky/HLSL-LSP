@@ -161,6 +161,7 @@ struct MemoryLayoutElement {
     MemoryLayoutElementKind kind{MemoryLayoutElementKind::scalar};
     std::uint32_t offset{};
     std::uint32_t size{};
+    std::uint32_t allocation_size{};
     std::uint32_t alignment{};
     std::uint32_t array_stride{};
     std::uint32_t matrix_stride{};

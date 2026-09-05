@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { memoryLayoutHtml } from "../../src/memoryLayout";
+import {
+  type MemoryLayout,
+  memoryLayoutHtml,
+  memoryLayoutSegments,
+} from "../../src/memoryLayout";
 
 void test("memory layout HTML renders nested offsets and escapes source names", () => {
   const html = memoryLayoutHtml({
@@ -19,6 +23,7 @@ void test("memory layout HTML renders nested offsets and escapes source names", 
         kind: "record",
         offset: 16,
         size: 4,
+        allocationSize: 4,
         alignment: 4,
         paddingBefore: 12,
         members: [
@@ -28,6 +33,7 @@ void test("memory layout HTML renders nested offsets and escapes source names", 
             kind: "scalar",
             offset: 0,
             size: 4,
+            allocationSize: 4,
             alignment: 4,
             paddingBefore: 0,
             members: [],
@@ -45,7 +51,7 @@ void test("memory layout HTML renders nested offsets and escapes source names", 
 });
 
 void test("memory layout diagram qualifies expanded aggregate members", () => {
-  const html = memoryLayoutHtml({
+  const layout: MemoryLayout = {
     name: "Constants",
     type: "cbuffer",
     mode: "constantBuffer",
@@ -60,6 +66,7 @@ void test("memory layout diagram qualifies expanded aggregate members", () => {
         kind: "array",
         offset: 0,
         size: 32,
+        allocationSize: 32,
         alignment: 16,
         paddingBefore: 0,
         arrayStride: 16,
@@ -71,6 +78,7 @@ void test("memory layout diagram qualifies expanded aggregate members", () => {
             kind: "scalar",
             offset: 0,
             size: 4,
+            allocationSize: 16,
             alignment: 4,
             paddingBefore: 0,
             arrayIndex: 0,
@@ -82,6 +90,7 @@ void test("memory layout diagram qualifies expanded aggregate members", () => {
             kind: "scalar",
             offset: 16,
             size: 4,
+            allocationSize: 16,
             alignment: 4,
             paddingBefore: 12,
             arrayIndex: 1,
@@ -95,6 +104,7 @@ void test("memory layout diagram qualifies expanded aggregate members", () => {
         kind: "matrix",
         offset: 32,
         size: 32,
+        allocationSize: 32,
         alignment: 16,
         paddingBefore: 0,
         matrixStride: 16,
@@ -106,6 +116,7 @@ void test("memory layout diagram qualifies expanded aggregate members", () => {
             kind: "vector",
             offset: 0,
             size: 8,
+            allocationSize: 16,
             alignment: 4,
             paddingBefore: 0,
             arrayIndex: 0,
@@ -117,6 +128,7 @@ void test("memory layout diagram qualifies expanded aggregate members", () => {
             kind: "vector",
             offset: 16,
             size: 8,
+            allocationSize: 16,
             alignment: 4,
             paddingBefore: 8,
             arrayIndex: 1,
@@ -130,6 +142,7 @@ void test("memory layout diagram qualifies expanded aggregate members", () => {
         kind: "array",
         offset: 64,
         size: 16,
+        allocationSize: 16,
         alignment: 16,
         paddingBefore: 0,
         arrayStride: 16,
@@ -141,6 +154,7 @@ void test("memory layout diagram qualifies expanded aggregate members", () => {
             kind: "record",
             offset: 0,
             size: 16,
+            allocationSize: 16,
             alignment: 16,
             paddingBefore: 0,
             arrayIndex: 0,
@@ -151,6 +165,7 @@ void test("memory layout diagram qualifies expanded aggregate members", () => {
                 kind: "record",
                 offset: 0,
                 size: 4,
+                allocationSize: 4,
                 alignment: 4,
                 paddingBefore: 0,
                 members: [
@@ -160,6 +175,7 @@ void test("memory layout diagram qualifies expanded aggregate members", () => {
                     kind: "scalar",
                     offset: 0,
                     size: 4,
+                    allocationSize: 4,
                     alignment: 4,
                     paddingBefore: 0,
                     members: [],
@@ -171,11 +187,83 @@ void test("memory layout diagram qualifies expanded aggregate members", () => {
         ],
       },
     ],
-  });
+  };
+  const html = memoryLayoutHtml(layout);
 
   assert.match(html, /values\[0\]: offset 0/);
   assert.match(html, /values\[1\]: offset 16/);
   assert.match(html, /transform\.row\[0\]: offset 32/);
   assert.match(html, /transform\.row\[1\]: offset 48/);
   assert.match(html, /items\[0\]\.material\.colour: offset 64/);
+
+  const segments = memoryLayoutSegments(layout).sort(
+    (left, right) => left.offset - right.offset,
+  );
+  let nextOffset = 0;
+  for (const segment of segments) {
+    assert.equal(segment.offset, nextOffset);
+    assert.ok(segment.size > 0);
+    nextOffset += segment.size;
+  }
+  assert.equal(nextOffset, layout.allocationSize);
+  assert.ok(segments.some((segment) => segment.kind === "trailing-padding"));
+});
+
+void test("memory layout spans cover native 16-bit array allocation exactly", () => {
+  const segments = memoryLayoutSegments({
+    name: "Constants",
+    type: "cbuffer",
+    mode: "constantBuffer",
+    size: 80,
+    alignment: 16,
+    allocationSize: 80,
+    diagnostics: [],
+    members: [
+      {
+        name: "values",
+        type: "int16_t",
+        kind: "array",
+        offset: 0,
+        size: 80,
+        allocationSize: 80,
+        alignment: 16,
+        paddingBefore: 0,
+        arrayStride: 16,
+        arrayDimensions: [5],
+        members: Array.from({ length: 5 }, (_, index) => ({
+          name: `[${String(index)}]`,
+          type: "int16_t",
+          kind: "scalar" as const,
+          offset: index * 16,
+          size: 2,
+          allocationSize: 16,
+          alignment: 2,
+          paddingBefore: index === 0 ? 0 : 14,
+          arrayIndex: index,
+          members: [],
+        })),
+      },
+    ],
+  }).sort((left, right) => left.offset - right.offset);
+
+  assert.equal(segments.length, 10);
+  let nextOffset = 0;
+  for (const segment of segments) {
+    assert.equal(segment.offset, nextOffset);
+    assert.ok(segment.size > 0);
+    nextOffset += segment.size;
+  }
+  assert.equal(nextOffset, 80);
+  assert.equal(
+    segments
+      .filter((segment) => segment.kind === "value")
+      .reduce((total, segment) => total + segment.size, 0),
+    10,
+  );
+  assert.equal(
+    segments
+      .filter((segment) => segment.kind === "internal-padding")
+      .reduce((total, segment) => total + segment.size, 0),
+    70,
+  );
 });
