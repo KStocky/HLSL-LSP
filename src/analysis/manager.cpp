@@ -630,6 +630,17 @@ Manager::memory_layout(std::string root_identity, std::int64_t version, std::str
         });
 }
 
+dxc::CompilationInfo Manager::compilation_info(std::string root_identity, std::int64_t version,
+                                               std::string path,
+                                               const json_rpc::CancellationToken& cancellation) {
+    return implementation_->query<dxc::CompilationInfo>(
+        std::move(root_identity), version, cancellation,
+        [requested_path = std::move(path)](Impl::Entry& entry) {
+            static_cast<void>(requested_path);
+            return entry.translation_unit.compilation_info();
+        });
+}
+
 std::vector<dxc::Signature> Manager::signatures(std::string root_identity, std::int64_t version,
                                                 std::string path, std::uint32_t line,
                                                 std::uint32_t column,

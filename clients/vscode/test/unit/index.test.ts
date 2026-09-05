@@ -1,3 +1,4 @@
+import "./compilationInfo.test";
 import "./configuration.test";
 import "./lifecycle.test";
 import "./memoryLayout.test";

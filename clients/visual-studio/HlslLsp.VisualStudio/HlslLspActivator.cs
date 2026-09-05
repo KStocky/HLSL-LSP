@@ -21,7 +21,8 @@ namespace HlslLsp.VisualStudio;
 public sealed class HlslLspActivator :
     IVsSolutionEvents,
     IVsSolutionEvents7,
-    IVsSelectionEvents
+    IVsSelectionEvents,
+    IVsRunningDocTableEvents
 {
     private readonly HlslBootstrapPackage host;
     private readonly JoinableTaskFactory joinableTaskFactory;
@@ -125,6 +126,8 @@ public sealed class HlslLspActivator :
             throw new InvalidOperationException(
                 "Visual Studio's running document table is unavailable.");
         }
+        ErrorHandler.ThrowOnFailure(
+            runningDocuments.AdviseRunningDocTableEvents(this, out _));
         ApplyFileExtensions(GetOptions().FileExtensions);
         nativeShaderContentType = contentTypes.GetContentType("HLSL")
             ?? throw new InvalidOperationException(
@@ -151,6 +154,7 @@ public sealed class HlslLspActivator :
             workspaceActiveVariant,
             OnServerRuntimeRestartRequestedAsync);
         MemoryLayoutBridge.Register(languageClient.GetMemoryLayoutAsync);
+        CompilationInfoBridge.Register(languageClient.GetCompilationInfoAsync);
         VariantBridge.Register(
             languageClient.GetVariantsAsync,
             OnActiveVariantSelectedAsync);
@@ -344,17 +348,95 @@ public sealed class HlslLspActivator :
     // Persists the workspace's active variant so it survives a controlled runtime
     // restart, then notifies the running server. A variant change reanalyzes open
     // documents rather than restarting.
-    private Task OnActiveVariantSelectedAsync(
+    private async Task OnActiveVariantSelectedAsync(
         string variant,
         CancellationToken cancellationToken)
     {
-        _ = cancellationToken;
         workspaceActiveVariant = variant ?? string.Empty;
         var client = languageClient;
-        return client == null
-            ? Task.CompletedTask
-            : client.UpdateActiveVariantAsync(workspaceActiveVariant);
+        if (client == null)
+        {
+            return;
+        }
+        // The refresh below must observe the server's new active variant, so
+        // it is only scheduled after the notification is awaited. Awaiting
+        // (rather than returning the task, as before) preserves the same
+        // error-propagation behavior for a failed notification while adding
+        // that ordering guarantee.
+        await client.UpdateActiveVariantAsync(workspaceActiveVariant);
+        // A previously opened Shader Compilation window can only become stale
+        // through this variant change (the server itself is not restarted),
+        // so refresh it here rather than waiting for the next manual
+        // invocation of the Tools command.
+        joinableTaskFactory.RunAsync(
+                () => host.RefreshCompilationInfoIfOpenAsync(null, cancellationToken))
+            .FileAndForget("HlslLsp/RefreshCompilationInfo");
     }
+
+    // A saved HLSL document may change what the server would compile, so a
+    // currently open Shader Compilation window is refreshed if it is showing
+    // that same document. Unrelated saves are filtered out inside
+    // RefreshCompilationInfoIfOpenAsync to avoid unnecessary requests.
+    public int OnAfterSave(uint docCookie)
+    {
+        if (runningDocuments == null)
+        {
+            return VSConstants.S_OK;
+        }
+        if (ErrorHandler.Failed(
+                runningDocuments.GetDocumentInfo(
+                    docCookie,
+                    out _,
+                    out _,
+                    out _,
+                    out var moniker,
+                    out _,
+                    out _,
+                    out var documentData)))
+        {
+            return VSConstants.S_OK;
+        }
+        try
+        {
+            if (string.IsNullOrEmpty(moniker))
+            {
+                return VSConstants.S_OK;
+            }
+            joinableTaskFactory.RunAsync(
+                    () => host.RefreshCompilationInfoIfOpenAsync(moniker, disposalToken))
+                .FileAndForget("HlslLsp/RefreshCompilationInfoOnSave");
+            return VSConstants.S_OK;
+        }
+        finally
+        {
+            if (documentData != IntPtr.Zero)
+            {
+                Marshal.Release(documentData);
+            }
+        }
+    }
+
+    public int OnAfterFirstDocumentLock(
+        uint docCookie,
+        uint lockType,
+        uint readLocksRemaining,
+        uint editLocksRemaining) => VSConstants.S_OK;
+
+    public int OnBeforeLastDocumentUnlock(
+        uint docCookie,
+        uint lockType,
+        uint readLocksRemaining,
+        uint editLocksRemaining) => VSConstants.S_OK;
+
+    public int OnAfterAttributeChange(uint docCookie, uint grfAttribs) => VSConstants.S_OK;
+
+    public int OnBeforeDocumentWindowShow(
+        uint docCookie,
+        int firstShow,
+        IVsWindowFrame frame) => VSConstants.S_OK;
+
+    public int OnAfterDocumentWindowHide(uint docCookie, IVsWindowFrame frame) =>
+        VSConstants.S_OK;
 
     private HlslOptionsSnapshot GetOptions()
     {

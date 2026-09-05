@@ -20,6 +20,7 @@ namespace HlslLsp.VisualStudio.Bootstrap;
 [ProvideSettingsManifest(PackageRelativeManifestFile = "HlslLsp.registration.json")]
 [ProvideMenuResource("Menus.ctmenu", 1)]
 [ProvideToolWindow(typeof(MemoryLayoutToolWindow))]
+[ProvideToolWindow(typeof(CompilationInfoToolWindow))]
 [ProvideOptionPage(
     typeof(HlslOptionsPage),
     "HLSL-LSP",
@@ -34,6 +35,8 @@ namespace HlslLsp.VisualStudio.Bootstrap;
 public sealed class HlslBootstrapPackage : AsyncPackage
 {
     private long memoryLayoutRequestGeneration;
+    private long compilationInfoRequestGeneration;
+    private int explicitCompilationInfoRequests;
     public const string PackageGuidString = "5ac7fbe7-1b9f-45eb-bca6-ffb9ae1ab67f";
 
     private static readonly object Gate = new();
@@ -108,6 +111,12 @@ public sealed class HlslBootstrapPackage : AsyncPackage
                         () => SelectVariantAsync(DisposalToken))
                     .FileAndForget("HlslLsp/SelectVariant"),
                 new CommandID(commandSet, 0x0101)));
+        commands.AddCommand(
+            new OleMenuCommand(
+                (_, _) => JoinableTaskFactory.RunAsync(
+                        () => ShowCompilationInfoAsync(DisposalToken))
+                    .FileAndForget("HlslLsp/ShowCompilationInfo"),
+                new CommandID(commandSet, 0x0102)));
     }
 
     private async Task ShowMemoryLayoutAsync(CancellationToken cancellationToken)
@@ -160,6 +169,151 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         {
             window?.SetLayout(layout);
         }
+    }
+
+    private async Task ShowCompilationInfoAsync(CancellationToken cancellationToken)
+    {
+        var uri = await GetActiveDocumentUriAsync(cancellationToken);
+        if (uri == null)
+        {
+            await ShowInformationAsync(
+                "Open an HLSL document, then run Tools > HLSL Shader Compilation.",
+                cancellationToken);
+            return;
+        }
+        Interlocked.Increment(ref explicitCompilationInfoRequests);
+        try
+        {
+            using (var requestCancellation =
+                   CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+            {
+                requestCancellation.CancelAfter(TimeSpan.FromSeconds(30));
+                await ShowCompilationInfoAsync(
+                    uri,
+                    requestCancellation.Token,
+                    null,
+                    cancellationToken);
+            }
+        }
+        finally
+        {
+            Interlocked.Decrement(ref explicitCompilationInfoRequests);
+        }
+    }
+
+    // The generation guard mirrors ShowMemoryLayoutAsync: a stale response
+    // (e.g. from a superseded variant change or an earlier command
+    // invocation) can never overwrite a newer one. A failed or cancelled
+    // request never regresses the window to the "open a document"
+    // placeholder or leaves it stuck: it keeps the last successful content
+    // when one exists, and otherwise shows an explicit error.
+    private async Task ShowCompilationInfoAsync(
+        Uri uri,
+        CancellationToken cancellationToken,
+        CompilationInfoToolWindow existingWindow = null,
+        CancellationToken ambientCancellationToken = default)
+    {
+        var generation = Interlocked.Increment(ref compilationInfoRequestGeneration);
+        CompilationInfoModel info = null;
+        string failureMessage = null;
+        try
+        {
+            info = await CompilationInfoBridge.RequestAsync(uri, cancellationToken);
+        }
+        catch (OperationCanceledException) when (ambientCancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (OperationCanceledException)
+        {
+            failureMessage = "The shader compilation request was cancelled.";
+        }
+        catch (Exception error)
+        {
+            failureMessage =
+                "Could not retrieve shader compilation information: " + error.Message;
+        }
+        if (generation != Interlocked.Read(ref compilationInfoRequestGeneration))
+        {
+            return;
+        }
+        // The request token may represent the bounded RPC timeout. Once a
+        // result or failure message is ready, use only the ambient package
+        // token for presentation so a timeout can still be shown to the user.
+        await JoinableTaskFactory.SwitchToMainThreadAsync(ambientCancellationToken);
+        var window = existingWindow;
+        if (window == null)
+        {
+            window = await ShowToolWindowAsync(
+                typeof(CompilationInfoToolWindow),
+                0,
+                true,
+                ambientCancellationToken) as CompilationInfoToolWindow;
+        }
+        if (generation != Interlocked.Read(ref compilationInfoRequestGeneration))
+        {
+            return;
+        }
+        if (failureMessage != null)
+        {
+            window?.SetError(uri, failureMessage, existingWindow != null);
+            return;
+        }
+        if (info == null)
+        {
+            window?.SetError(
+                uri,
+                "The HLSL language server is not ready to provide shader compilation information.",
+                existingWindow != null);
+            return;
+        }
+        window?.SetInfo(uri, info);
+    }
+
+    // Invoked after an active-variant selection or a document save. Only
+    // refreshes an already-open window, and only for a save whose saved file
+    // matches the window's tracked document, so this cannot start a request
+    // storm from unrelated documents or from opening the window for the
+    // first time.
+    public async Task RefreshCompilationInfoIfOpenAsync(
+        string savedFilePath,
+        CancellationToken cancellationToken)
+    {
+        // A background save/variant refresh must never supersede an explicit
+        // Tools command that the user is waiting for.
+        if (Volatile.Read(ref explicitCompilationInfoRequests) != 0)
+        {
+            return;
+        }
+        await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+        if (await FindToolWindowAsync(
+                    typeof(CompilationInfoToolWindow),
+                    0,
+                    false,
+                    cancellationToken)
+                is not CompilationInfoToolWindow window ||
+            window.DocumentUri == null)
+        {
+            return;
+        }
+        if (savedFilePath != null &&
+            (!Uri.TryCreate(savedFilePath, UriKind.Absolute, out var savedUri) ||
+             !savedUri.IsFile ||
+             !window.DocumentUri.Equals(savedUri)))
+        {
+            return;
+        }
+        // Re-check after the asynchronous UI/tool-window lookup. An explicit
+        // command may have started while this background refresh was yielding.
+        if (Volatile.Read(ref explicitCompilationInfoRequests) != 0)
+        {
+            return;
+        }
+        await ShowCompilationInfoAsync(
+            window.DocumentUri,
+            cancellationToken,
+            window,
+            cancellationToken);
     }
 
     private async Task SelectVariantAsync(CancellationToken cancellationToken)

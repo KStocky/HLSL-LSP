@@ -36,6 +36,7 @@
     "onCommand:hlsl.showOutput",
     "onCommand:hlsl.showDiagnostics",
     "onCommand:hlsl.showMemoryLayout",
+    "onCommand:hlsl.showCompilationInfo",
     "onCommand:hlsl.selectVariant"
   ],
   "capabilities": {
@@ -85,6 +86,11 @@
       {
         "command": "hlsl.showMemoryLayout",
         "title": "HLSL: Show Memory Layout",
+        "category": "HLSL"
+      },
+      {
+        "command": "hlsl.showCompilationInfo",
+        "title": "HLSL: Show Shader Compilation",
         "category": "HLSL"
       },
       {

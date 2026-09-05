@@ -101,6 +101,21 @@ repository's
 [named compilation variants](../../docs/shadertoolsconfig.md#named-compilation-variants)
 reference for the schema and behavior.
 
+## Shader compilation
+
+Run **HLSL: Show Shader Compilation** to open a combined view of the active
+HLSL document's effective compiler configuration, compiler success/failure
+and diagnostics, output type and size, DXC reflection (signatures, resource
+bindings, and thread-group size), and include directories/resolved include
+paths. The request always analyzes the document's current unsaved content and
+active variant; there is no separate parameter to select either. If the view
+is already open, it refreshes automatically when the active variant changes,
+when the document is saved, and (debounced) shortly after further edits, so
+it cannot fall behind or cause a request per keystroke. See
+[`../../docs/compilation-info.md`](../../docs/compilation-info.md) for the
+full protocol, including DXIL vs SPIR-V reflection availability and compiler
+failure reporting.
+
 ## DXC runtime selection
 
 By default the extension loads the bundled, pinned DXC runtime. Set

@@ -748,6 +748,296 @@ TEST_CASE("DXC IntelliSense reparses edited sources", "[dxc][integration]") {
         completions, [](const auto& completion) { return completion.label == "UpdatedNumber"; }));
 }
 
+TEST_CASE("Compilation info reflects effective configuration and DXIL resource reflection",
+          "[dxc][compilation-info]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.target_profile = "ps_6_6";
+    options.entry_point = "main";
+    options.defines = {"USE_TINT=1"};
+    options.include_directories = {"include"};
+    const std::string source = "Texture2D<float4> MainTexture : register(t0);\n"
+                               "SamplerState MainSampler : register(s0);\n"
+                               "cbuffer Params : register(b0) { float4 tint; };\n"
+                               "float4 main(float4 position : SV_Position) : SV_Target {\n"
+                               "    return MainTexture.Sample(MainSampler, position.xy) * tint;\n"
+                               "}\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+
+    const auto info = translation_unit.compilation_info();
+    std::string messages;
+    for (const auto& diagnostic : info.diagnostics) {
+        messages += diagnostic.message;
+        messages += '\n';
+    }
+    INFO(messages);
+    CHECK(info.entry_point == "main");
+    CHECK(info.stage == "pixel");
+    CHECK(info.target_profile == "ps_6_6");
+    CHECK(info.defines == std::vector<std::string>{"USE_TINT=1"});
+    CHECK(info.include_directories == std::vector<std::string>{"include"});
+    CHECK(std::ranges::find(info.compiler_arguments, "-spirv") == info.compiler_arguments.end());
+    REQUIRE(info.success);
+    REQUIRE(info.output.has_value());
+    CHECK(info.output->type == "dxil");
+    CHECK(info.output->size > 0);
+    REQUIRE(info.reflection.has_value());
+    CHECK(info.reflection->available);
+
+    const auto find_resource = [&](std::string_view name) {
+        return std::ranges::find(info.reflection->resources, name,
+                                 &hlsl_intellisense::dxc::CompilationResourceBinding::name);
+    };
+    const auto texture = find_resource("MainTexture");
+    REQUIRE(texture != info.reflection->resources.end());
+    CHECK(texture->type == "texture");
+    CHECK(texture->bind_point == 0);
+    const auto sampler = find_resource("MainSampler");
+    REQUIRE(sampler != info.reflection->resources.end());
+    CHECK(sampler->type == "sampler");
+    const auto constants = find_resource("Params");
+    REQUIRE(constants != info.reflection->resources.end());
+    CHECK(constants->type == "cbuffer");
+
+    REQUIRE(!info.reflection->output_signature.empty());
+    CHECK(std::ranges::any_of(info.reflection->output_signature, [](const auto& parameter) {
+        return parameter.semantic_name == "SV_TARGET" && parameter.system_value == "target";
+    }));
+    CHECK_FALSE(info.reflection->thread_group_size.has_value());
+}
+
+TEST_CASE("Compilation info exposes compute thread group size", "[dxc][compilation-info]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.target_profile = "cs_6_6";
+    options.entry_point = "main";
+    const std::string source = "RWStructuredBuffer<float> Output : register(u0);\n"
+                               "[numthreads(8, 4, 2)]\n"
+                               "void main(uint3 id : SV_DispatchThreadID) {\n"
+                               "    Output[id.x] = 1.0;\n"
+                               "}\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+
+    const auto info = translation_unit.compilation_info();
+    REQUIRE(info.success);
+    CHECK(info.stage == "compute");
+    REQUIRE(info.reflection.has_value());
+    REQUIRE(info.reflection->thread_group_size.has_value());
+    CHECK(info.reflection->thread_group_size->x == 8);
+    CHECK(info.reflection->thread_group_size->y == 4);
+    CHECK(info.reflection->thread_group_size->z == 2);
+    const auto output =
+        std::ranges::find(info.reflection->resources, "Output",
+                          &hlsl_intellisense::dxc::CompilationResourceBinding::name);
+    REQUIRE(output != info.reflection->resources.end());
+    CHECK(output->type == "uav_rwstructured");
+}
+
+TEST_CASE("Compilation info recognizes joined DXC flag spellings and honors last-wins order",
+          "[dxc][compilation-info]") {
+    // DXC accepts both separated ("-T" "cs_6_6") and joined ("-Tcs_6_6")
+    // spellings for -T/-E/-D/-I (mirroring memory_layout.cpp's existing -T/-E
+    // handling); parse_effective_config must recognize the joined forms too.
+    // Placing overriding joined flags in additional_arguments (which DXC
+    // itself processes in argument order, later flags winning) also proves
+    // last-wins semantics: the separated "-T ps_6_0"/"-E WrongEntry" from
+    // CompilerOptions are overridden by the later joined "-Tcs_6_6"/"-EMain".
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.target_profile = "ps_6_0";
+    options.entry_point = "WrongEntry";
+    options.defines = {"BASE=1"};
+    options.include_directories = {"shared"};
+    options.additional_arguments = {"-Tcs_6_6", "-EMain", "-DTILE_SIZE=8", "-Iinclude"};
+    const std::string source = "RWStructuredBuffer<float> Output : register(u0);\n"
+                               "[numthreads(8, 1, 1)]\n"
+                               "void Main(uint3 id : SV_DispatchThreadID) {\n"
+                               "    Output[id.x] = 1.0;\n"
+                               "}\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+
+    const auto info = translation_unit.compilation_info();
+    std::string messages;
+    for (const auto& diagnostic : info.diagnostics) {
+        messages += diagnostic.message;
+        messages += '\n';
+    }
+    INFO(messages);
+    CHECK(info.entry_point == "Main");
+    CHECK(info.target_profile == "cs_6_6");
+    CHECK(info.stage == "compute");
+    CHECK(info.defines == std::vector<std::string>{"BASE=1", "TILE_SIZE=8"});
+    CHECK(info.include_directories == std::vector<std::string>{"shared", "include"});
+    REQUIRE(info.success);
+    REQUIRE(info.reflection.has_value());
+    REQUIRE(info.reflection->thread_group_size.has_value());
+    CHECK(info.reflection->thread_group_size->x == 8);
+    CHECK(info.reflection->thread_group_size->y == 1);
+    CHECK(info.reflection->thread_group_size->z == 1);
+}
+
+TEST_CASE("Compilation info reports structured diagnostics on failure without fabricating success",
+          "[dxc][compilation-info]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.target_profile = "ps_6_6";
+    auto translation_unit = intellisense.parse(
+        shader_path, {{shader_path, "float4 main() : SV_Target { return missing_symbol; }\n"}},
+        options);
+
+    const auto info = translation_unit.compilation_info();
+    CHECK_FALSE(info.success);
+    REQUIRE(!info.diagnostics.empty());
+    CHECK(std::ranges::any_of(info.diagnostics, [](const auto& diagnostic) {
+        return diagnostic.severity == hlsl_intellisense::dxc::DiagnosticSeverity::error;
+    }));
+    CHECK(std::ranges::any_of(info.diagnostics, [](const auto& diagnostic) {
+        return diagnostic.location.line > 0 && diagnostic.location.column > 0;
+    }));
+    CHECK_FALSE(info.output.has_value());
+    CHECK_FALSE(info.reflection.has_value());
+}
+
+TEST_CASE("Compilation info reports SPIR-V output as successful without fabricated reflection",
+          "[dxc][compilation-info][spirv]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.target_profile = "ps_6_6";
+    options.entry_point = "main";
+    options.additional_arguments = {"-spirv"};
+    const std::string source = "float4 main() : SV_Target {\n"
+                               "    return 1.0.xxxx;\n"
+                               "}\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+
+    const auto info = translation_unit.compilation_info();
+    REQUIRE(info.success);
+    REQUIRE(info.output.has_value());
+    CHECK(info.output->type == "spirv");
+    CHECK(info.output->size > 0);
+    REQUIRE(info.reflection.has_value());
+    CHECK_FALSE(info.reflection->available);
+    CHECK_FALSE(info.reflection->unavailable_reason.empty());
+    CHECK(std::ranges::find(info.compiler_arguments, "-spirv") != info.compiler_arguments.end());
+}
+
+TEST_CASE("Compilation info reports successful DXIL output with unavailable reflection for "
+          "library targets",
+          "[dxc][compilation-info]") {
+    // A `lib_*` target profile compiles successfully to DXIL but produces a
+    // library container, not a single-stage shader; requesting
+    // ID3D12ShaderReflection (rather than ID3D12LibraryReflection) via
+    // IDxcUtils::CreateReflection therefore genuinely fails even though the
+    // compile itself succeeded. That must surface as success=true with a
+    // structured reflection.available=false and a clear reason, never as a
+    // thrown exception or a fabricated (empty-but-misleading) reflection.
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.target_profile = "lib_6_3";
+    const std::string source = "export float4 Shade(float4 color) {\n"
+                               "    return color;\n"
+                               "}\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+
+    const auto info = translation_unit.compilation_info();
+    std::string messages;
+    for (const auto& diagnostic : info.diagnostics) {
+        messages += diagnostic.message;
+        messages += '\n';
+    }
+    INFO(messages);
+    REQUIRE(info.success);
+    REQUIRE(info.output.has_value());
+    CHECK(info.output->type == "dxil");
+    CHECK(info.output->size > 0);
+    REQUIRE(info.reflection.has_value());
+    CHECK_FALSE(info.reflection->available);
+    CHECK_FALSE(info.reflection->unavailable_reason.empty());
+    CHECK(info.reflection->input_signature.empty());
+    CHECK(info.reflection->output_signature.empty());
+    CHECK(info.reflection->resources.empty());
+    CHECK_FALSE(info.reflection->thread_group_size.has_value());
+}
+
+TEST_CASE("Compilation info tolerates -Qstrip_reflect without failing translation unit parsing",
+          "[dxc][compilation-info]") {
+    // The legacy IntelliSense parsing index (IDxcIndex::ParseTranslationUnit)
+    // does not recognize "-Qstrip_reflect", the same way it does not
+    // recognize "-E"/"-spirv" (see Intellisense::parse), so it must be
+    // stripped from the arguments used only for parsing while still reaching
+    // the real compiler for TranslationUnit::compilation_info.
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.target_profile = "ps_6_6";
+    options.entry_point = "main";
+    options.additional_arguments = {"-Qstrip_reflect"};
+    const std::string source = "float4 main() : SV_Target {\n"
+                               "    return 1.0.xxxx;\n"
+                               "}\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+
+    const auto info = translation_unit.compilation_info();
+    REQUIRE(info.success);
+    CHECK(std::ranges::find(info.compiler_arguments, "-Qstrip_reflect") !=
+          info.compiler_arguments.end());
+}
+
+TEST_CASE("Compilation info recompiles unsaved edits and reflects resolved includes",
+          "[dxc][compilation-info][reparse]") {
+    // The root references `includeValue`, which only the *current* include
+    // buffer defines. Reparsing with an include that renames the symbol away
+    // must be observed by the very next compilation_info() call: a stale
+    // cached source set would keep compiling against the old include text
+    // and (incorrectly) still succeed, so a genuine post-reparse compile
+    // failure with a diagnostic naming the missing identifier is the
+    // observable proof that the new source was actually used, not fabricated
+    // or left stale.
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    const auto directory = std::filesystem::current_path() / "compilation-info-includes";
+    std::filesystem::create_directories(directory);
+    const auto root = (directory / "root.hlsl").generic_string();
+    const auto include = std::filesystem::path{root}.parent_path() / "dependency.hlsli";
+    const std::string root_source =
+        "#include \"dependency.hlsli\"\nfloat4 main() : SV_Target { return includeValue; }\n";
+
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.target_profile = "ps_6_6";
+    options.entry_point = "main";
+    auto translation_unit = intellisense.parse(
+        root,
+        {{root, root_source},
+         {include.generic_string(), "static const float4 includeValue = 1.0.xxxx;\n"}},
+        options);
+
+    auto info = translation_unit.compilation_info();
+    REQUIRE(info.success);
+    CHECK(std::ranges::any_of(info.resolved_include_paths,
+                              [&](const auto& path) { return path == include.generic_string(); }));
+
+    // Rename the identifier away in the include only; the root is unchanged.
+    translation_unit.reparse(
+        {{root, root_source},
+         {include.generic_string(), "static const float4 renamedValue = 1.0.xxxx;\n"}});
+    info = translation_unit.compilation_info();
+    CHECK_FALSE(info.success);
+    REQUIRE(!info.diagnostics.empty());
+    CHECK(std::ranges::any_of(info.diagnostics, [](const auto& diagnostic) {
+        return diagnostic.message.find("includeValue") != std::string::npos;
+    }));
+    CHECK_FALSE(info.output.has_value());
+
+    // Reparsing again to restore the identifier proves the failure above
+    // reflects the intervening edit rather than a permanently broken state.
+    translation_unit.reparse(
+        {{root, root_source},
+         {include.generic_string(), "static const float4 includeValue = 2.0.xxxx;\n"}});
+    info = translation_unit.compilation_info();
+    CHECK(info.success);
+    REQUIRE(info.output.has_value());
+
+    std::filesystem::remove_all(directory);
+}
+
 TEST_CASE("DXC IntelliSense navigates to partially specialized template declarations",
           "[dxc][navigation][integration]") {
     hlsl_intellisense::dxc::Intellisense intellisense;

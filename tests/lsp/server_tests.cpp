@@ -2315,3 +2315,297 @@ TEST_CASE("A variant DXC runtime selection triggers a controlled restart",
     CHECK(std::filesystem::equivalent((*restart->params)["directory"].get<std::string>(),
                                       HLSL_TEST_DXC_RUNTIME_DIR));
 }
+
+namespace {
+
+void write_compilation_info_config(const TestDirectory& directory) {
+    std::ofstream config{directory.path() / "shadertoolsconfig.json"};
+    REQUIRE(config);
+    config << R"({
+        "root": true,
+        "hlsl.targetProfile": "ps_6_6",
+        "hlsl.variantsVersion": 1,
+        "hlsl.variants": [
+            { "name": "Prod", "description": "Production entry point",
+              "hlsl.entryPoint": "PSMain",
+              "hlsl.preprocessorDefinitions": { "USE_TINT": 1 } }
+        ]
+    })";
+    REQUIRE(config);
+}
+
+[[nodiscard]] std::string compilation_info_shader() {
+    return "Texture2D<float4> MainTexture : register(t0);\n"
+           "SamplerState MainSampler : register(s0);\n"
+           "float4 PSMain(float4 position : SV_Position) : SV_Target {\n"
+           "#if defined(USE_TINT)\n"
+           "    return MainTexture.Sample(MainSampler, position.xy) * 2.0;\n"
+           "#else\n"
+           "    return MainTexture.Sample(MainSampler, position.xy);\n"
+           "#endif\n"
+           "}\n";
+}
+
+} // namespace
+
+TEST_CASE("Server compiles hlsl/compilationInfo using DXC and honors the active variant",
+          "[lsp][compilation-info][integration]") {
+    TestDirectory directory;
+    write_compilation_info_config(directory);
+    const auto document = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "shader.hlsl").string());
+    hlsl_intellisense::lsp::Server server{[](const auto&) {}};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params = Json{{"textDocument",
+                        {{"uri", document.uri()},
+                         {"languageId", "hlsl"},
+                         {"version", 1},
+                         {"text", compilation_info_shader()}}}}}));
+
+    // Without an active variant, no explicit entry point is configured; the
+    // root's declared entry function (PSMain) will not be found, so DXC
+    // reports a structured compile failure rather than a fabricated success.
+    {
+        const auto response = server.handle(hlsl_intellisense::json_rpc::Request{
+            .id = std::int64_t{2},
+            .method = "hlsl/compilationInfo",
+            .params = Json{{"textDocument", {{"uri", document.uri()}}}}});
+        REQUIRE(response.has_value());
+        const auto* result = std::get_if<hlsl_intellisense::json_rpc::Response>(&*response);
+        REQUIRE(result != nullptr);
+        INFO(result->result.dump());
+        CHECK(result->result["success"] == false);
+        CHECK_FALSE(result->result["diagnostics"].empty());
+        CHECK(result->result["activeVariant"].is_null());
+        CHECK(result->result["targetProfile"] == "ps_6_6");
+    }
+
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "hlsl/didChangeActiveVariant", .params = Json{{"variant", "Prod"}}}));
+
+    const auto response = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{3},
+        .method = "hlsl/compilationInfo",
+        .params = Json{{"textDocument", {{"uri", document.uri()}}}}});
+    REQUIRE(response.has_value());
+    const auto* result = std::get_if<hlsl_intellisense::json_rpc::Response>(&*response);
+    REQUIRE(result != nullptr);
+    const auto& info = result->result;
+    INFO(info.dump());
+    CHECK(info["activeVariant"] == "Prod");
+    CHECK(info["entryPoint"] == "PSMain");
+    CHECK(info["stage"] == "pixel");
+    CHECK(info["targetProfile"] == "ps_6_6");
+    CHECK(std::ranges::any_of(info["defines"],
+                              [](const Json& define) { return define == "USE_TINT=1"; }));
+    REQUIRE(info["success"] == true);
+    REQUIRE(!info["output"].is_null());
+    CHECK(info["output"]["type"] == "dxil");
+    CHECK(info["output"]["size"].get<std::size_t>() > 0);
+    REQUIRE(!info["reflection"].is_null());
+    CHECK(info["reflection"]["available"] == true);
+    const auto& resources = info["reflection"]["resources"];
+    CHECK(std::ranges::any_of(
+        resources, [](const Json& resource) { return resource["name"] == "MainTexture"; }));
+    CHECK(std::ranges::any_of(
+        resources, [](const Json& resource) { return resource["name"] == "MainSampler"; }));
+    CHECK(info["reflection"]["threadGroupSize"].is_null());
+}
+
+TEST_CASE("Server reports SPIR-V compilation info without fabricated reflection",
+          "[lsp][compilation-info][spirv][integration]") {
+    TestDirectory directory;
+    {
+        std::ofstream config{directory.path() / "shadertoolsconfig.json"};
+        REQUIRE(config);
+        config << R"({
+            "root": true,
+            "hlsl.targetProfile": "ps_6_6",
+            "hlsl.entryPoint": "main",
+            "hlsl.additionalArguments": ["-spirv"]
+        })";
+        REQUIRE(config);
+    }
+    const auto document = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "shader.hlsl").string());
+    hlsl_intellisense::lsp::Server server{[](const auto&) {}};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params = Json{{"textDocument",
+                        {{"uri", document.uri()},
+                         {"languageId", "hlsl"},
+                         {"version", 1},
+                         {"text", "float4 main() : SV_Target {\n    return 1.0.xxxx;\n}\n"}}}}}));
+
+    const auto response = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{2},
+        .method = "hlsl/compilationInfo",
+        .params = Json{{"textDocument", {{"uri", document.uri()}}}}});
+    REQUIRE(response.has_value());
+    const auto* result = std::get_if<hlsl_intellisense::json_rpc::Response>(&*response);
+    REQUIRE(result != nullptr);
+    const auto& info = result->result;
+    INFO(info.dump());
+    REQUIRE(info["success"] == true);
+    REQUIRE(!info["output"].is_null());
+    CHECK(info["output"]["type"] == "spirv");
+    REQUIRE(!info["reflection"].is_null());
+    CHECK(info["reflection"]["available"] == false);
+    CHECK_FALSE(info["reflection"]["unavailableReason"].get<std::string>().empty());
+}
+
+TEST_CASE("Server rejects hlsl/compilationInfo for invalid or unopened documents",
+          "[lsp][compilation-info][validation]") {
+    const auto uri = shader_uri();
+    hlsl_intellisense::lsp::Server server{[](const auto&) {}};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+
+    // The document has never been opened.
+    {
+        const auto response = server.handle(
+            hlsl_intellisense::json_rpc::Request{.id = std::int64_t{2},
+                                                 .method = "hlsl/compilationInfo",
+                                                 .params = Json{{"textDocument", {{"uri", uri}}}}});
+        REQUIRE(response.has_value());
+        const auto* error = std::get_if<hlsl_intellisense::json_rpc::ErrorResponse>(&*response);
+        REQUIRE(error != nullptr);
+        CHECK(error->error.code == hlsl_intellisense::json_rpc::invalid_params_code);
+    }
+
+    // Missing textDocument.uri entirely.
+    {
+        const auto response = server.handle(hlsl_intellisense::json_rpc::Request{
+            .id = std::int64_t{3}, .method = "hlsl/compilationInfo", .params = Json::object()});
+        REQUIRE(response.has_value());
+        const auto* error = std::get_if<hlsl_intellisense::json_rpc::ErrorResponse>(&*response);
+        REQUIRE(error != nullptr);
+        CHECK(error->error.code == hlsl_intellisense::json_rpc::invalid_params_code);
+    }
+
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params = Json{{"textDocument",
+                        {{"uri", uri}, {"languageId", "hlsl"}, {"version", 1}, {"text", ""}}}}}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didClose", .params = Json{{"textDocument", {{"uri", uri}}}}}));
+
+    // The document was opened and then closed.
+    {
+        const auto response = server.handle(
+            hlsl_intellisense::json_rpc::Request{.id = std::int64_t{4},
+                                                 .method = "hlsl/compilationInfo",
+                                                 .params = Json{{"textDocument", {{"uri", uri}}}}});
+        REQUIRE(response.has_value());
+        const auto* error = std::get_if<hlsl_intellisense::json_rpc::ErrorResponse>(&*response);
+        REQUIRE(error != nullptr);
+        CHECK(error->error.code == hlsl_intellisense::json_rpc::invalid_params_code);
+    }
+}
+
+TEST_CASE("Server supersedes an in-flight hlsl/compilationInfo request when the document changes",
+          "[lsp][compilation-info][safety]") {
+    // A concurrent edit for the same root cancels the in-flight interactive
+    // work (mirroring memory_layout/hover), so the request surfaces as
+    // RequestCancelled rather than completing against stale content.
+    const auto uri = shader_uri();
+    auto hooks = std::make_shared<hlsl_intellisense::analysis::AnalysisHooks>();
+    std::promise<void> entered;
+    std::promise<void> release;
+    auto released = release.get_future().share();
+    hooks->before_interactive = [&](std::string_view) {
+        entered.set_value();
+        released.wait();
+    };
+    hlsl_intellisense::lsp::ServerOptions options;
+    options.background_analysis = true;
+    options.analysis_hooks = hooks;
+    hlsl_intellisense::lsp::Server server{[](const auto&) {}, {}, options};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params = Json{
+            {"textDocument",
+             {{"uri", uri}, {"languageId", "hlsl"}, {"version", 1}, {"text", valid_hlsl()}}}}}));
+    server.wait_for_analysis();
+
+    auto response = std::async(std::launch::async, [&] {
+        return server.handle(
+            hlsl_intellisense::json_rpc::Request{.id = std::int64_t{2},
+                                                 .method = "hlsl/compilationInfo",
+                                                 .params = Json{{"textDocument", {{"uri", uri}}}}});
+    });
+    entered.get_future().wait();
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didChange",
+        .params = Json{{"textDocument", {{"uri", uri}, {"version", 2}}},
+                       {"contentChanges", Json::array({Json{{"text", valid_hlsl()}}})}}}));
+    release.set_value();
+
+    const auto result = response.get();
+    REQUIRE(result.has_value());
+    const auto* error = std::get_if<hlsl_intellisense::json_rpc::ErrorResponse>(&*result);
+    REQUIRE(error != nullptr);
+    CHECK(error->error.code == hlsl_intellisense::json_rpc::request_cancelled_code);
+    server.wait_for_analysis();
+}
+
+TEST_CASE("Server cancellation returns RequestCancelled for hlsl/compilationInfo",
+          "[lsp][compilation-info][cancellation]") {
+    const auto uri = shader_uri();
+    auto hooks = std::make_shared<hlsl_intellisense::analysis::AnalysisHooks>();
+    std::promise<void> entered;
+    std::promise<void> release;
+    auto released = release.get_future().share();
+    hooks->before_interactive = [&](std::string_view) {
+        entered.set_value();
+        released.wait();
+    };
+    hlsl_intellisense::lsp::ServerOptions options;
+    options.background_analysis = true;
+    options.analysis_hooks = hooks;
+    hlsl_intellisense::lsp::Server server{[](const auto&) {}, {}, options};
+
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params = Json{
+            {"textDocument",
+             {{"uri", uri}, {"languageId", "hlsl"}, {"version", 1}, {"text", valid_hlsl()}}}}}));
+    server.wait_for_analysis();
+
+    const hlsl_intellisense::json_rpc::Request request{.id = std::string{"compilation-info"},
+                                                       .method = "hlsl/compilationInfo",
+                                                       .params =
+                                                           Json{{"textDocument", {{"uri", uri}}}}};
+    const auto cancellation = server.begin_request(request.id);
+    auto response =
+        std::async(std::launch::async, [&] { return server.handle(request, cancellation); });
+    entered.get_future().wait();
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "$/cancelRequest", .params = Json{{"id", "compilation-info"}}}));
+
+    const auto result = response.get();
+    const auto* error = std::get_if<hlsl_intellisense::json_rpc::ErrorResponse>(&result);
+    REQUIRE(error != nullptr);
+    CHECK(error->error.code == hlsl_intellisense::json_rpc::request_cancelled_code);
+    release.set_value();
+    server.wait_for_analysis();
+}
