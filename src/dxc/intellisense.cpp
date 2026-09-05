@@ -1,5 +1,6 @@
 #include <hlsl_intellisense/dxc/intellisense.h>
 
+#include "compilation_info.h"
 #include "memory_layout.h"
 
 #ifdef _WIN32
@@ -1001,6 +1002,10 @@ struct TranslationUnit::Impl final {
     std::string root_path;
     std::vector<SourceFile> sources;
     std::vector<std::string> arguments;
+    // The unmodified effective compiler arguments (unlike `arguments`, this
+    // keeps -spirv/-fspv-* since it is used for actual compilation, not the
+    // IntelliSense index parse which cannot consume them).
+    std::vector<std::string> full_arguments;
     bool descriptor_heaps_supported{};
     std::vector<ComPtr<IDxcUnsavedFile>> unsaved_files;
     ComPtr<IDxcTranslationUnit> translation_unit;
@@ -1536,6 +1541,12 @@ auto TranslationUnit::memory_layout_at(std::string_view path, std::uint32_t line
                                             implementation_->root_path, probe_target);
 }
 
+auto TranslationUnit::compilation_info() const -> CompilationInfo {
+    return detail::compilation_info_from_compile(
+        implementation_->owner->create_instance, implementation_->sources,
+        implementation_->full_arguments, implementation_->root_path);
+}
+
 auto TranslationUnit::signatures_at(std::string_view path, std::uint32_t line,
                                     std::uint32_t column) const -> std::vector<Signature> {
     const auto identifier = identifier_at(implementation_->sources, path, line, column);
@@ -1693,9 +1704,27 @@ auto Intellisense::parse(std::string root_path, std::vector<SourceFile> files,
     implementation->descriptor_heaps_supported = supports_descriptor_heaps(options.target_profile);
     implementation->rebuild_unsaved_files();
 
-    implementation->arguments = options.arguments();
+    implementation->full_arguments = options.arguments();
+    implementation->arguments = implementation->full_arguments;
+    // The IntelliSense index (IDxcIndex::ParseTranslationUnit) is observed to
+    // fail outright when an explicit entry point argument is present --
+    // whether separated ("-E" "entry") or joined ("-Eentry") -- regardless of
+    // target profile or entry validity, so both spellings are stripped here
+    // alongside the SPIR-V flags and "-Qstrip_reflect" (which the legacy
+    // parsing index does not recognize either). `full_arguments` (used for
+    // the real compile in TranslationUnit::compilation_info) keeps the
+    // original, unstripped arguments.
+    for (auto it = implementation->arguments.begin(); it != implementation->arguments.end();) {
+        if (*it == "-E" && std::next(it) != implementation->arguments.end()) {
+            it = implementation->arguments.erase(it, std::next(it, 2));
+        } else {
+            ++it;
+        }
+    }
     std::erase_if(implementation->arguments, [](std::string_view argument) {
-        return argument == "-spirv" || argument.starts_with("-fspv-");
+        return argument == "-spirv" || argument == "-Qstrip_reflect" ||
+               argument.starts_with("-fspv-") ||
+               (argument.starts_with("-E") && argument.size() > 2);
     });
     implementation->parse_translation_unit();
 

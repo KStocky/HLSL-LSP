@@ -144,6 +144,77 @@ struct MemoryLayout {
     std::vector<MemoryLayoutElement> members;
 };
 
+// Describes one entry of a DXIL input/output signature parameter, populated
+// from ID3D12ShaderReflection::GetInputParameterDesc/GetOutputParameterDesc.
+struct CompilationSignatureParameter {
+    std::string semantic_name;
+    std::uint32_t semantic_index{};
+    std::uint32_t register_index{};
+    std::string system_value;   // e.g. "position", "target", "undefined"
+    std::string component_type; // "uint32", "sint32", "float32", or "unknown"
+    std::uint8_t mask{};
+    std::uint8_t read_write_mask{};
+    std::uint32_t stream{};
+};
+
+// Describes one bound resource, populated from
+// ID3D12ShaderReflection::GetResourceBindingDesc.
+struct CompilationResourceBinding {
+    std::string name;
+    std::string type; // e.g. "cbuffer", "texture", "uav_rwstructured"
+    std::uint32_t bind_point{};
+    std::uint32_t bind_count{};
+    std::uint32_t space{};
+    std::string dimension;   // e.g. "texture2d"; empty when not applicable
+    std::string return_type; // e.g. "float"; empty when not applicable
+};
+
+struct CompilationThreadGroupSize {
+    std::uint32_t x{};
+    std::uint32_t y{};
+    std::uint32_t z{};
+};
+
+// DXIL reflection extracted via IDxcUtils::CreateReflection and
+// ID3D12ShaderReflection. Unavailable for non-DXIL output (e.g. SPIR-V); in
+// that case `available` is false and `unavailable_reason` explains why,
+// rather than fabricating empty-but-misleading arrays.
+struct CompilationReflection {
+    bool available{true};
+    std::string unavailable_reason;
+    std::vector<CompilationSignatureParameter> input_signature;
+    std::vector<CompilationSignatureParameter> output_signature;
+    std::vector<CompilationResourceBinding> resources;
+    std::optional<CompilationThreadGroupSize> thread_group_size;
+};
+
+// The compiled output DXC produced, independent of whether reflection could be
+// extracted from it.
+struct CompilationOutput {
+    std::size_t size{};
+    std::string type; // "dxil", "spirv", or "none" when no output was produced
+};
+
+// The effective compilation configuration and compiler-authoritative result
+// for an open document, produced by actually invoking DXC on the real source
+// and all resolved in-memory include sources. DXC is the sole authority; a
+// compilation failure is reported through `success` and `diagnostics`, never
+// as an exception or a success-shaped empty result.
+struct CompilationInfo {
+    std::string entry_point;
+    std::string stage;
+    std::string target_profile;
+    std::string language_version;
+    std::vector<std::string> defines;
+    std::vector<std::string> compiler_arguments;
+    std::vector<std::string> include_directories;
+    std::vector<std::string> resolved_include_paths;
+    bool success{};
+    std::vector<Diagnostic> diagnostics;
+    std::optional<CompilationOutput> output;
+    std::optional<CompilationReflection> reflection;
+};
+
 struct SignatureParameter {
     std::string label;
     std::string name;
@@ -203,6 +274,11 @@ class TranslationUnit final {
                                                 std::uint32_t column) const;
     [[nodiscard]] std::optional<MemoryLayout>
     memory_layout_at(std::string_view path, std::uint32_t line, std::uint32_t column) const;
+    // Compiles the actual root source and all resolved in-memory include
+    // sources with the effective compiler arguments and returns the
+    // compiler-authoritative configuration and reflection. DXC is invoked
+    // directly; there is no fallback parser for HLSL source.
+    [[nodiscard]] CompilationInfo compilation_info() const;
     [[nodiscard]] std::vector<Signature> signatures_at(std::string_view path, std::uint32_t line,
                                                        std::uint32_t column) const;
     [[nodiscard]] std::vector<Token> tokens(std::string_view path) const;

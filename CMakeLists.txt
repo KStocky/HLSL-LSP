@@ -71,6 +71,7 @@ hlsl_enable_clang_tidy(hlsl_workspace)
 add_library(hlsl_dxc STATIC)
 target_sources(hlsl_dxc
     PRIVATE
+        src/dxc/compilation_info.cpp
         src/dxc/intellisense.cpp
         src/dxc/memory_layout.cpp
     PUBLIC

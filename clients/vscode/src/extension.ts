@@ -10,6 +10,10 @@ import {
 } from "vscode-languageclient/node";
 
 import {
+  CompilationInfo,
+  resolveCompilationInfoRefresh,
+} from "./compilationInfo";
+import {
   HlslServerSettings,
   readActiveVariant,
   readDefaultLanguageVersion,
@@ -41,12 +45,16 @@ interface ManagedClient extends LifecycleClient {
     uri: vscode.Uri,
     position: vscode.Position,
   ): Promise<MemoryLayout | null>;
+  compilationInfo(uri: vscode.Uri): Promise<CompilationInfo | null>;
   dxcRuntime(): Promise<DxcRuntimeInfo | null>;
   variants(uri: vscode.Uri | undefined): Promise<VariantList | null>;
 }
 
 export interface HlslExtensionApi {
   readonly state: LifecycleState;
+  // Exposed so other extensions (and this extension's own integration tests)
+  // can read hlsl/compilationInfo results without scraping the webview panel.
+  requestCompilationInfo(uri: vscode.Uri): Promise<CompilationInfo | null>;
 }
 
 interface DxcRuntimeInfo {
@@ -88,6 +96,64 @@ interface MemoryLayoutTarget {
 }
 
 let activeLifecycle: ClientLifecycle<ManagedClient> | undefined;
+
+interface CompilationInfoViewState {
+  readonly panel: vscode.WebviewPanel;
+  uri: vscode.Uri;
+  // True once a successful hlsl/compilationInfo result has been rendered for
+  // the current uri. A later failed or cancelled refresh must never regress
+  // this panel to a placeholder or a perpetual loading state, so this flag
+  // decides whether a failure keeps the last content or shows an explicit
+  // error instead.
+  hasContent: boolean;
+}
+
+let compilationInfoState: CompilationInfoViewState | undefined;
+let compilationInfoGeneration = 0;
+let compilationInfoDebounce: NodeJS.Timeout | undefined;
+
+function compilationInfoLoadingHtml(): string {
+  return `<!doctype html><html><body style="color:var(--vscode-foreground);background:var(--vscode-editor-background);font-family:var(--vscode-font-family);padding:1rem 1.5rem;"><p>Compiling…</p></body></html>`;
+}
+
+// Fetches the current compilation info for the tracked document and applies it
+// to the open panel, guarded by a monotonic generation counter so a slower,
+// superseded request can never overwrite a result from a newer one. A failed
+// or cancelled request never regresses the panel to a placeholder or a
+// perpetual loading state: it keeps the last successful content when one
+// exists, and otherwise shows an explicit error.
+async function refreshCompilationInfo(
+  lifecycle: ClientLifecycle<ManagedClient>,
+  uri: vscode.Uri,
+): Promise<void> {
+  const generation = ++compilationInfoGeneration;
+  let info: CompilationInfo | null | undefined;
+  let failureMessage: string | undefined;
+  try {
+    info = await lifecycle.withClient((client) => client.compilationInfo(uri));
+  } catch (error) {
+    failureMessage =
+      error instanceof Error ? error.message : "The request failed.";
+  }
+  if (
+    generation !== compilationInfoGeneration ||
+    compilationInfoState?.uri.toString() !== uri.toString()
+  ) {
+    return;
+  }
+  const outcome = resolveCompilationInfoRefresh(
+    compilationInfoState.hasContent,
+    info,
+    failureMessage,
+  );
+  compilationInfoState.hasContent = outcome.hasContent;
+  if (outcome.title !== undefined) {
+    compilationInfoState.panel.title = outcome.title;
+  }
+  if (outcome.html !== undefined) {
+    compilationInfoState.panel.webview.html = outcome.html;
+  }
+}
 
 function configurationResource(): vscode.Uri | undefined {
   return vscode.workspace.workspaceFolders?.[0]?.uri;
@@ -279,6 +345,13 @@ class VscodeLanguageClient implements ManagedClient {
       textDocument: { uri: uri.toString() },
       position: { line: position.line, character: position.character },
     });
+  }
+
+  public compilationInfo(uri: vscode.Uri): Promise<CompilationInfo | null> {
+    return this.client.sendRequest<CompilationInfo | null>(
+      "hlsl/compilationInfo",
+      { textDocument: { uri: uri.toString() } },
+    );
   }
 
   public dxcRuntime(): Promise<DxcRuntimeInfo | null> {
@@ -627,6 +700,46 @@ export async function activate(
         panel.webview.html = memoryLayoutHtml(layout);
       },
     ),
+    vscode.commands.registerCommand("hlsl.showCompilationInfo", async () => {
+      const editor = vscode.window.activeTextEditor;
+      if (editor?.document.languageId !== "hlsl") {
+        await vscode.window.showInformationMessage(
+          "Open an HLSL document to inspect its shader compilation.",
+        );
+        return;
+      }
+      const uri = editor.document.uri;
+      if (compilationInfoState !== undefined) {
+        const switchingDocument =
+          compilationInfoState.uri.toString() !== uri.toString();
+        compilationInfoState.uri = uri;
+        if (switchingDocument) {
+          // Only the loading placeholder for a different document replaces
+          // what is on screen; a same-document refresh keeps showing the
+          // last successful content until the new result (or an explicit
+          // error, on failure) is ready.
+          compilationInfoState.hasContent = false;
+          compilationInfoState.panel.webview.html =
+            compilationInfoLoadingHtml();
+        }
+        compilationInfoState.panel.reveal(vscode.ViewColumn.Beside);
+      } else {
+        const panel = vscode.window.createWebviewPanel(
+          "hlslCompilationInfo",
+          "Shader Compilation",
+          vscode.ViewColumn.Beside,
+          { enableScripts: false },
+        );
+        panel.webview.html = compilationInfoLoadingHtml();
+        panel.onDidDispose(() => {
+          if (compilationInfoState?.panel === panel) {
+            compilationInfoState = undefined;
+          }
+        });
+        compilationInfoState = { panel, uri, hasContent: false };
+      }
+      await refreshCompilationInfo(lifecycle, uri);
+    }),
     vscode.commands.registerCommand("hlsl.selectVariant", async () => {
       const editor = vscode.window.activeTextEditor;
       const documentUri =
@@ -747,8 +860,36 @@ export async function activate(
         );
       }
       await updateVariantStatus();
+      if (
+        event.affectsConfiguration("hlsl.activeVariant", resource) &&
+        compilationInfoState !== undefined
+      ) {
+        await refreshCompilationInfo(lifecycle, compilationInfoState.uri);
+      }
     }),
     vscode.workspace.onDidChangeWorkspaceFolders(restart),
+    vscode.workspace.onDidSaveTextDocument((document) => {
+      if (document.uri.toString() === compilationInfoState?.uri.toString()) {
+        void refreshCompilationInfo(lifecycle, compilationInfoState.uri);
+      }
+    }),
+    vscode.workspace.onDidChangeTextDocument((event) => {
+      if (
+        event.document.uri.toString() !== compilationInfoState?.uri.toString()
+      ) {
+        return;
+      }
+      if (compilationInfoDebounce !== undefined) {
+        clearTimeout(compilationInfoDebounce);
+      }
+      // Debounced so a burst of keystrokes triggers one compile, not a storm
+      // of hlsl/compilationInfo requests.
+      compilationInfoDebounce = setTimeout(() => {
+        if (compilationInfoState !== undefined) {
+          void refreshCompilationInfo(lifecycle, compilationInfoState.uri);
+        }
+      }, 500);
+    }),
     {
       dispose(): void {
         void lifecycle.stop();
@@ -775,11 +916,21 @@ export async function activate(
     get state(): LifecycleState {
       return lifecycle.state;
     },
+    requestCompilationInfo(uri: vscode.Uri): Promise<CompilationInfo | null> {
+      return lifecycle
+        .withClient((client) => client.compilationInfo(uri))
+        .then((info) => info ?? null);
+    },
   };
 }
 
 export async function deactivate(): Promise<void> {
   const lifecycle = activeLifecycle;
   activeLifecycle = undefined;
+  if (compilationInfoDebounce !== undefined) {
+    clearTimeout(compilationInfoDebounce);
+    compilationInfoDebounce = undefined;
+  }
+  compilationInfoState = undefined;
   await lifecycle?.stop();
 }

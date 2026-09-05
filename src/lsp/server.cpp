@@ -385,6 +385,100 @@ void append_document_symbols(Json& output, const std::vector<dxc::Symbol>& symbo
     return result;
 }
 
+[[nodiscard]] Json string_array_json(const std::vector<std::string>& values) {
+    Json result = Json::array();
+    for (const auto& value : values) {
+        result.push_back(value);
+    }
+    return result;
+}
+
+[[nodiscard]] Json
+compilation_signature_parameter_json(const dxc::CompilationSignatureParameter& parameter) {
+    return {
+        {"semanticName", parameter.semantic_name},    {"semanticIndex", parameter.semantic_index},
+        {"register", parameter.register_index},       {"systemValue", parameter.system_value},
+        {"componentType", parameter.component_type},  {"mask", parameter.mask},
+        {"readWriteMask", parameter.read_write_mask}, {"stream", parameter.stream}};
+}
+
+[[nodiscard]] Json
+compilation_resource_binding_json(const dxc::CompilationResourceBinding& resource) {
+    return {{"name", resource.name},
+            {"type", resource.type},
+            {"bindPoint", resource.bind_point},
+            {"bindCount", resource.bind_count},
+            {"space", resource.space},
+            {"dimension", resource.dimension},
+            {"returnType", resource.return_type}};
+}
+
+[[nodiscard]] Json compilation_reflection_json(const dxc::CompilationReflection& reflection) {
+    Json input_signature = Json::array();
+    for (const auto& parameter : reflection.input_signature) {
+        input_signature.push_back(compilation_signature_parameter_json(parameter));
+    }
+    Json output_signature = Json::array();
+    for (const auto& parameter : reflection.output_signature) {
+        output_signature.push_back(compilation_signature_parameter_json(parameter));
+    }
+    Json resources = Json::array();
+    for (const auto& resource : reflection.resources) {
+        resources.push_back(compilation_resource_binding_json(resource));
+    }
+    Json result{{"available", reflection.available},
+                {"unavailableReason", reflection.unavailable_reason},
+                {"inputSignature", std::move(input_signature)},
+                {"outputSignature", std::move(output_signature)},
+                {"resources", std::move(resources)}};
+    if (reflection.thread_group_size.has_value()) {
+        result["threadGroupSize"] = Json{{"x", reflection.thread_group_size->x},
+                                         {"y", reflection.thread_group_size->y},
+                                         {"z", reflection.thread_group_size->z}};
+    } else {
+        result["threadGroupSize"] = nullptr;
+    }
+    return result;
+}
+
+[[nodiscard]] Json compilation_diagnostics_json(const std::vector<dxc::Diagnostic>& diagnostics) {
+    Json result = Json::array();
+    for (const auto& diagnostic : diagnostics) {
+        result.push_back({{"severity", diagnostic_severity(diagnostic.severity)},
+                          {"message", diagnostic.message},
+                          {"path", diagnostic.location.path},
+                          {"line", diagnostic.location.line},
+                          {"column", diagnostic.location.column}});
+    }
+    return result;
+}
+
+[[nodiscard]] Json compilation_info_json(const dxc::CompilationInfo& info,
+                                         const std::optional<std::string>& active_variant) {
+    Json result{{"entryPoint", info.entry_point},
+                {"stage", info.stage},
+                {"targetProfile", info.target_profile},
+                {"languageVersion", info.language_version},
+                {"defines", string_array_json(info.defines)},
+                {"compilerArguments", string_array_json(info.compiler_arguments)},
+                {"includeDirectories", string_array_json(info.include_directories)},
+                {"resolvedIncludePaths", string_array_json(info.resolved_include_paths)},
+                {"activeVariant", active_variant ? Json(*active_variant) : Json(nullptr)},
+                {"success", info.success},
+                {"diagnostics", compilation_diagnostics_json(info.diagnostics)}};
+    if (info.output.has_value()) {
+        result["output"] = Json{{"size", info.output->size}, {"type", info.output->type}};
+    } else {
+        result["output"] = nullptr;
+    }
+    if (info.reflection.has_value()) {
+        result["reflection"] = compilation_reflection_json(*info.reflection);
+    } else {
+        result["reflection"] = nullptr;
+    }
+    return result;
+}
+
 [[nodiscard]] std::string percent_encode(std::string_view value) {
     constexpr char hexadecimal[] = "0123456789ABCDEF";
     std::string result;
@@ -1230,6 +1324,10 @@ void Server::register_handlers() {
     dispatcher_.register_request_handler(
         "hlsl/memoryLayout",
         [this](const auto& params, const auto& context) { return memory_layout(params, context); });
+    dispatcher_.register_request_handler("hlsl/compilationInfo",
+                                         [this](const auto& params, const auto& context) {
+                                             return compilation_info(params, context);
+                                         });
     dispatcher_.register_request_handler("textDocument/signatureHelp",
                                          [this](const auto& params, const auto& context) {
                                              return signature_help(params, context);
@@ -1960,6 +2058,40 @@ Json Server::memory_layout(const std::optional<Json>& params,
         }
     }
     return layout.has_value() ? memory_layout_json(*layout) : Json(nullptr);
+}
+
+Json Server::compilation_info(const std::optional<Json>& params,
+                              const json_rpc::RequestContext& context) {
+    require_running();
+    const auto& value = object_params(params);
+    const auto uri = string_member(object_member(value, "textDocument"), "uri");
+    workspace::SourceSnapshot snapshot = [&] {
+        std::scoped_lock state_lock{state_mutex_};
+        try {
+            const auto& state = documents_.document(uri);
+            if (!state.open) {
+                invalid_params("Compilation info document is not open");
+            }
+            return documents_.snapshot(uri);
+        } catch (const workspace::DocumentError& error) {
+            invalid_params(error.what());
+        }
+    }();
+
+    analyze_and_publish(snapshot.uri());
+    const auto info =
+        analysis_.compilation_info(snapshot.document_uri().identity(), snapshot.version(),
+                                   snapshot.path(), context.cancellation);
+    std::optional<std::string> active_variant;
+    {
+        std::scoped_lock state_lock{state_mutex_};
+        if (!documents_.contains(snapshot.uri()) ||
+            documents_.snapshot(snapshot.uri()).version() != snapshot.version()) {
+            throw HandlerError{json_rpc::content_modified_code, "Compilation info was superseded"};
+        }
+        active_variant = active_variant_;
+    }
+    return compilation_info_json(info, active_variant);
 }
 
 Json Server::signature_help(const std::optional<Json>& params,

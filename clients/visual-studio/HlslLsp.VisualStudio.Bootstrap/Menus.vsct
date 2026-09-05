@@ -21,6 +21,12 @@
           <ButtonText>HLSL Select Shader Variant</ButtonText>
         </Strings>
       </Button>
+      <Button guid="guidHlslLspCommands" id="ShowCompilationInfo" priority="0x0102" type="Button">
+        <Parent guid="guidHlslLspCommands" id="HlslLspGroup"/>
+        <Strings>
+          <ButtonText>HLSL Shader Compilation</ButtonText>
+        </Strings>
+      </Button>
     </Buttons>
   </Commands>
   <Symbols>
@@ -29,6 +35,7 @@
       <IDSymbol name="HlslLspGroup" value="0x1020"/>
       <IDSymbol name="ShowMemoryLayout" value="0x0100"/>
       <IDSymbol name="SelectVariant" value="0x0101"/>
+      <IDSymbol name="ShowCompilationInfo" value="0x0102"/>
     </GuidSymbol>
   </Symbols>
 </CommandTable>

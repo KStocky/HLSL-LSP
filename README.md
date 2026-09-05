@@ -11,6 +11,8 @@ with:
 - DXC-backed code completion
 - DXC-backed hover and signature help
 - Natural structure and constant-buffer memory layout inspection
+- DXC-backed shader compilation inspection: effective configuration,
+  diagnostics, and DXIL/SPIR-V reflection
 - DXC-backed semantic colouring and go-to-definition for symbols and include paths
 - Workspace symbol support for Visual Studio's All-In-One Search
 - Hierarchical `shadertoolsconfig.json` compiler configuration
@@ -55,6 +57,22 @@ documented in [`docs/memory-layout.md`](docs/memory-layout.md).
 In Visual Studio, select **Memory Layout** in Quick Info or use
 **Tools > HLSL Memory Layout**. In Visual Studio Code, select the hover action
 or run **HLSL: Show Memory Layout** from the Command Palette.
+
+### Shader compilation
+
+A combined Shader Compilation view/command reports the effective compiler
+configuration, compiler success/failure and diagnostics, output type and
+size, DXC reflection (input/output signatures, resource bindings, and
+thread-group size), and include directories and resolved include paths for
+the active open HLSL document, backed by the cross-editor
+`hlsl/compilationInfo` protocol. It always reflects the document's current
+unsaved snapshot and active variant. DXIL output supports full reflection;
+SPIR-V output explains why reflection is unavailable instead of fabricating
+it. Protocol, refresh behavior, and DXIL/SPIR-V differences are documented in
+[`docs/compilation-info.md`](docs/compilation-info.md).
+
+In Visual Studio, run **Tools > HLSL Shader Compilation**. In Visual Studio
+Code, run **HLSL: Show Shader Compilation** from the Command Palette.
 
 The pinned DXC `1.9.2607.13` API exposes no callable constructor overloads or
 parameter cursors. Scalar casts resolve to an unnamed initializer expression;

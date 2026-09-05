@@ -107,6 +107,14 @@ class Manager final {
     memory_layout(std::string root_identity, std::int64_t version, std::string path,
                   std::uint32_t line, std::uint32_t column,
                   const json_rpc::CancellationToken& cancellation);
+    // Compiles the actual root source and resolved in-memory includes with
+    // the effective compiler arguments and returns the compiler-authoritative
+    // configuration, output, and reflection for an open document. Unlike the
+    // cursor-based queries above, this operates on the whole translation
+    // unit rather than a position.
+    [[nodiscard]] dxc::CompilationInfo
+    compilation_info(std::string root_identity, std::int64_t version, std::string path,
+                     const json_rpc::CancellationToken& cancellation);
     [[nodiscard]] std::vector<dxc::Signature>
     signatures(std::string root_identity, std::int64_t version, std::string path,
                std::uint32_t line, std::uint32_t column,

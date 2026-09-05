@@ -249,6 +249,38 @@ internal sealed class HlslLanguageClient :
             .ConfigureAwait(false);
     }
 
+    // The server already analyzes the document's current (possibly unsaved)
+    // snapshot and its active variant, so no position or variant parameter is
+    // sent here; the response always reflects what would happen if the
+    // document were compiled right now.
+    internal async Task<CompilationInfoModel> GetCompilationInfoAsync(
+        Uri documentUri,
+        CancellationToken cancellationToken)
+    {
+        var currentRpc = Volatile.Read(ref rpc);
+        if (currentRpc == null)
+        {
+            await rpcAttached.WaitAsync(cancellationToken).ConfigureAwait(false);
+            currentRpc = Volatile.Read(ref rpc);
+            if (currentRpc == null)
+            {
+                throw new InvalidOperationException(
+                    "The HLSL language server connection is unavailable.");
+            }
+        }
+        return await currentRpc.InvokeWithParameterObjectAsync<CompilationInfoModel>(
+                "hlsl/compilationInfo",
+                new
+                {
+                    textDocument = new
+                    {
+                        uri = documentUri.AbsoluteUri,
+                    },
+                },
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
     public async Task OnLoadedAsync()
     {
         if (StartAsync != null)

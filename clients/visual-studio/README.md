@@ -49,6 +49,16 @@ different DXC runtime. See the repository's
 [named compilation variants](../../docs/shadertoolsconfig.md#named-compilation-variants)
 reference for details.
 
+Run **Tools > HLSL Shader Compilation** to open a tool window with the active
+HLSL document's effective compiler configuration, compiler success/failure and
+diagnostics, output type and size, DXC reflection (signatures, resource
+bindings, and thread-group size), and include directories/resolved include
+paths. The request always analyzes the document's current unsaved content and
+active variant. If the window is already open, it refreshes automatically
+when the active variant changes and when the shown document is saved. See the
+repository's [shader compilation](../../docs/compilation-info.md) reference
+for the full protocol, including DXIL vs SPIR-V reflection availability.
+
 ## Install
 
 Download `HlslLsp.VisualStudio.vsix` from the

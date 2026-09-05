@@ -271,6 +271,129 @@ export async function run(): Promise<void> {
     await vscode.workspace.fs.delete(variantDirectory, { recursive: true });
   }
 
+  const compilationDirectory = vscode.Uri.joinPath(
+    folder.uri,
+    "compilation-info",
+  );
+  const compilationConfig = vscode.Uri.joinPath(
+    compilationDirectory,
+    "shadertoolsconfig.json",
+  );
+  const compilationShader = vscode.Uri.joinPath(
+    compilationDirectory,
+    "shader.hlsl",
+  );
+  await vscode.workspace.fs.createDirectory(compilationDirectory);
+  await vscode.workspace.fs.writeFile(
+    compilationConfig,
+    encoder.encode(
+      JSON.stringify({
+        root: true,
+        "hlsl.targetProfile": "ps_6_6",
+        "hlsl.entryPoint": "PSMain",
+        "hlsl.variantsVersion": 1,
+        "hlsl.variants": [
+          {
+            name: "Tinted",
+            // additionalArguments (not preprocessorDefinitions) so the
+            // variant's define survives the global preprocessorDefinitions
+            // editor override this run applies for every HLSL document.
+            "hlsl.additionalArguments": ["-D", "USE_TINT=1"],
+          },
+        ],
+      }),
+    ),
+  );
+  await vscode.workspace.fs.writeFile(
+    compilationShader,
+    encoder.encode(
+      "float4 PSMain(float4 position : SV_Position) : SV_Target {\n" +
+        "#if defined(USE_TINT)\n    return float4(1.0, 0.0, 0.0, 1.0);\n" +
+        "#else\n    return float4(0.0, 1.0, 0.0, 1.0);\n#endif\n" +
+        "}\n",
+    ),
+  );
+  try {
+    const compilationDocument =
+      await vscode.workspace.openTextDocument(compilationShader);
+    const compilationEditor =
+      await vscode.window.showTextDocument(compilationDocument);
+
+    // A compilation request racing an edit or variant change can be
+    // superseded by the server (reported as a cancelled/content-modified
+    // error); the poll simply retries rather than failing the whole run.
+    const pollCompilationInfo = async () => {
+      try {
+        return await api.requestCompilationInfo(compilationShader);
+      } catch {
+        return undefined;
+      }
+    };
+
+    const initialInfo = await waitFor(
+      "initial hlsl/compilationInfo result",
+      async () => {
+        const current = await pollCompilationInfo();
+        return current?.success === true ? current : undefined;
+      },
+    );
+    assert.strictEqual(initialInfo.entryPoint, "PSMain");
+    assert.strictEqual(initialInfo.stage, "pixel");
+    assert.strictEqual(initialInfo.targetProfile, "ps_6_6");
+    assert.strictEqual(initialInfo.activeVariant, null);
+    assert(
+      !initialInfo.defines.some((define) => define.startsWith("USE_TINT")),
+      "USE_TINT should not be defined before selecting the Tinted variant",
+    );
+    assert(initialInfo.output?.type === "dxil");
+    assert(
+      initialInfo.reflection?.available,
+      "DXIL output should report available reflection",
+    );
+
+    // Selecting a variant must be reflected on the next request without
+    // reopening the document or restarting the server.
+    await setActiveVariant("Tinted");
+    const variantInfo = await waitFor(
+      "hlsl/compilationInfo after selecting a variant",
+      async () => {
+        const current = await pollCompilationInfo();
+        return current?.activeVariant === "Tinted" ? current : undefined;
+      },
+    );
+    assert(
+      variantInfo.defines.includes("USE_TINT=1"),
+      "The active variant's defines were not applied to hlsl/compilationInfo",
+    );
+
+    // An unsaved edit must be reflected without saving the document, since the
+    // server analyzes the client's current in-memory snapshot.
+    await compilationEditor.edit((builder) => {
+      const end = compilationDocument.lineAt(compilationDocument.lineCount - 1)
+        .range.end;
+      builder.insert(end, "\nfloat broken = does_not_exist;\n");
+    });
+    const unsavedInfo = await waitFor(
+      "hlsl/compilationInfo after an unsaved edit",
+      async () => {
+        const current = await pollCompilationInfo();
+        return current?.success === false ? current : undefined;
+      },
+    );
+    assert(
+      unsavedInfo.diagnostics.some((diagnostic) =>
+        diagnostic.message.includes("does_not_exist"),
+      ),
+      "The unsaved edit was not reflected in hlsl/compilationInfo diagnostics",
+    );
+  } finally {
+    await setActiveVariant("");
+    await vscode.commands.executeCommand("workbench.action.files.revert");
+    await vscode.workspace.fs.delete(compilationDirectory, {
+      recursive: true,
+    });
+  }
+
   await vscode.commands.executeCommand("hlsl.stopServer");
   await waitFor("clean language-server shutdown", () =>
     api.state === "stopped" ? true : undefined,
