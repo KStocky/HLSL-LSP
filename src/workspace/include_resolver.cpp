@@ -93,6 +93,7 @@ struct SourceNode {
 
 class Resolver final {
   public:
+    // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
     Resolver(std::span<const SourceSnapshot> open_documents,
              const WorkspaceConfiguration& configuration, IncludeMetadataCache* cache)
         : configuration_{configuration}, cache_{cache} {
@@ -117,6 +118,7 @@ class Resolver final {
         return result;
     }
 
+    // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
     [[nodiscard]] std::optional<std::filesystem::path> resolve_at(const SourceSnapshot& root,
                                                                   std::size_t utf8_offset) const {
         SourceNode root_node{.physical_path = normalized_physical_path(root.path()),
@@ -143,6 +145,7 @@ class Resolver final {
     }
 
   private:
+    // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
     [[nodiscard]] IncludeMetadata metadata(std::string_view identity, std::string_view text) const {
         return cache_ == nullptr ? parse_includes(text) : cache_->get(identity, text);
     }
@@ -397,6 +400,7 @@ IncludeCacheMetrics IncludeMetadataCache::metrics() const noexcept {
     return implementation_->metrics;
 }
 
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
 IncludeResolution resolve_includes(const SourceSnapshot& root,
                                    std::span<const SourceSnapshot> open_documents,
                                    const WorkspaceConfiguration& configuration,
@@ -404,11 +408,22 @@ IncludeResolution resolve_includes(const SourceSnapshot& root,
     return Resolver{open_documents, configuration, cache}.resolve(root);
 }
 
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
 std::optional<std::filesystem::path>
 resolve_include_at(const SourceSnapshot& root, std::span<const SourceSnapshot> open_documents,
                    const WorkspaceConfiguration& configuration, std::size_t utf8_offset,
                    IncludeMetadataCache* cache) {
     return Resolver{open_documents, configuration, cache}.resolve_at(root, utf8_offset);
+}
+
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
+bool is_include_directive_at(std::string_view text, std::size_t utf8_offset) {
+    const auto parsed = parse_includes(text);
+    return std::ranges::any_of(parsed.directives, [utf8_offset](const auto& item) {
+        const auto delimiter_offset = item.path_offset - 1;
+        const auto terminator_offset = item.path_offset + item.path.size();
+        return utf8_offset >= delimiter_offset && utf8_offset <= terminator_offset;
+    });
 }
 
 } // namespace hlsl_intellisense::workspace

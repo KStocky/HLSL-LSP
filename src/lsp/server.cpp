@@ -1289,6 +1289,44 @@ callee_at(std::string_view text, const std::vector<bool>& code, std::size_t open
     }
 }
 
+[[nodiscard]] bool position_less(workspace::Position left, workspace::Position right) {
+    return left.line != right.line ? left.line < right.line : left.character < right.character;
+}
+
+// Permissive overlap test used to decide whether a diagnostic's displayed range
+// is relevant to a textDocument/codeAction request: ranges that merely touch
+// (one's end equals the other's start) count as overlapping so a zero-width
+// cursor position or a zero-width diagnostic point still matches, matching how
+// LSP clients typically request quick fixes either at a cursor or by clicking a
+// squiggle.
+[[nodiscard]] bool ranges_overlap(workspace::Range left, workspace::Range right) {
+    return !position_less(right.end, left.start) && !position_less(left.end, right.start);
+}
+
+// Builds the LSP diagnostic JSON item for `diagnostic`, including opaque
+// correlation `data` (document URI, version, analysis generation, and the
+// diagnostic's index within that generation's published set) and, when the
+// diagnostic carries DXC fix-its, a `code` marking it as fixable. textDocument/
+// codeAction never trusts data echoed back by the client; this shape exists so
+// the same correlation is visible to the client and reproducible from the
+// server's own cache.
+[[nodiscard]] Json diagnostic_json(const workspace::SourceSnapshot& snapshot,
+                                   const dxc::Diagnostic& diagnostic, std::uint64_t generation,
+                                   std::size_t index) {
+    Json item = {{"range", lsp_range(diagnostic_range(snapshot, diagnostic))},
+                 {"severity", diagnostic_severity(diagnostic.severity)},
+                 {"source", "dxc"},
+                 {"message", diagnostic.message}};
+    if (!diagnostic.fix_its.empty()) {
+        item["code"] = "hlsl-lsp/dxc-fix-it";
+    }
+    item["data"] = {{"uri", snapshot.uri()},
+                    {"version", snapshot.version()},
+                    {"generation", generation},
+                    {"index", index}};
+    return item;
+}
+
 [[nodiscard]] std::string workspace_folder_identity(const Json& folder) {
     try {
         return workspace::DocumentUri::from_uri(string_member(folder, "uri")).identity();
@@ -1665,6 +1703,11 @@ void Server::register_handlers() {
         "hlsl/dxcRuntime", [this](const auto& params) { return dxc_runtime(params); });
     dispatcher_.register_request_handler("hlsl/variants",
                                          [this](const auto& params) { return variants(params); });
+    dispatcher_.register_request_handler(
+        "textDocument/codeAction",
+        [this](const auto& params, const auto& context) { return code_action(params, context); });
+    dispatcher_.register_request_handler(
+        "workspace/executeCommand", [this](const auto& params) { return execute_command(params); });
     if (options_.semantic_tokens) {
         dispatcher_.register_request_handler("textDocument/semanticTokens/full",
                                              [this](const auto& params, const auto& context) {
@@ -1834,6 +1877,8 @@ Json Server::initialize(const std::optional<Json>& params) {
           {"retriggerCharacters", Json::array({")"})}}},
         {"documentSymbolProvider", true},
         {"workspaceSymbolProvider", true},
+        {"codeActionProvider", {{"codeActionKinds", Json::array({"quickfix"})}}},
+        {"executeCommandProvider", {{"commands", Json::array({"hlsl-lsp.selectVariant"})}}},
         {"workspace",
          {{"workspaceFolders", {{"supported", true}, {"changeNotifications", true}}}}}};
     if (options_.semantic_tokens) {
@@ -2756,6 +2801,7 @@ void Server::did_close(const std::optional<Json>& params) {
             std::scoped_lock state_lock{state_mutex_};
             documents_.did_close(uri);
             ++analysis_generations_[snapshot.document_uri().identity()];
+            diagnostics_by_identity_.erase(snapshot.document_uri().identity());
         }
         analysis_.erase(snapshot.document_uri().identity());
         for (const auto& root_uri : affected_roots) {
@@ -3004,8 +3050,13 @@ void Server::analyze_and_publish(std::string_view uri) {
 }
 
 workspace::WorkspaceConfiguration
-Server::configuration_for(const workspace::SourceSnapshot& snapshot,
-                          const workspace::ConfigurationOverrides& overrides) const {
+Server::base_configuration_for(const workspace::SourceSnapshot& snapshot) const {
+    return base_configuration_for(snapshot, client_default_language_version_);
+}
+
+workspace::WorkspaceConfiguration
+Server::base_configuration_for(const workspace::SourceSnapshot& snapshot,
+                               const std::optional<std::string>& client_default_language_version) {
     workspace::WorkspaceConfiguration configuration;
     const auto shader_directory = std::filesystem::path{snapshot.path()}.parent_path();
     std::error_code error;
@@ -3015,29 +3066,75 @@ Server::configuration_for(const workspace::SourceSnapshot& snapshot,
         throw std::filesystem::filesystem_error{"Unable to inspect shader directory",
                                                 shader_directory, error};
     }
+    if (!configuration.language_version && client_default_language_version) {
+        configuration.language_version = client_default_language_version;
+    }
+    return configuration;
+}
+
+workspace::WorkspaceConfiguration
+Server::configuration_for(const workspace::SourceSnapshot& snapshot,
+                          const workspace::ConfigurationOverrides& overrides) const {
+    return configuration_for(snapshot, ConfigurationState{.editor_settings = overrides,
+                                                          .client_default_language_version =
+                                                              client_default_language_version_,
+                                                          .active_variant = active_variant_,
+                                                          .workspace_folders = workspace_folders_});
+}
+
+workspace::WorkspaceConfiguration
+Server::configuration_for(const workspace::SourceSnapshot& snapshot,
+                          const ConfigurationState& state) {
+    auto configuration = base_configuration_for(snapshot, state.client_default_language_version);
     // The active variant is applied on top of the file-derived configuration but
     // below editor overrides, so a selected variant beats client defaults while an
     // explicit editor setting still wins. Unknown or inapplicable selections are
     // reported by reevaluate_variant_selection rather than throwing here.
-    if (active_variant_) {
-        static_cast<void>(workspace::apply_variant(configuration, *active_variant_));
+    if (state.active_variant) {
+        static_cast<void>(workspace::apply_variant(configuration, *state.active_variant));
     }
-    if (!configuration.language_version && client_default_language_version_) {
-        configuration.language_version = client_default_language_version_;
-    }
-    return workspace::apply_configuration_overrides(std::move(configuration), overrides,
-                                                    configuration_base_directory(snapshot.path()));
+    return workspace::apply_configuration_overrides(
+        std::move(configuration), state.editor_settings,
+        configuration_base_directory(snapshot.path(), state.workspace_folders));
+}
+
+workspace::WorkspaceConfiguration
+Server::variant_configuration_for(const workspace::SourceSnapshot& snapshot,
+                                  std::string_view variant_name,
+                                  const workspace::ConfigurationOverrides& overrides) const {
+    return variant_configuration_for(
+        snapshot, variant_name,
+        ConfigurationState{.editor_settings = overrides,
+                           .client_default_language_version = client_default_language_version_,
+                           .active_variant = active_variant_,
+                           .workspace_folders = workspace_folders_});
+}
+
+workspace::WorkspaceConfiguration
+Server::variant_configuration_for(const workspace::SourceSnapshot& snapshot,
+                                  std::string_view variant_name, const ConfigurationState& state) {
+    auto configuration = base_configuration_for(snapshot, state.client_default_language_version);
+    static_cast<void>(workspace::apply_variant(configuration, variant_name));
+    return workspace::apply_configuration_overrides(
+        std::move(configuration), state.editor_settings,
+        configuration_base_directory(snapshot.path(), state.workspace_folders));
 }
 
 std::filesystem::path Server::configuration_base_directory(std::string_view shader_path) const {
+    return configuration_base_directory(shader_path, workspace_folders_);
+}
+
+std::filesystem::path Server::configuration_base_directory(
+    std::string_view shader_path,
+    const std::unordered_map<std::string, std::filesystem::path>& workspace_folders) {
     auto directory = std::filesystem::absolute(std::filesystem::path{shader_path}.parent_path())
                          .lexically_normal();
     auto candidate = directory;
     while (!candidate.empty()) {
         try {
             const auto identity = workspace::DocumentUri::from_path(candidate.string()).identity();
-            if (const auto folder = workspace_folders_.find(identity);
-                folder != workspace_folders_.end()) {
+            if (const auto folder = workspace_folders.find(identity);
+                folder != workspace_folders.end()) {
                 return folder->second;
             }
         } catch (const workspace::DocumentError&) {
@@ -3050,6 +3147,14 @@ std::filesystem::path Server::configuration_base_directory(std::string_view shad
         candidate = parent;
     }
     return directory;
+}
+
+Server::ConfigurationState Server::snapshot_configuration_state() const {
+    std::scoped_lock state_lock{state_mutex_};
+    return ConfigurationState{.editor_settings = editor_settings_,
+                              .client_default_language_version = client_default_language_version_,
+                              .active_variant = active_variant_,
+                              .workspace_folders = workspace_folders_};
 }
 
 void Server::reanalyze_all() {
@@ -3346,6 +3451,370 @@ Json Server::variants(const std::optional<Json>& params) {
                 {"variants", std::move(variant_list)}};
 }
 
+std::optional<Json> Server::fix_it_code_action(const workspace::SourceSnapshot& snapshot,
+                                               const dxc::Diagnostic& diagnostic,
+                                               const Json& diagnostic_item) const {
+    struct PendingEdit {
+        std::size_t start;
+        std::size_t end;
+        std::string replacement;
+    };
+    std::vector<PendingEdit> edits;
+    edits.reserve(diagnostic.fix_its.size());
+    for (const auto& fix_it : diagnostic.fix_its) {
+        // A fix-it with no attributed file, or attributed to a different file
+        // than the document this action is for, is never safe to apply here:
+        // reject the whole (possibly multi-edit) fix rather than guessing.
+        if (fix_it.range.start.path.empty() || fix_it.range.end.path.empty() ||
+            !same_document_path(fix_it.range.start.path, snapshot.path()) ||
+            !same_document_path(fix_it.range.end.path, snapshot.path())) {
+            return std::nullopt;
+        }
+        const auto start = static_cast<std::size_t>(fix_it.range.start.offset);
+        const auto end = static_cast<std::size_t>(fix_it.range.end.offset);
+        if (start > end || end > snapshot.text().size()) {
+            return std::nullopt;
+        }
+        try {
+            // utf16_length fully decodes its argument, so this also validates
+            // that DXC's replacement text is well-formed UTF-8 before it is ever
+            // written into a document.
+            static_cast<void>(workspace::utf16_length(fix_it.replacement_text));
+        } catch (const workspace::DocumentError&) {
+            return std::nullopt;
+        }
+        edits.push_back(
+            PendingEdit{.start = start, .end = end, .replacement = fix_it.replacement_text});
+    }
+    if (edits.empty()) {
+        return std::nullopt;
+    }
+
+    // stable_sort preserves DXC's own reported relative order for any edits
+    // that end up adjacent after sorting by start offset, keeping the result
+    // deterministic across runs/builds rather than depending on an
+    // unspecified tie-break order.
+    std::ranges::stable_sort(edits, {}, &PendingEdit::start);
+    for (std::size_t index = 1; index < edits.size(); ++index) {
+        // A strict overlap, or two edits that start at the exact same offset,
+        // can never be applied together safely: DXC's fix-it list gives no
+        // guaranteed semantic for which of two same-start edits (e.g. two
+        // zero-width insertions at one point) should be applied first, so
+        // concatenation order cannot be inferred rather than guessed. Reject
+        // the entire multi-edit fix rather than silently picking an order.
+        if (edits[index].start < edits[index - 1].end ||
+            edits[index].start == edits[index - 1].start) {
+            return std::nullopt;
+        }
+    }
+
+    Json lsp_edits = Json::array();
+    for (const auto& edit : edits) {
+        try {
+            const auto start = workspace::lsp_position_at(snapshot.text(), edit.start);
+            const auto end = workspace::lsp_position_at(snapshot.text(), edit.end);
+            lsp_edits.push_back({{"range", lsp_range({.start = start, .end = end})},
+                                 {"newText", edit.replacement}});
+        } catch (const workspace::DocumentError&) {
+            return std::nullopt;
+        }
+    }
+
+    Json document_changes = Json::array(
+        {Json{{"textDocument", {{"uri", snapshot.uri()}, {"version", snapshot.version()}}},
+              {"edits", std::move(lsp_edits)}}});
+    std::string title = "Apply DXC fix-it: " + diagnostic.message;
+    if (edits.size() > 1) {
+        title += " (" + std::to_string(edits.size()) + " edits)";
+    }
+    return Json{{"title", std::move(title)},
+                {"kind", "quickfix"},
+                {"diagnostics", Json::array({diagnostic_item})},
+                {"isPreferred", true},
+                {"edit", {{"documentChanges", std::move(document_changes)}}}};
+}
+
+std::optional<Json> Server::include_recovery_action(
+    const workspace::SourceSnapshot& snapshot,
+    const std::vector<workspace::SourceSnapshot>& open_documents, const dxc::Diagnostic& diagnostic,
+    const Json& diagnostic_item, const workspace::WorkspaceConfiguration& active_configuration,
+    const std::optional<std::string>& active_variant,
+    const std::function<const workspace::WorkspaceConfiguration&(std::string_view)>&
+        variant_configuration_for_name) {
+    // Fix-it diagnostics are handled by fix_it_code_action; this recovery path
+    // only ever applies to diagnostics DXC gave no fix-it for.
+    if (!diagnostic.fix_its.empty() || diagnostic.location.line == 0 ||
+        diagnostic.location.column == 0) {
+        return std::nullopt;
+    }
+    const auto displayed_range = diagnostic_range(snapshot, diagnostic);
+    if (displayed_range == workspace::Range{}) {
+        return std::nullopt;
+    }
+    std::size_t offset{};
+    try {
+        offset = workspace::utf8_offset_at(snapshot.text(), displayed_range.start);
+    } catch (const workspace::DocumentError&) {
+        return std::nullopt;
+    }
+
+    // resolve_include_at only returns a location when `offset` falls inside an
+    // #include directive's path span; this is how the diagnostic is
+    // structurally (not textually) recognized as an unresolved-include problem.
+    // A non-null result means either the diagnostic is not on an include path at
+    // all, or the include already resolves, so there is nothing to recover.
+    if (workspace::resolve_include_at(snapshot, open_documents, active_configuration, offset)
+            .has_value()) {
+        return std::nullopt;
+    }
+
+    for (const auto& variant : active_configuration.variants) {
+        if (!variant.applicable || (active_variant && *active_variant == variant.name)) {
+            continue;
+        }
+        const auto& candidate = variant_configuration_for_name(variant.name);
+        if (!workspace::resolve_include_at(snapshot, open_documents, candidate, offset)
+                 .has_value()) {
+            continue;
+        }
+        // Proven by resolve_include_at using this variant's own declared
+        // include directories: never a fabricated path.
+        return Json{
+            {"title", "Select shader variant '" + variant.name + "' (resolves this #include)"},
+            {"kind", "quickfix"},
+            {"diagnostics", Json::array({diagnostic_item})},
+            {"command",
+             {{"title", "Select HLSL shader variant"},
+              {"command", "hlsl-lsp.selectVariant"},
+              {"arguments", Json::array({Json{{"variant", variant.name}}})}}}};
+    }
+    return std::nullopt;
+}
+
+Json Server::code_action(const std::optional<Json>& params,
+                         const json_rpc::RequestContext& context) {
+    require_running();
+    const auto& value = object_params(params);
+    const auto uri = string_member(object_member(value, "textDocument"), "uri");
+    const auto requested_range = range(object_member(value, "range"));
+    const auto& request_context = object_member(value, "context");
+    if (const auto raw_diagnostics = request_context.find("diagnostics");
+        raw_diagnostics != request_context.end() && !raw_diagnostics->is_array()) {
+        invalid_params("context.diagnostics must be an array");
+    }
+    // context.diagnostics is intentionally never read beyond this shape check:
+    // actions are always derived from the server's own current diagnostic
+    // state, never from a client-echoed payload.
+    bool accept_quickfix = true;
+    if (const auto only = request_context.find("only");
+        only != request_context.end() && !only->is_null()) {
+        if (!only->is_array()) {
+            invalid_params("context.only must be an array of CodeActionKind strings");
+        }
+        accept_quickfix = false;
+        for (const auto& kind : *only) {
+            if (!kind.is_string()) {
+                invalid_params("context.only entries must be strings");
+            }
+            // Per the LSP CodeActionKind hierarchy, an `only` entry matches when
+            // it is a prefix of (or equal to) the produced kind, e.g. requesting
+            // "quickfix" matches a produced "quickfix" or "quickfix.foo" action.
+            // Every action this server produces has the plain "quickfix" kind
+            // (no sub-kind), so only the exact string, or an empty/whitespace
+            // prefix, can match; a more specific requested sub-kind such as
+            // "quickfix.foo" must not match our plainly-kinded action.
+            if (std::string_view{"quickfix"}.starts_with(kind.get_ref<const std::string&>())) {
+                accept_quickfix = true;
+            }
+        }
+    }
+    if (!accept_quickfix) {
+        return Json::array();
+    }
+
+    workspace::SourceSnapshot snapshot = [&] {
+        std::scoped_lock state_lock{state_mutex_};
+        try {
+            const auto& state = documents_.document(uri);
+            if (!state.open) {
+                invalid_params("Code action document is not open");
+            }
+            return documents_.snapshot(uri);
+        } catch (const workspace::DocumentError& error) {
+            invalid_params(error.what());
+        }
+    }();
+    context.cancellation.throw_if_cancellation_requested();
+
+    std::vector<dxc::Diagnostic> diagnostics;
+    std::uint64_t generation{};
+    std::vector<workspace::SourceSnapshot> open_documents;
+    {
+        std::scoped_lock state_lock{state_mutex_};
+        const auto identity = snapshot.document_uri().identity();
+        const auto record = diagnostics_by_identity_.find(identity);
+        const auto current_generation_entry = analysis_generations_.find(identity);
+        const auto current_generation = current_generation_entry == analysis_generations_.end()
+                                            ? std::uint64_t{}
+                                            : current_generation_entry->second;
+        if (record == diagnostics_by_identity_.end() ||
+            record->second.version != snapshot.version() ||
+            record->second.generation != current_generation) {
+            // Diagnostics were never computed for exactly this snapshot version,
+            // the document has changed since, or a configuration/variant
+            // reanalysis has already started (bumping analysis_generations_)
+            // without a matching completed analysis cached yet: omit rather
+            // than guess or offer actions derived from stale diagnostics.
+            return Json::array();
+        }
+        diagnostics = record->second.diagnostics;
+        generation = record->second.generation;
+        open_documents = documents_.open_snapshots();
+    }
+
+    // Diagnostics overlapping the requested range, split into those DXC gave a
+    // fix-it for (handled by fix_it_code_action, which needs no configuration)
+    // and those that are structurally on an unresolved #include directive path
+    // (candidates for include_recovery_action). Recognizing the latter uses
+    // only the snapshot's own text (is_include_directive_at is a cheap textual
+    // check, no configuration or filesystem access), so this pass decides
+    // whether any configuration needs to be loaded at all for this request
+    // before paying for it, rather than reloading it once per diagnostic.
+    struct OverlappingDiagnostic {
+        std::size_t index;
+        Json item;
+        bool is_include_candidate{};
+    };
+    std::vector<OverlappingDiagnostic> overlapping;
+    bool needs_configuration = false;
+    for (std::size_t index = 0; index < diagnostics.size(); ++index) {
+        context.cancellation.throw_if_cancellation_requested();
+        const auto& diagnostic = diagnostics[index];
+        if (diagnostic.location.line == 0 || diagnostic.location.column == 0) {
+            continue;
+        }
+        const auto displayed_range = diagnostic_range(snapshot, diagnostic);
+        if (displayed_range == workspace::Range{} ||
+            !ranges_overlap(displayed_range, requested_range)) {
+            continue;
+        }
+        OverlappingDiagnostic entry{
+            .index = index, .item = diagnostic_json(snapshot, diagnostic, generation, index)};
+        if (diagnostic.fix_its.empty()) {
+            try {
+                const auto offset =
+                    workspace::utf8_offset_at(snapshot.text(), displayed_range.start);
+                entry.is_include_candidate =
+                    workspace::is_include_directive_at(snapshot.text(), offset);
+            } catch (const workspace::DocumentError&) {
+                entry.is_include_candidate = false;
+            }
+            needs_configuration = needs_configuration || entry.is_include_candidate;
+        }
+        overlapping.push_back(std::move(entry));
+    }
+
+    // Computed at most once per request (not once per diagnostic), and only
+    // when at least one overlapping diagnostic actually needs it. State is
+    // snapshotted under a single brief lock; the (possibly disk-I/O-bound)
+    // configuration computation itself then runs unlocked.
+    std::optional<ConfigurationState> configuration_state;
+    workspace::WorkspaceConfiguration active_configuration;
+    std::optional<std::string> active_variant;
+    std::unordered_map<std::string, workspace::WorkspaceConfiguration> variant_configurations;
+    if (needs_configuration) {
+        configuration_state = snapshot_configuration_state();
+        active_configuration = configuration_for(snapshot, *configuration_state);
+        active_variant = configuration_state->active_variant;
+    }
+    const auto variant_config =
+        [&](std::string_view variant_name) -> const workspace::WorkspaceConfiguration& {
+        auto [found, inserted] = variant_configurations.try_emplace(std::string{variant_name});
+        if (inserted) {
+            found->second = variant_configuration_for(snapshot, variant_name, *configuration_state);
+        }
+        return found->second;
+    };
+
+    Json actions = Json::array();
+    for (const auto& entry : overlapping) {
+        context.cancellation.throw_if_cancellation_requested();
+        const auto& diagnostic = diagnostics[entry.index];
+        if (!diagnostic.fix_its.empty()) {
+            if (auto action = fix_it_code_action(snapshot, diagnostic, entry.item)) {
+                actions.push_back(std::move(*action));
+            }
+        } else if (entry.is_include_candidate) {
+            if (auto action =
+                    include_recovery_action(snapshot, open_documents, diagnostic, entry.item,
+                                            active_configuration, active_variant, variant_config)) {
+                actions.push_back(std::move(*action));
+            }
+        }
+    }
+
+    {
+        std::scoped_lock state_lock{state_mutex_};
+        if (!documents_.contains(uri) || !documents_.document(uri).open ||
+            documents_.document(uri).version != snapshot.version()) {
+            throw HandlerError{json_rpc::content_modified_code, "Code action was superseded"};
+        }
+    }
+    return actions;
+}
+
+Json Server::execute_command(const std::optional<Json>& params) {
+    require_running();
+    const auto& value = object_params(params);
+    const auto command = string_member(value, "command");
+    if (command != "hlsl-lsp.selectVariant") {
+        throw HandlerError{json_rpc::invalid_params_code, "Unknown command: " + command};
+    }
+    Json argument = Json::object();
+    if (const auto arguments = value.find("arguments");
+        arguments != value.end() && !arguments->is_null()) {
+        if (!arguments->is_array() || arguments->empty() || !(*arguments)[0].is_object()) {
+            invalid_params("hlsl-lsp.selectVariant requires a single {variant} argument object");
+        }
+        argument = (*arguments)[0];
+    }
+    Json variant_params = Json::object();
+    if (const auto variant = argument.find("variant"); variant != argument.end()) {
+        if (!variant->is_string() && !variant->is_null()) {
+            invalid_params("variant must be a string or null");
+        }
+        variant_params["variant"] = *variant;
+    } else {
+        variant_params["variant"] = nullptr;
+    }
+    // Reuses the same validated state mutation and reanalysis path a client
+    // hlsl/didChangeActiveVariant notification takes, so command-driven variant
+    // selection stays consistent with the notification-driven path.
+    did_change_active_variant(variant_params);
+
+    // Unlike a client-originated hlsl/didChangeActiveVariant notification (the
+    // client already owns that state, e.g. a VS Code setting or a Visual
+    // Studio configuration cache, and applies it before telling the server),
+    // this command changes *only* server state: nothing else durably records
+    // the new selection. Without this notification, the client's own
+    // persisted/displayed active variant would silently diverge from the
+    // server's the next time anything resynchronizes settings (client
+    // restart, an unrelated configuration change, etc.), which would then
+    // overwrite the server's variant right back. Report the server's
+    // resulting authoritative value (not merely the requested one) so a
+    // client always converges to the true current state even if multiple
+    // selectVariant commands race.
+    std::optional<std::string> resulting_variant;
+    {
+        std::scoped_lock state_lock{state_mutex_};
+        resulting_variant = active_variant_;
+    }
+    sender_(json_rpc::Notification{
+        .method = "hlsl/activeVariantChanged",
+        .params = Json{{"variant", resulting_variant ? Json(*resulting_variant) : Json(nullptr)}}});
+    return nullptr;
+}
+
 void Server::analysis_completed(const workspace::SourceSnapshot& snapshot,
                                 const std::vector<dxc::Diagnostic>& diagnostics,
                                 std::uint64_t generation) {
@@ -3358,22 +3827,50 @@ void Server::analysis_completed(const workspace::SourceSnapshot& snapshot,
     const auto latest = documents_.snapshot(snapshot.uri());
     if (state.open && expected != analysis_generations_.end() && expected->second == generation &&
         latest.version() == snapshot.version()) {
-        publish_diagnostics(latest, diagnostics);
+        std::vector<dxc::Diagnostic> filtered;
+        filtered.reserve(diagnostics.size());
+        for (const auto& diagnostic : diagnostics) {
+            if (!diagnostic.location.path.empty() &&
+                !same_document_path(diagnostic.location.path, latest.path())) {
+                continue;
+            }
+            filtered.push_back(diagnostic);
+        }
+
+        const auto identity = snapshot.document_uri().identity();
+        const auto existing = diagnostics_by_identity_.find(identity);
+        // A cache hit (identical document version and diagnostics content,
+        // where only the analysis generation advanced) still must refresh the
+        // cached record so textDocument/codeAction sees the current
+        // generation and does not treat itself as stale, but must not
+        // republish a byte-identical textDocument/publishDiagnostics payload
+        // to the client: interactive typing can retrigger reanalysis of
+        // unchanged content many times (e.g. every keystroke inside a
+        // comment, or a configuration/variant reanalysis that reproduces the
+        // same diagnostics), and resending the same notification on every
+        // such cache hit is wasted client/server work with no observable
+        // effect for the user. A first publish (no existing record), a
+        // different document version, or genuinely different diagnostics
+        // always republishes.
+        const bool unchanged = existing != diagnostics_by_identity_.end() &&
+                               existing->second.version == latest.version() &&
+                               existing->second.diagnostics == filtered;
+        diagnostics_by_identity_.insert_or_assign(identity,
+                                                  DiagnosticsRecord{.version = latest.version(),
+                                                                    .generation = generation,
+                                                                    .diagnostics = filtered});
+        if (!unchanged) {
+            publish_diagnostics(latest, filtered, generation);
+        }
     }
 }
 
 void Server::publish_diagnostics(const workspace::SourceSnapshot& snapshot,
-                                 const std::vector<dxc::Diagnostic>& diagnostics) {
+                                 const std::vector<dxc::Diagnostic>& diagnostics,
+                                 std::uint64_t generation) {
     Json items = Json::array();
-    for (const auto& diagnostic : diagnostics) {
-        if (!diagnostic.location.path.empty() &&
-            !same_document_path(diagnostic.location.path, snapshot.path())) {
-            continue;
-        }
-        items.push_back({{"range", lsp_range(diagnostic_range(snapshot, diagnostic))},
-                         {"severity", diagnostic_severity(diagnostic.severity)},
-                         {"source", "dxc"},
-                         {"message", diagnostic.message}});
+    for (std::size_t index = 0; index < diagnostics.size(); ++index) {
+        items.push_back(diagnostic_json(snapshot, diagnostics[index], generation, index));
     }
     sender_(json_rpc::Notification{.method = "textDocument/publishDiagnostics",
                                    .params = Json{{"uri", snapshot.uri()},

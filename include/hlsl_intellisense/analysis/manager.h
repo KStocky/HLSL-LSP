@@ -68,6 +68,12 @@ struct RootMetadata {
 struct AnalysisHooks {
     std::function<void(std::string_view, std::int64_t)> before_analysis;
     std::function<void(std::string_view)> before_interactive;
+    // Test seam only: lets tests rewrite the diagnostics a real DXC parse
+    // produced immediately before they are cached and published, to exercise
+    // malformed/overlapping fix-it rejection in textDocument/codeAction that
+    // pinned DXC 1.9.2607.13 was not empirically observed to produce on its
+    // own. Never set in production.
+    std::function<void(std::vector<dxc::Diagnostic>&)> after_diagnostics;
 };
 
 class Manager final {

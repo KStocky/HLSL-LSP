@@ -265,11 +265,9 @@ struct Manager::Impl final {
             const auto compiler_options = input.configuration.compiler_options();
             const auto compiler_arguments = compiler_options.arguments();
             auto entry = worker_state.entries.find(root_identity);
-            bool was_cache_hit{};
             if (entry != worker_state.entries.end() && entry->second.cache_key == cache_key) {
                 cache_hits.fetch_add(1, std::memory_order_relaxed);
                 entry->second.last_use = ++worker_state.use_counter;
-                was_cache_hit = true;
             } else {
                 cache_misses.fetch_add(1, std::memory_order_relaxed);
                 const auto source_bytes = estimate_sources(resolution);
@@ -337,24 +335,16 @@ struct Manager::Impl final {
                 enforce_limits(worker_state, worker, root_identity);
                 cancellation.throw_if_cancellation_requested();
             }
-            if (was_cache_hit) {
-                std::scoped_lock lock{metadata_mutex};
-                if (root_epochs[root_identity] != epoch ||
-                    cancellation.is_cancellation_requested()) {
-                    return;
-                }
-                metadata.insert_or_assign(
-                    root_identity,
-                    RootMetadata{.root_uri = root_uri,
-                                 .root_identity = root_identity,
-                                 .version = input.root.version(),
-                                 .configuration_fingerprint = configuration,
-                                 .dependency_identities = entry->second.dependencies,
-                                 .has_dynamic_includes = entry->second.has_dynamic_includes});
-                return;
-            }
             const auto dependencies = entry->second.dependencies;
             const auto has_dynamic_includes = entry->second.has_dynamic_includes;
+            // Diagnostics are re-extracted from the (possibly reused) parsed
+            // translation unit even on a cache hit: extraction itself is cheap
+            // (no reparsing), and skipping it would leave analysis_generations_
+            // (bumped synchronously at submission) permanently ahead of the
+            // last diagnostics actually confirmed for this root, which would
+            // make any consumer that gates on an exact generation match (e.g.
+            // textDocument/codeAction) stay incorrectly stale forever after a
+            // configuration/variant reanalysis that happens to be a cache hit.
             auto diagnostics_result = entry->second.translation_unit.diagnostics();
             enforce_limits(worker_state, worker, root_identity);
             cancellation.throw_if_cancellation_requested();
@@ -373,6 +363,9 @@ struct Manager::Impl final {
                                                 .has_dynamic_includes = has_dynamic_includes});
             }
             cancellation.throw_if_cancellation_requested();
+            if (hooks && hooks->after_diagnostics) {
+                hooks->after_diagnostics(diagnostics_result);
+            }
             diagnostics(input.root, diagnostics_result, input.generation);
         } catch (const json_rpc::HandlerError&) {
             return;

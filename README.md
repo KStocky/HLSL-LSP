@@ -16,6 +16,8 @@ with:
 - Resource binding inspection: register-space/class grouping, collisions,
   embedded root-signature state, and root-signature compatibility
 - DXC-backed semantic colouring and go-to-definition for symbols and include paths
+- Compiler-verified quick fixes for fixable DXC diagnostics, plus deterministic
+  include/configuration recovery actions
 - Workspace symbol support for Visual Studio's All-In-One Search
 - Hierarchical `shadertoolsconfig.json` compiler configuration
 - Named compilation variants selectable per document from either editor
@@ -126,6 +128,34 @@ Press `F12` to navigate to symbol definitions or resolved `#include` files,
 including files reached through virtual directory mappings.
 
 ![Go to definition for an HLSL include](art/go-to-definition.png)
+
+### Code actions (quick fixes)
+
+HLSL-LSP offers quick fixes only for DXC diagnostics that carry a compiler
+fix-it it has independently verified is safe to apply — it never infers or
+parses HLSL syntax itself, and never guesses a fix DXC did not provide.
+Each fix-it is revalidated against the document's current content, offsets,
+and version at request time, so a quick fix is only offered when it still
+applies to what is actually open. Fixes are versioned `WorkspaceEdit`s: they
+target the exact open-document snapshot the diagnostic was computed from, and
+a stale, overlapping, or malformed fix-it is rejected entirely rather than
+partially applied. Quick fixes are scoped to the requested document only: a
+DXC fix-it attributed to any other file (for example a `#include`d header) is
+always rejected, even when that other file is open, because HLSL-LSP has no
+cross-file edit correlation for this feature. In practice DXC's verified
+fix-it families are all reported against the root translation unit's own
+text, so this scope has not been observed to lose real fixes.
+
+For `#include` paths that fail to resolve under the active configuration,
+HLSL-LSP also offers a deterministic recovery action when a different,
+already-known compilation variant would resolve the same include — never a
+fabricated or guessed path. Selecting it switches the document's active
+variant, the same mechanism as the editors' variant picker.
+
+In Visual Studio and Visual Studio Code, use the native lightbulb (`Ctrl+.`)
+on a fixable diagnostic. See
+[`docs/code-actions.md`](docs/code-actions.md) for the full protocol,
+correlation/staleness rules, and included-file safety.
 
 ### References and rename
 

@@ -29,12 +29,25 @@ internal sealed class HlslLanguageClient :
         string languageVersion,
         string dxcRuntimeDirectory,
         string activeVariant,
-        Func<string, string, Task> onRuntimeRestartRequested)
+        Func<string, string, Task> onRuntimeRestartRequested,
+        Func<string, Task> onActiveVariantChangedFromServer)
     {
         this.languageVersion = languageVersion;
         this.dxcRuntimeDirectory = dxcRuntimeDirectory ?? string.Empty;
         this.activeVariant = activeVariant ?? string.Empty;
-        customMessageTarget = new HlslCustomMessageTarget(onRuntimeRestartRequested);
+        customMessageTarget = new HlslCustomMessageTarget(
+            onRuntimeRestartRequested,
+            async variant =>
+            {
+                // Keep the cached value (reapplied via InitializationOptions
+                // on the next runtime restart) in sync with what the server
+                // reports before telling the rest of the client about it.
+                SetActiveVariantFromServer(variant);
+                if (onActiveVariantChangedFromServer != null)
+                {
+                    await onActiveVariantChangedFromServer(variant).ConfigureAwait(false);
+                }
+            });
     }
 
     public string Name => "HLSL-LSP";
@@ -119,6 +132,15 @@ internal sealed class HlslLanguageClient :
     }
 
     internal string ActiveVariant => Volatile.Read(ref activeVariant);
+
+    // Records a variant the server itself already applied and is only
+    // reporting back (e.g. after hlsl-lsp.selectVariant), so the cached value
+    // used by InitializationOptions on the next runtime restart stays in
+    // sync without re-notifying the server of a change it already made.
+    internal void SetActiveVariantFromServer(string variant)
+    {
+        Volatile.Write(ref activeVariant, variant ?? string.Empty);
+    }
 
     internal async Task<VariantListModel> GetVariantsAsync(
         Uri documentUri,
@@ -420,13 +442,22 @@ internal sealed class HlslLanguageClient :
         public string Reason { get; set; }
     }
 
+    public sealed class ActiveVariantChangedParams
+    {
+        public string Variant { get; set; }
+    }
+
     private sealed class HlslCustomMessageTarget
     {
         private readonly Func<string, string, Task> onRuntimeRestartRequested;
+        private readonly Func<string, Task> onActiveVariantChanged;
 
-        public HlslCustomMessageTarget(Func<string, string, Task> handler)
+        public HlslCustomMessageTarget(
+            Func<string, string, Task> runtimeRestartHandler,
+            Func<string, Task> activeVariantChangedHandler)
         {
-            onRuntimeRestartRequested = handler;
+            onRuntimeRestartRequested = runtimeRestartHandler;
+            onActiveVariantChanged = activeVariantChangedHandler;
         }
 
         [JsonRpcMethod(
@@ -441,6 +472,22 @@ internal sealed class HlslLanguageClient :
             return onRuntimeRestartRequested(
                 parameters?.Directory ?? string.Empty,
                 parameters?.Reason ?? string.Empty);
+        }
+
+        // Sent once after a successful hlsl-lsp.selectVariant executeCommand
+        // so the client's own durable/cached active variant (and any status
+        // UI showing it) converges to the server's authoritative value,
+        // exactly as it would after using the existing variant picker.
+        [JsonRpcMethod(
+            "hlsl/activeVariantChanged",
+            UseSingleObjectParameterDeserialization = true)]
+        public Task ActiveVariantChangedAsync(ActiveVariantChangedParams parameters)
+        {
+            if (onActiveVariantChanged == null)
+            {
+                return Task.CompletedTask;
+            }
+            return onActiveVariantChanged(parameters?.Variant ?? string.Empty);
         }
     }
 }

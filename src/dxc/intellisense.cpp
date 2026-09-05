@@ -513,6 +513,81 @@ class TaskCursors final {
     }
 }
 
+// Converts a DXC source range into a compiler-owned SourceRange, or nullopt
+// when the range is absent, null, spans more than one file, or is malformed
+// (end before start). DXC never intentionally emits cross-file or
+// out-of-order ranges for a single diagnostic; a range failing these checks
+// is treated as unusable rather than guessed at.
+//
+// This is only ever called on ranges returned from IDxcDiagnostic::GetFixItAt.
+// IDxcDiagnostic::GetRangeAt (the general per-diagnostic "referenced ranges"
+// API paired with GetNumRanges) is never called: empirically, pinned DXC
+// 1.9.2607.13 crashes (access violation) inside GetRangeAt whenever
+// GetNumRanges reports a non-zero count, reproduced for multiple unrelated
+// diagnostic categories (undeclared-member and assignment-in-condition
+// diagnostics). GetNumRanges itself does not crash; only dereferencing the
+// range it announces does. GetFixItAt's replacement range does not share this
+// defect and was verified safe across dozens of diagnostics, including ones
+// whose GetNumRanges was non-zero, so only fix-it ranges are surfaced here.
+[[nodiscard]] auto safe_source_range(IDxcSourceRange* range) -> std::optional<SourceRange> {
+    if (range == nullptr) {
+        return std::nullopt;
+    }
+    BOOL is_null{};
+    check(range->IsNull(&is_null), "IsNull");
+    if (is_null != FALSE) {
+        return std::nullopt;
+    }
+
+    ComPtr<IDxcSourceLocation> start_location;
+    ComPtr<IDxcSourceLocation> end_location;
+    check(range->GetStart(start_location.put()), "GetStart");
+    check(range->GetEnd(end_location.put()), "GetEnd");
+    if (start_location.get() == nullptr || end_location.get() == nullptr) {
+        return std::nullopt;
+    }
+
+    auto start = make_source_location(*start_location.get());
+    auto end = make_source_location(*end_location.get());
+    if (start.path.empty() || end.path.empty() || start.path != end.path ||
+        end.offset < start.offset) {
+        return std::nullopt;
+    }
+    return SourceRange{.start = std::move(start), .end = std::move(end)};
+}
+
+// Extracts DXC's compiler-owned fix-its for a diagnostic. Empirically (pinned
+// DXC 1.9.2607.13), fix-its are only ever populated for a narrow set of
+// diagnostics: an inserted ";" for some (not all) "expected ';'" parse errors,
+// and a replacement with the suggested spelling for some "did you mean '...'?"
+// identifier/type/function corrections. Every other diagnostic category probed
+// (undeclared identifiers without a close match, struct member typos,
+// assignment-used-as-condition, missing includes, missing return, implicit
+// narrowing, redefinitions, argument-count mismatches, type mismatches,
+// unknown attributes, and "expected ')'": ) reported zero fix-its. Callers must
+// not assume a fix-it exists for any diagnostic message or category; this
+// function is the only source of truth.
+[[nodiscard]] auto safe_diagnostic_fix_its(IDxcDiagnostic& diagnostic) -> std::vector<FixIt> {
+    unsigned count{};
+    check(diagnostic.GetNumFixIts(&count), "GetNumFixIts");
+
+    std::vector<FixIt> result;
+    result.reserve(count);
+    for (unsigned index = 0; index < count; ++index) {
+        ComPtr<IDxcSourceRange> range;
+        char* text{};
+        check(diagnostic.GetFixItAt(index, range.put(), &text), "GetFixItAt");
+        TaskString owned_text{text};
+        auto safe_range = safe_source_range(range.get());
+        if (!safe_range) {
+            continue;
+        }
+        result.push_back(FixIt{.range = std::move(*safe_range),
+                               .replacement_text = std::string{owned_text.view()}});
+    }
+    return result;
+}
+
 [[nodiscard]] bool symbol_container(DxcCursorKind kind) {
     return kind == DxcCursor_StructDecl || kind == DxcCursor_UnionDecl ||
            kind == DxcCursor_ClassDecl || kind == DxcCursor_EnumDecl ||
@@ -1152,7 +1227,8 @@ auto TranslationUnit::diagnostics() const -> std::vector<Diagnostic> {
         result.push_back(Diagnostic{
             .severity = map_severity(severity),
             .message = std::string{owned_spelling.view()},
-            .location = safe_diagnostic_location(*diagnostic.get(), implementation_->root_path)});
+            .location = safe_diagnostic_location(*diagnostic.get(), implementation_->root_path),
+            .fix_its = safe_diagnostic_fix_its(*diagnostic.get())});
     }
     return result;
 }

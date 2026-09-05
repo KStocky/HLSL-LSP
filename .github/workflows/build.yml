@@ -152,6 +152,19 @@ jobs:
             exit $LASTEXITCODE
           }
 
+      - name: Test Visual Studio client
+        if: matrix.compiler == 'msvc'
+        shell: pwsh
+        run: |
+          dotnet test `
+            clients\visual-studio\HlslLsp.VisualStudio.Tests\HlslLsp.VisualStudio.Tests.csproj `
+            --configuration Release `
+            -p:HlslLspServerDir="$env:GITHUB_WORKSPACE\out\build\ci" `
+            --logger "console;verbosity=normal"
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
       - name: Normalize Visual Studio VSIX
         if: matrix.compiler == 'msvc'
         shell: pwsh

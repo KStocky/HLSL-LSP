@@ -71,12 +71,55 @@ struct SourceLocation {
     std::uint32_t line{};
     std::uint32_t column{};
     std::uint32_t offset{};
+
+    friend bool operator==(const SourceLocation&, const SourceLocation&) = default;
+};
+
+// A source span reported by DXC for a diagnostic or fix-it. `start` and `end`
+// are always validated to refer to the same file (DXC never emits cross-file
+// spans for a single diagnostic range or fix-it) before being surfaced here.
+struct SourceRange {
+    SourceLocation start;
+    SourceLocation end;
+
+    friend bool operator==(const SourceRange&, const SourceRange&) = default;
+};
+
+// A textual replacement DXC itself considers a safe, deterministic fix for a
+// diagnostic ("fix-it"). `range` is the exact byte span in the diagnostic's
+// file to replace with `replacement_text`. DXC's IntelliSense fix-it support
+// is narrow: most diagnostics have none, and callers must never assume one is
+// present for a given diagnostic message or category.
+struct FixIt {
+    SourceRange range;
+    std::string replacement_text;
+
+    friend bool operator==(const FixIt&, const FixIt&) = default;
 };
 
 struct Diagnostic {
     DiagnosticSeverity severity{};
     std::string message;
     SourceLocation location;
+    // Compiler-provided fix-its for this diagnostic, in the order DXC
+    // reported them. Empty for the large majority of diagnostics: verified
+    // present only for some (not all) "expected ';'" parse errors and some
+    // "did you mean '...'?" identifier/type/function corrections. Never
+    // assume a fix-it exists for a given diagnostic message or category.
+    //
+    // Note: DXC also exposes a general IDxcDiagnostic::GetNumRanges /
+    // GetRangeAt API for per-diagnostic reference ranges. Pinned DXC
+    // 1.9.2607.13 was found to crash (access violation) inside GetRangeAt
+    // whenever GetNumRanges reports a non-zero count, so that API is never
+    // called and no such ranges are surfaced here; only the (separately
+    // verified safe) fix-it replacement ranges below are exposed.
+    std::vector<FixIt> fix_its;
+
+    // Used to detect diagnostics that are semantically unchanged across a
+    // reanalysis (e.g. a cache hit that only bumped the analysis generation)
+    // so the server can refresh its cached generation without republishing
+    // byte-identical textDocument/publishDiagnostics payloads.
+    friend bool operator==(const Diagnostic&, const Diagnostic&) = default;
 };
 
 struct Completion {
