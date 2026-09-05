@@ -268,6 +268,48 @@ TEST_CASE("Nested cbuffer records force the following enclosing member to a new 
     CHECK(layout->allocation_size == 16);
 }
 
+TEST_CASE("Nested matrix arrays preserve compiler-owned vector structure",
+          "[dxc][memory-layout][matrix][regression]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    const std::string source = "struct Inner {\n"
+                               "    row_major float2x2 transforms[2];\n"
+                               "    column_major float2x2 basis;\n"
+                               "};\n"
+                               "cbuffer Constants { Inner inner; };\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}});
+
+    const auto layout = translation_unit.memory_layout_at(shader_path, 5, 28);
+    REQUIRE(layout.has_value());
+    INFO(layout->explanation);
+    REQUIRE(layout->supported);
+    REQUIRE(layout->members.size() == 1);
+    REQUIRE(layout->members[0].members.size() == 2);
+
+    const auto& transforms = layout->members[0].members[0];
+    CHECK(transforms.kind == hlsl_intellisense::dxc::MemoryLayoutElementKind::array);
+    CHECK(transforms.array_stride == 32);
+    REQUIRE(transforms.members.size() == 2);
+    for (const auto& transform : transforms.members) {
+        CHECK(transform.kind == hlsl_intellisense::dxc::MemoryLayoutElementKind::matrix);
+        CHECK(transform.row_major);
+        CHECK(transform.matrix_stride == 16);
+        REQUIRE(transform.members.size() == 2);
+        CHECK(transform.members[0].offset == 0);
+        CHECK(transform.members[0].size == 8);
+        CHECK(transform.members[1].offset == 16);
+        CHECK(transform.members[1].size == 8);
+    }
+    CHECK(transforms.members[1].offset == 32);
+
+    const auto& basis = layout->members[0].members[1];
+    CHECK(basis.kind == hlsl_intellisense::dxc::MemoryLayoutElementKind::matrix);
+    CHECK_FALSE(basis.row_major);
+    CHECK(basis.matrix_stride == 16);
+    REQUIRE(basis.members.size() == 2);
+    CHECK(basis.members[1].offset == 16);
+    CHECK(basis.members[1].size == 8);
+}
+
 TEST_CASE("Matrix layouts honor compiler defaults and position-sensitive pragmas",
           "[dxc][memory-layout][matrix]") {
     hlsl_intellisense::dxc::Intellisense intellisense;

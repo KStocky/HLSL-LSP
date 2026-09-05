@@ -1,11 +1,16 @@
 export interface MemoryLayoutMember {
   readonly name: string;
   readonly type: string;
+  readonly kind: "scalar" | "vector" | "matrix" | "array" | "record";
   readonly offset: number;
   readonly size: number;
   readonly alignment: number;
   readonly paddingBefore: number;
   readonly arrayIndex?: number;
+  readonly arrayStride?: number;
+  readonly arrayDimensions?: readonly number[];
+  readonly matrixStride?: number;
+  readonly rowMajor?: boolean;
   readonly members: readonly MemoryLayoutMember[];
 }
 
@@ -40,19 +45,41 @@ function flattenMembers(
   members: readonly MemoryLayoutMember[],
   baseOffset = 0,
   depth = 0,
+  parentName = "",
+  parentKind?: MemoryLayoutMember["kind"],
+  parentRowMajor = false,
 ): Segment[] {
   const result: Segment[] = [];
   for (const member of members) {
     const offset = baseOffset + member.offset;
+    const indexedName =
+      parentKind === "matrix"
+        ? `${parentName}.${parentRowMajor ? "row" : "column"}${member.name}`
+        : `${parentName}${member.name}`;
+    const name =
+      parentName.length === 0
+        ? member.name
+        : member.name.startsWith("[")
+          ? indexedName
+          : `${parentName}.${member.name}`;
     if (member.members.length === 0) {
       result.push({
-        name: member.name,
+        name,
         offset,
         size: member.size,
         depth,
       });
     } else {
-      result.push(...flattenMembers(member.members, offset, depth + 1));
+      result.push(
+        ...flattenMembers(
+          member.members,
+          offset,
+          depth + 1,
+          name,
+          member.kind,
+          member.rowMajor,
+        ),
+      );
     }
   }
   return result;

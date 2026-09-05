@@ -196,6 +196,9 @@ TEST_CASE("Server exposes memory layouts through hover and the custom protocol",
                                "    float2 limits;\n"
                                "    float values[2];\n"
                                "    Material material;\n"
+                               "};\n"
+                               "cbuffer MatrixConstants {\n"
+                               "    row_major float2x2 transform;\n"
                                "};\n";
     std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
     hlsl_intellisense::lsp::Server server{
@@ -236,7 +239,11 @@ TEST_CASE("Server exposes memory layouts through hover and the custom protocol",
     CHECK(layout["members"][1]["offset"] == 16);
     CHECK(layout["members"][1]["paddingBefore"] == 4);
     CHECK(layout["members"][2]["offset"] == 32);
+    CHECK(layout["members"][2]["kind"] == "array");
+    CHECK(layout["members"][2]["arrayStride"] == 16);
+    CHECK(layout["members"][2]["arrayDimensions"] == Json::array({2}));
     REQUIRE(layout["members"][2]["members"].size() == 2);
+    CHECK(layout["members"][2]["members"][0]["name"] == "[0]");
     CHECK(layout["members"][2]["members"][0]["arrayIndex"] == 0);
     CHECK(layout["members"][2]["members"][0]["offset"] == 0);
     CHECK(layout["members"][2]["members"][1]["arrayIndex"] == 1);
@@ -256,6 +263,23 @@ TEST_CASE("Server exposes memory layouts through hover and the custom protocol",
     for (const auto key : {"offset", "size", "alignment", "paddingBefore"}) {
         CHECK(layout["members"][0][key].is_number_unsigned());
     }
+
+    const auto transform_offset = source.find("transform");
+    REQUIRE(transform_offset != std::string::npos);
+    const auto matrix_result = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{20},
+        .method = "hlsl/memoryLayout",
+        .params = Json{{"textDocument", {{"uri", uri}}},
+                       {"position", position_at(source, transform_offset + 2)}}});
+    REQUIRE(matrix_result.has_value());
+    const auto* matrix_response =
+        std::get_if<hlsl_intellisense::json_rpc::Response>(&*matrix_result);
+    REQUIRE(matrix_response != nullptr);
+    const auto& matrix = matrix_response->result["members"][0];
+    CHECK(matrix["kind"] == "matrix");
+    CHECK(matrix["matrixStride"] == 16);
+    CHECK(matrix["rowMajor"] == true);
+    REQUIRE(matrix["members"].size() == 2);
 
     const auto limits_name = source.find("limits");
     REQUIRE(limits_name != std::string::npos);

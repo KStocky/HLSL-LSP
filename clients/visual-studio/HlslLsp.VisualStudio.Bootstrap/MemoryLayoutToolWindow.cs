@@ -96,7 +96,7 @@ internal sealed class MemoryLayoutControl : UserControl
     {
         const int bytesPerRow = 16;
         const double pixelsPerByte = 34;
-        var segments = Flatten(layout.Members ?? Array.Empty<MemoryLayoutMemberModel>(), 0, 0)
+        var segments = Flatten(layout.Members ?? Array.Empty<MemoryLayoutMemberModel>(), 0, 0, null)
             .ToArray();
         var total = Math.Max(bytesPerRow, Math.Max(layout.Size, layout.AllocationSize));
         var rows = (int)((total + bytesPerRow - 1) / bytesPerRow);
@@ -234,17 +234,24 @@ internal sealed class MemoryLayoutControl : UserControl
     private static IEnumerable<LayoutSegment> Flatten(
         IEnumerable<MemoryLayoutMemberModel> members,
         long baseOffset,
-        int depth)
+        int depth,
+        MemoryLayoutMemberModel parent,
+        string parentName = "")
     {
         foreach (var member in members)
         {
             var offset = baseOffset + member.Offset;
+            var name = MemoryLayoutDisplayName.Qualify(
+                parentName,
+                member.Name,
+                parent?.Kind,
+                parent?.RowMajor == true);
             if (member.Members == null || member.Members.Count == 0)
             {
-                yield return new LayoutSegment(member.Name, offset, member.Size, depth);
+                yield return new LayoutSegment(name, offset, member.Size, depth);
                 continue;
             }
-            foreach (var nested in Flatten(member.Members, offset, depth + 1))
+            foreach (var nested in Flatten(member.Members, offset, depth + 1, member, name))
             {
                 yield return nested;
             }

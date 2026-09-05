@@ -467,6 +467,14 @@ resource_compatibility_status(dxc::ResourceCompatibilityStatus status) {
     if (element.array_index.has_value()) {
         result["arrayIndex"] = *element.array_index;
     }
+    if (element.kind == dxc::MemoryLayoutElementKind::array) {
+        result["arrayStride"] = element.array_stride;
+        result["arrayDimensions"] = element.array_dimensions;
+    }
+    if (element.kind == dxc::MemoryLayoutElementKind::matrix) {
+        result["matrixStride"] = element.matrix_stride;
+        result["rowMajor"] = element.row_major;
+    }
     return result;
 }
 

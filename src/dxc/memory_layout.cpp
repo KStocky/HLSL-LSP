@@ -476,6 +476,36 @@ struct WalkContext {
 
 [[nodiscard]] std::uint32_t scalar_byte_size(unsigned svt);
 
+void populate_matrix_vectors(const ShaderTypeDesc& desc, MemoryLayoutElement& element,
+                             WalkContext& ctx) {
+    const bool row_major = desc.Class == SVC_MATRIX_ROWS;
+    const auto vectors = row_major ? desc.Rows : desc.Columns;
+    const auto components = row_major ? desc.Columns : desc.Rows;
+    const auto component_size = scalar_byte_size(desc.Type);
+    const auto vector_size = component_size * components;
+    const auto matrix_stride = vectors > 1 && ctx.is_cbuffer ? 16U : vector_size;
+
+    element.row_major = row_major;
+    element.matrix_stride = matrix_stride;
+    element.members.clear();
+    element.members.reserve(vectors);
+    for (unsigned vector = 0; vector < vectors; ++vector) {
+        if (ctx.remaining == 0) {
+            ctx.error = "Layout expands to more than 4096 elements";
+            return;
+        }
+        --ctx.remaining;
+        element.members.push_back(
+            MemoryLayoutElement{.name = "[" + std::to_string(vector) + "]",
+                                .type = scalar_spelling(desc.Type) + std::to_string(components),
+                                .kind = MemoryLayoutElementKind::vector,
+                                .offset = matrix_stride * vector,
+                                .size = vector_size,
+                                .alignment = component_size,
+                                .array_index = vector});
+    }
+}
+
 [[nodiscard]] std::uint32_t infer_alignment_from_stride(std::uint32_t stride) {
     if (stride == 0)
         return 1;
@@ -557,29 +587,9 @@ void walk_struct_members(IShaderReflectionType* type, const ShaderTypeDesc& desc
 
             // For matrices, generate vector sub-elements.
             if (elem_desc.Class == SVC_MATRIX_ROWS || elem_desc.Class == SVC_MATRIX_COLUMNS) {
-                bool row_major = (elem_desc.Class == SVC_MATRIX_ROWS);
-                unsigned vectors = row_major ? elem_desc.Rows : elem_desc.Columns;
-                unsigned components = row_major ? elem_desc.Columns : elem_desc.Rows;
-                auto scalar = scalar_spelling(elem_desc.Type);
-                // Cannot determine element matrix stride from the type alone;
-                // use the overall variable/array information.
-                // For now, estimate from cbuffer alignment rules.
-                proto.row_major = row_major;
-                for (unsigned v = 0; v < vectors; ++v) {
-                    if (ctx.remaining == 0) {
-                        ctx.error = "Layout expands to more than 4096 elements";
-                        return;
-                    }
-                    --ctx.remaining;
-                    // We'll fix strides after we know the total size.
-                    proto.members.push_back(
-                        MemoryLayoutElement{.name = "[" + std::to_string(v) + "]",
-                                            .type = member_spelling,
-                                            .kind = MemoryLayoutElementKind::vector,
-                                            .array_index = v});
-                    (void)components;
-                    (void)scalar;
-                }
+                populate_matrix_vectors(elem_desc, proto, ctx);
+                if (!ctx.error.empty())
+                    return;
             }
 
             // Determine sizes. For reflection, the variable-level Size covers
@@ -603,7 +613,9 @@ void walk_struct_members(IShaderReflectionType* type, const ShaderTypeDesc& desc
             }
 
             if (member_desc.Class == SVC_MATRIX_ROWS || member_desc.Class == SVC_MATRIX_COLUMNS) {
-                element.row_major = (member_desc.Class == SVC_MATRIX_ROWS);
+                populate_matrix_vectors(member_desc, element, ctx);
+                if (!ctx.error.empty())
+                    return;
             }
         }
 
@@ -652,8 +664,13 @@ void fix_sizes(std::vector<MemoryLayoutElement>& members, std::uint32_t parent_s
         if (m.kind == MemoryLayoutElementKind::array && !m.array_dimensions.empty() &&
             m.array_dimensions[0] > 0) {
             const auto count = m.array_dimensions[0];
-            const std::uint32_t array_stride = m.size / count;
+            const auto tight_stride = (m.size + count - 1) / count;
+            const std::uint32_t array_stride =
+                is_cbuffer ? ((tight_stride + 15) / 16) * 16 : m.size / count;
             m.array_stride = array_stride;
+            if (is_cbuffer) {
+                m.size = array_stride * count;
+            }
 
             // Expand the array elements from the prototype.
             if (m.members.size() == 1) {
@@ -680,7 +697,7 @@ void fix_sizes(std::vector<MemoryLayoutElement>& members, std::uint32_t parent_s
         } else if (m.kind == MemoryLayoutElementKind::matrix && !m.members.empty()) {
             // Fix matrix vector sub-elements.
             const auto vectors = static_cast<std::uint32_t>(m.members.size());
-            if (vectors > 0) {
+            if (vectors > 0 && m.matrix_stride == 0) {
                 const std::uint32_t matrix_stride = m.size / vectors;
                 m.matrix_stride = matrix_stride;
                 for (std::uint32_t v = 0; v < vectors; ++v) {
@@ -688,8 +705,6 @@ void fix_sizes(std::vector<MemoryLayoutElement>& members, std::uint32_t parent_s
                     m.members[v].size =
                         (v + 1 < vectors) ? matrix_stride : (m.size - matrix_stride * v);
                 }
-                // Last vector may be smaller (no padding after last).
-                // We use scalar size * components for the actual data.
             }
         }
 
