@@ -2,7 +2,7 @@
   "name": "hlsl-lsp",
   "displayName": "HLSL-LSP",
   "description": "DXC-powered HLSL IntelliSense through the Language Server Protocol.",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "publisher": "KStocky",
   "license": "MIT",
   "repository": {
