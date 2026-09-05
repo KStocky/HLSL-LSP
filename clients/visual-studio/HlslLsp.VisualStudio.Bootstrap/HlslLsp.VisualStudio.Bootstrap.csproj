@@ -28,6 +28,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <VSCTCompile Include="Menus.vsct" />
+    <VSCTCompile Include="Menus.vsct">
+      <ResourceName>Menus.ctmenu</ResourceName>
+    </VSCTCompile>
   </ItemGroup>
 </Project>
