@@ -305,3 +305,45 @@ TEST_CASE("Memory layout queries preserve cancellation and stale-version safety"
     CHECK_THROWS_AS(manager.memory_layout(uri.identity(), 2, uri.path(), 1, 23, current),
                     json_rpc::HandlerError);
 }
+
+TEST_CASE("Compilation info queries (root signature, binding analysis, compatibility) preserve "
+          "cancellation and stale-version safety",
+          "[analysis][compilation-info][cancellation]") {
+    // Manager::compilation_info is the single entry point through which the
+    // new resource-binding-analysis, root-signature, and compatibility data
+    // reach the LSP layer; it must honor the same cancellation and
+    // stale-version guarantees as every other interactive query, rather than
+    // fabricating or reusing a result computed for a version the client has
+    // since superseded.
+    TestDirectory directory;
+    const auto uri = workspace::DocumentUri::from_path((directory.path() / "root.hlsl").string());
+    auto hooks = std::make_shared<analysis::AnalysisHooks>();
+    Gate interactive;
+    hooks->before_interactive = [&](std::string_view) {
+        interactive.enter();
+        interactive.wait_until_released();
+    };
+    analysis::Manager manager{[](const auto&, const auto&, std::uint64_t) {}, test_options(),
+                              hooks};
+    manager.analyze(input(uri, 1, shader()));
+    manager.wait_idle();
+
+    json_rpc::CancellationToken cancellation;
+    auto request = std::async(std::launch::async, [&] {
+        return manager.compilation_info(uri.identity(), 1, uri.path(), cancellation);
+    });
+    interactive.wait_until_entered();
+    cancellation.cancel();
+    try {
+        static_cast<void>(request.get());
+        FAIL("Cancelled compilation info request unexpectedly returned");
+    } catch (const json_rpc::HandlerError& error) {
+        CHECK(error.code() == json_rpc::request_cancelled_code);
+    }
+    interactive.release();
+    manager.wait_idle();
+
+    json_rpc::CancellationToken current;
+    CHECK_THROWS_AS(manager.compilation_info(uri.identity(), 2, uri.path(), current),
+                    json_rpc::HandlerError);
+}

@@ -23,6 +23,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -652,6 +653,51 @@ struct IdentifierExtent {
         }
     }
     return std::nullopt;
+}
+
+// Flattens the document-symbol tree into every named declaration cursor it
+// contains, recording all matches per name (not just the first) so callers
+// can detect genuine ambiguity. `Symbol.children` already reflects exactly
+// what DXC's cursor tree exposes: function bodies are never walked (locals
+// cannot collide with resource names), while struct/union/class/enum/
+// namespace members are, so a same-named field on an unrelated struct is
+// correctly treated as a collision rather than silently ignored.
+void collect_symbols_by_name(const std::vector<Symbol>& symbols,
+                             std::unordered_map<std::string, std::vector<const Symbol*>>& by_name) {
+    for (const auto& symbol : symbols) {
+        if (!symbol.name.empty()) {
+            by_name[symbol.name].push_back(&symbol);
+        }
+        collect_symbols_by_name(symbol.children, by_name);
+    }
+}
+
+// Attaches a `source_location` to each reflected resource whose name matches
+// exactly one declaration cursor in `document_symbols` -- the same DXC
+// IntelliSense parse index already used for hover/go-to-definition/document
+// symbols over the current unsaved snapshot. Resources are never guessed:
+// a name with zero matches (e.g. reflected but not found by the parse
+// index, which can happen if the two DXC entry points ever disagree) or
+// more than one match (a genuine ambiguity the cursor tree itself cannot
+// resolve) is left without a location rather than reporting a possibly
+// wrong one.
+void attach_resource_source_locations(CompilationInfo& info,
+                                      const std::vector<Symbol>& document_symbols) {
+    if (!info.reflection.has_value() || info.reflection->resources.empty()) {
+        return;
+    }
+    std::unordered_map<std::string, std::vector<const Symbol*>> by_name;
+    collect_symbols_by_name(document_symbols, by_name);
+    for (auto& resource : info.reflection->resources) {
+        if (resource.name.empty()) {
+            continue;
+        }
+        const auto it = by_name.find(resource.name);
+        if (it == by_name.end() || it->second.size() != 1) {
+            continue;
+        }
+        resource.source_location = it->second.front()->location;
+    }
 }
 
 [[nodiscard]] std::string cursor_spelling(IDxcCursor& cursor) {
@@ -1542,9 +1588,15 @@ auto TranslationUnit::memory_layout_at(std::string_view path, std::uint32_t line
 }
 
 auto TranslationUnit::compilation_info() const -> CompilationInfo {
-    return detail::compilation_info_from_compile(
+    auto info = detail::compilation_info_from_compile(
         implementation_->owner->create_instance, implementation_->sources,
         implementation_->full_arguments, implementation_->root_path);
+    // Correlates reflected resources to their declaration site using the
+    // same IntelliSense parse index (and therefore the same current unsaved
+    // snapshot) already used for hover/go-to-definition/document symbols,
+    // rather than re-parsing or inferring anything from raw text.
+    attach_resource_source_locations(info, symbols());
+    return info;
 }
 
 auto TranslationUnit::signatures_at(std::string_view path, std::uint32_t line,
@@ -1710,12 +1762,14 @@ auto Intellisense::parse(std::string root_path, std::vector<SourceFile> files,
     // fail outright when an explicit entry point argument is present --
     // whether separated ("-E" "entry") or joined ("-Eentry") -- regardless of
     // target profile or entry validity, so both spellings are stripped here
-    // alongside the SPIR-V flags and "-Qstrip_reflect" (which the legacy
-    // parsing index does not recognize either). `full_arguments` (used for
-    // the real compile in TranslationUnit::compilation_info) keeps the
-    // original, unstripped arguments.
+    // alongside the SPIR-V flags, "-Qstrip_reflect", and "-force-rootsig-ver"
+    // (which the legacy parsing index does not recognize either).
+    // `full_arguments` (used for the real compile in
+    // TranslationUnit::compilation_info) keeps the original, unstripped
+    // arguments.
     for (auto it = implementation->arguments.begin(); it != implementation->arguments.end();) {
-        if (*it == "-E" && std::next(it) != implementation->arguments.end()) {
+        if ((*it == "-E" || *it == "-force-rootsig-ver") &&
+            std::next(it) != implementation->arguments.end()) {
             it = implementation->arguments.erase(it, std::next(it, 2));
         } else {
             ++it;

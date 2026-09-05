@@ -59,6 +59,24 @@ when the active variant changes and when the shown document is saved. See the
 repository's [shader compilation](../../docs/compilation-info.md) reference
 for the full protocol, including DXIL vs SPIR-V reflection availability.
 
+Run **Tools > HLSL Resource Bindings** to open a dedicated tool window with
+the active HLSL document's resource bindings grouped by register space then
+CBV/SRV/UAV/sampler class, provable register-range collisions, the embedded
+root signature's state and full details when available, and whether the
+reflected resources are compatible with that root signature. It reuses the
+same request, current unsaved document, and refresh triggers (active-variant
+change, shown-document save) as Shader Compilation, in its own independent
+tool window so opening one never disturbs the other. Resource names and
+collision participants are clickable, without stealing focus during
+background refresh, only when DXC's reflection supplies an unambiguous
+declaration location for them; absence or ambiguity is intentionally
+non-clickable rather than a guessed link. See the
+repository's [resource bindings](../../docs/resource-bindings.md) reference
+for the full protocol, grouping/collision semantics, root-signature states
+(including the Windows-only detail-deserialization requirement and SPIR-V's
+"not applicable" state), compatibility meanings, and the bindless descriptor-heap
+limitation.
+
 ## Install
 
 Download `HlslLsp.VisualStudio.vsix` from the

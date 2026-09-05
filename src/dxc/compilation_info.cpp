@@ -1,5 +1,9 @@
 #include "compilation_info.h"
 
+#include "compatibility.h"
+#include "resource_binding_analysis.h"
+#include "root_signature.h"
+
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -94,6 +98,10 @@ constexpr unsigned SRV_DIMENSION_TEXTURE3D = 8;
 constexpr unsigned SRV_DIMENSION_TEXTURECUBE = 9;
 constexpr unsigned SRV_DIMENSION_TEXTURECUBEARRAY = 10;
 constexpr unsigned SRV_DIMENSION_BUFFEREX = 11;
+
+// D3D_SHADER_INPUT_FLAGS (only the bit this server interprets; all other
+// bits are still exposed unchanged through raw_flags).
+constexpr unsigned SIF_UNUSED = 0x10;
 
 // D3D_RESOURCE_RETURN_TYPE
 constexpr unsigned RETURN_TYPE_UNORM = 1;
@@ -532,6 +540,49 @@ class InMemoryIncludeHandler final : public IDxcIncludeHandler {
     }
 }
 
+// Maps the raw D3D_SHADER_INPUT_TYPE to the register class it binds
+// through. SIT_TBUFFER was empirically confirmed (by compiling a `tbuffer`
+// declaration and inspecting its reflected BindPoint against an explicit
+// `register(t#)`) to bind as an SRV through a 't' register, not a 'b'
+// register, despite tbuffer's constant-buffer-like HLSL syntax.
+[[nodiscard]] hlsl_intellisense::dxc::ResourceRegisterClass
+register_class_from_sit(unsigned value) {
+    using hlsl_intellisense::dxc::ResourceRegisterClass;
+    switch (value) {
+    case SIT_CBUFFER:
+        return ResourceRegisterClass::cbv;
+    case SIT_TBUFFER:
+    case SIT_TEXTURE:
+    case SIT_STRUCTURED:
+    case SIT_BYTEADDRESS:
+    case SIT_RTACCELERATIONSTRUCTURE:
+        return ResourceRegisterClass::srv;
+    case SIT_SAMPLER:
+        return ResourceRegisterClass::sampler;
+    case SIT_UAV_RWTYPED:
+    case SIT_UAV_RWSTRUCTURED:
+    case SIT_UAV_RWBYTEADDRESS:
+    case SIT_UAV_APPEND_STRUCTURED:
+    case SIT_UAV_CONSUME_STRUCTURED:
+    case SIT_UAV_RWSTRUCTURED_WITH_COUNTER:
+    case SIT_UAV_FEEDBACKTEXTURE:
+        return ResourceRegisterClass::uav;
+    default:
+        return ResourceRegisterClass::unknown;
+    }
+}
+
+// Derives usage strictly from the raw D3D_SIF_UNUSED flag. Pinned DXC
+// (1.9.2607.13) was empirically confirmed to omit declared-but-unreferenced
+// resources from reflection entirely (both at default optimization and
+// under -Od) rather than ever emitting them with this flag set, so `unused`
+// is not expected to occur for the single-stage shader profiles reflected
+// here; this still derives the status from the flag itself, never guessing.
+[[nodiscard]] hlsl_intellisense::dxc::ResourceUsageStatus usage_from_flags(unsigned raw_flags) {
+    using hlsl_intellisense::dxc::ResourceUsageStatus;
+    return (raw_flags & SIF_UNUSED) != 0 ? ResourceUsageStatus::unused : ResourceUsageStatus::used;
+}
+
 [[nodiscard]] std::string srv_dimension_name(unsigned value) {
     switch (value) {
     case SRV_DIMENSION_BUFFER:
@@ -722,6 +773,23 @@ parse_compiler_diagnostics(std::string_view text) {
     return result;
 }
 
+// Builds a `CompilationCompatibility` result reporting `unknown` for the
+// given reason. Used whenever a root signature is present but the reflected
+// resource list needed to compare against it is unavailable (for example,
+// reflection metadata missing for the compiled output) -- calling
+// `analyze_compatibility` with an empty resource list in that situation
+// would falsely report `compatible` (an empty resource list trivially has no
+// incompatibilities), so this is reported as `unknown` instead, keeping
+// `compatibility` non-null whenever `root_signature` is non-null without
+// fabricating a result the compiler never actually confirmed.
+[[nodiscard]] hlsl_intellisense::dxc::CompilationCompatibility
+unknown_compatibility(std::string reason) {
+    return hlsl_intellisense::dxc::CompilationCompatibility{
+        .status = hlsl_intellisense::dxc::ResourceCompatibilityStatus::unknown,
+        .explanation = std::move(reason),
+        .issues = {}};
+}
+
 } // namespace
 
 namespace hlsl_intellisense::dxc::detail {
@@ -837,12 +905,25 @@ CompilationInfo compilation_info_from_compile(DxcCreateInstanceProc create_insta
             .available = false,
             .unavailable_reason = "Reflection is not available for SPIR-V output through the "
                                   "ID3D12ShaderReflection DXC reflection path used by this server"};
+        info.root_signature =
+            extract_root_signature(utils.get(),
+                                   DxcBuffer{.Ptr = object_blob->GetBufferPointer(),
+                                             .Size = object_blob->GetBufferSize(),
+                                             .Encoding = 0},
+                                   /*is_spirv=*/true);
+        // Reflection is unavailable for SPIR-V, but analyze_compatibility
+        // already reports `unknown` unconditionally whenever the root
+        // signature itself is not_applicable, so this still yields a
+        // structured (rather than absent) compatibility result.
+        info.compatibility = analyze_compatibility({}, *info.root_signature, info.stage);
         return info;
     }
 
     DxcBuffer object_buffer{.Ptr = object_blob->GetBufferPointer(),
                             .Size = object_blob->GetBufferSize(),
                             .Encoding = 0};
+    info.root_signature = extract_root_signature(utils.get(), object_buffer, /*is_spirv=*/false);
+
     LocalComPtr<IShaderReflection> reflection;
     const HRESULT create_reflection_hr =
         utils->CreateReflection(&object_buffer, kIID_ShaderReflection, reflection.put_void());
@@ -859,6 +940,9 @@ CompilationInfo compilation_info_from_compile(DxcCreateInstanceProc create_insta
                 "when compiled with -Qstrip_reflect); IDxcUtils::CreateReflection failed with "
                 "HRESULT " +
                 std::to_string(static_cast<unsigned long>(create_reflection_hr))};
+        info.compatibility = unknown_compatibility(
+            "Resource/root-signature compatibility could not be determined because DXIL "
+            "reflection metadata is unavailable for this compiled output.");
         return info;
     }
 
@@ -871,6 +955,9 @@ CompilationInfo compilation_info_from_compile(DxcCreateInstanceProc create_insta
                 "DXIL reflection metadata is unavailable for this compiled output; "
                 "ID3D12ShaderReflection::GetDesc failed with HRESULT " +
                 std::to_string(static_cast<unsigned long>(shader_desc_hr))};
+        info.compatibility = unknown_compatibility(
+            "Resource/root-signature compatibility could not be determined because DXIL "
+            "reflection metadata is unavailable for this compiled output.");
         return info;
     }
 
@@ -923,7 +1010,14 @@ CompilationInfo compilation_info_from_compile(DxcCreateInstanceProc create_insta
              .bind_count = desc.BindCount,
              .space = desc.Space,
              .dimension = srv_dimension_name(desc.Dimension),
-             .return_type = resource_return_type_name(desc.ReturnType)});
+             .return_type = resource_return_type_name(desc.ReturnType),
+             .register_class = register_class_from_sit(desc.Type),
+             .raw_flags = desc.uFlags,
+             .range_id = desc.uID,
+             .sample_count = desc.NumSamples,
+             .unbounded = desc.BindCount == 0,
+             .system_reserved_space = is_system_reserved_space(desc.Space),
+             .usage = usage_from_flags(desc.uFlags)});
     }
 
     if (info.stage == "compute") {
@@ -932,6 +1026,13 @@ CompilationInfo compilation_info_from_compile(DxcCreateInstanceProc create_insta
         unsigned z{};
         static_cast<void>(reflection->GetThreadGroupSize(&x, &y, &z));
         reflection_result.thread_group_size = CompilationThreadGroupSize{.x = x, .y = y, .z = z};
+    }
+
+    reflection_result.binding_analysis = analyze_resource_bindings(reflection_result.resources);
+
+    if (info.root_signature.has_value()) {
+        info.compatibility =
+            analyze_compatibility(reflection_result.resources, *info.root_signature, info.stage);
     }
 
     info.reflection = std::move(reflection_result);

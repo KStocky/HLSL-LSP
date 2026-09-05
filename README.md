@@ -13,6 +13,8 @@ with:
 - Natural structure and constant-buffer memory layout inspection
 - DXC-backed shader compilation inspection: effective configuration,
   diagnostics, and DXIL/SPIR-V reflection
+- Resource binding inspection: register-space/class grouping, collisions,
+  embedded root-signature state, and root-signature compatibility
 - DXC-backed semantic colouring and go-to-definition for symbols and include paths
 - Workspace symbol support for Visual Studio's All-In-One Search
 - Hierarchical `shadertoolsconfig.json` compiler configuration
@@ -82,6 +84,33 @@ Completion provides `vector::` and `matrix::` qualification entries, not
 constructor placeholders. It also rejects user-defined HLSL constructor
 declarations. HLSL-LSP therefore returns `null` for constructor signature help
 instead of fabricating signatures.
+
+### Resource bindings
+
+A dedicated Resource Bindings view/command reports the active shader's
+resource bindings grouped by register space and CBV/SRV/UAV/sampler class,
+provable register-range collisions, the embedded root signature's state and
+full details when available, and whether the reflected resources are
+compatible with that root signature — all backed by the same cross-editor
+`hlsl/compilationInfo` protocol and current unsaved document as Shader
+Compilation, but presented on its own so neither view becomes an unreadable
+single page. Resource lists reflect what DXC's optimizer actually kept for
+the compiled entry point, not necessarily every resource declared in
+source; root-signature detail deserialization is Windows-only (Linux
+reports that a root signature is present but its details are unavailable);
+SPIR-V has no root-signature concept; and true bindless
+(`ResourceDescriptorHeap`/`SamplerDescriptorHeap`) accesses can never be
+enumerated from compiler reflection, so an "unknown" compatibility verdict
+is never presented as compatible. Resource rows and collision participants
+are clickable when DXC's reflection supplies an unambiguous declaration
+location for them (absence or ambiguity is intentionally non-clickable,
+never guessed) — see
+[`docs/resource-bindings.md`](docs/resource-bindings.md) for the full
+protocol, grouping/collision semantics, root-signature states, compatibility
+meanings, and navigation behavior.
+
+In Visual Studio, run **Tools > HLSL Resource Bindings**. In Visual Studio
+Code, run **HLSL: Show Resource Bindings** from the Command Palette.
 
 ### Semantic colouring
 
