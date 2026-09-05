@@ -61,7 +61,10 @@ function sortedGroups(
     if (left.space !== right.space) {
       return left.space - right.space;
     }
-    return registerClassRank(left.registerClass) - registerClassRank(right.registerClass);
+    return (
+      registerClassRank(left.registerClass) -
+      registerClassRank(right.registerClass)
+    );
   });
 }
 
@@ -70,7 +73,11 @@ function sortedGroups(
 // in `reflection.bindingAnalysis`. Both are computed by the server from the
 // same reflected register data, so a (registerClass, space, name) key
 // reliably joins them for display.
-function resourceKey(registerClass: ResourceRegisterClass, space: number, name: string): string {
+function resourceKey(
+  registerClass: ResourceRegisterClass,
+  space: number,
+  name: string,
+): string {
   return `${registerClass}|${String(space)}|${name}`;
 }
 
@@ -87,7 +94,11 @@ function resourceLookup(
   const map = new Map<string, CompilationResourceBinding>();
   const ambiguousKeys = new Set<string>();
   for (const resource of resources) {
-    const key = resourceKey(resource.registerClass, resource.space, resource.name);
+    const key = resourceKey(
+      resource.registerClass,
+      resource.space,
+      resource.name,
+    );
     if (map.has(key)) {
       ambiguousKeys.add(key);
       continue;
@@ -108,7 +119,9 @@ function resourceLookup(
 // needed at all for navigation.
 export const openResourceLocationCommand = "hlsl.resourceBindings.openLocation";
 
-function resourceLocationCommandUri(location: CompilationResourceSourceLocation): string {
+function resourceLocationCommandUri(
+  location: CompilationResourceSourceLocation,
+): string {
   const args = encodeURIComponent(JSON.stringify([location]));
   return `command:${openResourceLocationCommand}?${args}`;
 }
@@ -145,7 +158,9 @@ function arrayText(resource: CompilationResourceBinding | undefined): string {
   if (resource.unbounded) {
     return "unbounded";
   }
-  return resource.bindCount === 1 ? "scalar" : `[${String(resource.bindCount)}]`;
+  return resource.bindCount === 1
+    ? "scalar"
+    : `[${String(resource.bindCount)}]`;
 }
 
 // Resource types whose reflected `sampleCount` field is repurposed by the
@@ -163,14 +178,18 @@ const structuredBufferTypes: ReadonlySet<string> = new Set([
   "uav_consume_structured",
 ]);
 
-function sampleCountText(resource: CompilationResourceBinding | undefined): string {
+function sampleCountText(
+  resource: CompilationResourceBinding | undefined,
+): string {
   if (resource === undefined) {
     return "-";
   }
   if (structuredBufferTypes.has(resource.type)) {
     return `stride ${String(resource.sampleCount)} bytes`;
   }
-  return resource.sampleCount === 0xffffffff ? "n/a" : String(resource.sampleCount);
+  return resource.sampleCount === 0xffffffff
+    ? "n/a"
+    : String(resource.sampleCount);
 }
 
 function orDash(value: string | undefined): string {
@@ -183,7 +202,9 @@ function resourcesByGroupTable(
 ): string {
   const rows = group.ranges
     .map((range) => {
-      const resource = lookup.get(resourceKey(group.registerClass, group.space, range.resourceName));
+      const resource = lookup.get(
+        resourceKey(group.registerClass, group.space, range.resourceName),
+      );
       return `<tr>
 <td>${resourceNameLabel(range.resourceName, resource?.sourceLocation ?? null)}</td>
 <td>${escapeHtml(rangeText(range))}</td>
@@ -248,10 +269,28 @@ function collisionText(
   // entries in this same response (matched by registerClass+space+name,
   // the same key groupsSection uses to join range data back to a
   // resource) -- never by searching source text for the name.
-  const first = lookup.get(resourceKey(collision.registerClass, collision.space, collision.firstResource));
-  const second = lookup.get(resourceKey(collision.registerClass, collision.space, collision.secondResource));
-  const firstLabel = resourceNameLabel(collision.firstResource, first?.sourceLocation ?? null);
-  const secondLabel = resourceNameLabel(collision.secondResource, second?.sourceLocation ?? null);
+  const first = lookup.get(
+    resourceKey(
+      collision.registerClass,
+      collision.space,
+      collision.firstResource,
+    ),
+  );
+  const second = lookup.get(
+    resourceKey(
+      collision.registerClass,
+      collision.space,
+      collision.secondResource,
+    ),
+  );
+  const firstLabel = resourceNameLabel(
+    collision.firstResource,
+    first?.sourceLocation ?? null,
+  );
+  const secondLabel = resourceNameLabel(
+    collision.secondResource,
+    second?.sourceLocation ?? null,
+  );
   return `<li><strong>${escapeHtml(registerClassLabels[collision.registerClass])}</strong> space ${String(collision.space)}: ${escapeHtml(collision.message)} <span class="muted">(${firstLabel} &harr; ${secondLabel})</span></li>`;
 }
 
@@ -272,7 +311,9 @@ ${
 </section>`;
 }
 
-function rootSignatureRangeType(type: RootSignatureDescriptorRange["type"]): string {
+function rootSignatureRangeType(
+  type: RootSignatureDescriptorRange["type"],
+): string {
   return type.toUpperCase();
 }
 
@@ -296,7 +337,10 @@ function rootDescriptorText(descriptor: RootSignatureRootDescriptor): string {
   return `root descriptor: ${escapeHtml(rootSignatureRangeType(descriptor.type))} register ${String(descriptor.shaderRegister)}, space ${String(descriptor.space)}, flags 0x${descriptor.rawFlags.toString(16)}`;
 }
 
-function parameterSection(parameter: RootSignatureParameter, index: number): string {
+function parameterSection(
+  parameter: RootSignatureParameter,
+  index: number,
+): string {
   const header = `<h4>Parameter ${String(index)} &mdash; ${escapeHtml(parameter.kind)} (visibility: ${escapeHtml(parameter.visibility)})</h4>`;
   if (parameter.kind === "descriptorTable") {
     return `${header}
@@ -308,7 +352,10 @@ function parameterSection(parameter: RootSignatureParameter, index: number): str
   if (parameter.kind === "constants" && parameter.constants !== null) {
     return `${header}<p>${rootConstantsText(parameter.constants)}</p>`;
   }
-  if (parameter.kind === "rootDescriptor" && parameter.rootDescriptor !== null) {
+  if (
+    parameter.kind === "rootDescriptor" &&
+    parameter.rootDescriptor !== null
+  ) {
     return `${header}<p>${rootDescriptorText(parameter.rootDescriptor)}</p>`;
   }
   return header;
@@ -384,7 +431,9 @@ function compatibilityIssueRow(issue: ResourceCompatibilityIssue): string {
   return `<li><strong>${escapeHtml(issue.resourceName)}</strong> (${escapeHtml(registerClassLabels[issue.registerClass])}, space ${String(issue.space)}): ${escapeHtml(issue.message)}</li>`;
 }
 
-function compatibilitySection(compatibility: CompilationCompatibility | null): string {
+function compatibilitySection(
+  compatibility: CompilationCompatibility | null,
+): string {
   const bindlessNote = `<p class="muted">Bindless accesses through <code>ResourceDescriptorHeap</code>/<code>SamplerDescriptorHeap</code> are invisible to compiler reflection and can never be enumerated or checked here; this analysis only covers resources DXC reflected as explicit bound-resource declarations.</p>`;
   if (compatibility === null) {
     return `<section>
@@ -422,7 +471,10 @@ function headerSection(info: CompilationInfo): string {
     ["Active variant", info.activeVariant ?? "(none)"],
   ];
   const table = `<table>${rows
-    .map(([label, value]) => `<tr><th>${escapeHtml(label)}</th><td>${escapeHtml(value)}</td></tr>`)
+    .map(
+      ([label, value]) =>
+        `<tr><th>${escapeHtml(label)}</th><td>${escapeHtml(value)}</td></tr>`,
+    )
     .join("")}</table>`;
   const status = info.success
     ? ""
@@ -544,12 +596,17 @@ function isNonNegativeInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isInteger(value) && value >= 0;
 }
 
-function parseSourcePosition(value: unknown): CompilationSourcePosition | undefined {
+function parseSourcePosition(
+  value: unknown,
+): CompilationSourcePosition | undefined {
   if (typeof value !== "object" || value === null) {
     return undefined;
   }
   const candidate = value as Record<string, unknown>;
-  if (!isNonNegativeInteger(candidate.line) || !isNonNegativeInteger(candidate.character)) {
+  if (
+    !isNonNegativeInteger(candidate.line) ||
+    !isNonNegativeInteger(candidate.character)
+  ) {
     return undefined;
   }
   return { line: candidate.line, character: candidate.character };
@@ -565,7 +622,10 @@ function parseSourceRange(value: unknown): CompilationSourceRange | undefined {
   if (start === undefined || end === undefined) {
     return undefined;
   }
-  if (end.line < start.line || (end.line === start.line && end.character < start.character)) {
+  if (
+    end.line < start.line ||
+    (end.line === start.line && end.character < start.character)
+  ) {
     return undefined;
   }
   return { start, end };

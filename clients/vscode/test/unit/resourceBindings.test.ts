@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { CompilationInfo, CompilationReflection } from "../../src/compilationInfo";
+import {
+  CompilationInfo,
+  CompilationReflection,
+} from "../../src/compilationInfo";
 import {
   parseResourceLocationCommandArg,
   resolveResourceBindingsRefresh,
@@ -39,8 +42,16 @@ function baseInfo(overrides: Partial<CompilationInfo> = {}): CompilationInfo {
     diagnostics: [],
     output: { type: "dxil", size: 1024 },
     reflection: baseReflection(),
-    rootSignature: { availability: "absent", unavailableReason: "", details: null },
-    compatibility: { status: "unknown", explanation: "No embedded root signature.", issues: [] },
+    rootSignature: {
+      availability: "absent",
+      unavailableReason: "",
+      details: null,
+    },
+    compatibility: {
+      status: "unknown",
+      explanation: "No embedded root signature.",
+      issues: [],
+    },
     ...overrides,
   };
 }
@@ -109,7 +120,12 @@ void test("resource bindings HTML groups resources by register space, then class
               space: 1,
               systemReservedSpace: false,
               ranges: [
-                { resourceName: "AlbedoTexture", baseRegister: 0, unbounded: false, endRegister: 0 },
+                {
+                  resourceName: "AlbedoTexture",
+                  baseRegister: 0,
+                  unbounded: false,
+                  endRegister: 0,
+                },
               ],
             },
             {
@@ -117,7 +133,12 @@ void test("resource bindings HTML groups resources by register space, then class
               space: 0,
               systemReservedSpace: false,
               ranges: [
-                { resourceName: "SceneConstants", baseRegister: 0, unbounded: false, endRegister: 0 },
+                {
+                  resourceName: "SceneConstants",
+                  baseRegister: 0,
+                  unbounded: false,
+                  endRegister: 0,
+                },
               ],
             },
             {
@@ -125,7 +146,12 @@ void test("resource bindings HTML groups resources by register space, then class
               space: 1,
               systemReservedSpace: false,
               ranges: [
-                { resourceName: "LinearSampler", baseRegister: 0, unbounded: false, endRegister: 0 },
+                {
+                  resourceName: "LinearSampler",
+                  baseRegister: 0,
+                  unbounded: false,
+                  endRegister: 0,
+                },
               ],
             },
           ],
@@ -156,8 +182,18 @@ void test("resource bindings HTML renders collisions with class and space contex
               space: 0,
               systemReservedSpace: false,
               ranges: [
-                { resourceName: "A", baseRegister: 0, unbounded: false, endRegister: 1 },
-                { resourceName: "B", baseRegister: 1, unbounded: false, endRegister: 2 },
+                {
+                  resourceName: "A",
+                  baseRegister: 0,
+                  unbounded: false,
+                  endRegister: 1,
+                },
+                {
+                  resourceName: "B",
+                  baseRegister: 1,
+                  unbounded: false,
+                  endRegister: 2,
+                },
               ],
             },
           ],
@@ -167,7 +203,8 @@ void test("resource bindings HTML renders collisions with class and space contex
               secondResource: "B",
               registerClass: "srv",
               space: 0,
-              message: "'A' (registers 0-1) and 'B' (registers 1-2) both occupy space 0 in the same register class",
+              message:
+                "'A' (registers 0-1) and 'B' (registers 1-2) both occupy space 0 in the same register class",
             },
           ],
         },
@@ -219,7 +256,12 @@ void test("resource bindings HTML renders unbounded arrays distinctly from bound
               space: 1,
               systemReservedSpace: false,
               ranges: [
-                { resourceName: "Textures", baseRegister: 0, unbounded: true, endRegister: 0 },
+                {
+                  resourceName: "Textures",
+                  baseRegister: 0,
+                  unbounded: true,
+                  endRegister: 0,
+                },
               ],
             },
           ],
@@ -278,7 +320,12 @@ void test("resource bindings HTML renders byte stride, not sample count, for eve
                 space: 0,
                 systemReservedSpace: false,
                 ranges: [
-                  { resourceName: "Particles", baseRegister: 0, unbounded: false, endRegister: 0 },
+                  {
+                    resourceName: "Particles",
+                    baseRegister: 0,
+                    unbounded: false,
+                    endRegister: 0,
+                  },
                 ],
               },
             ],
@@ -288,8 +335,16 @@ void test("resource bindings HTML renders byte stride, not sample count, for eve
       }),
     );
 
-    assert.match(html, /<td>stride 32 bytes<\/td>/, `expected stride rendering for type "${type}"`);
-    assert.doesNotMatch(html, /<td>32<\/td>/, `did not expect a raw sample-count cell for type "${type}"`);
+    assert.match(
+      html,
+      /<td>stride 32 bytes<\/td>/,
+      `expected stride rendering for type "${type}"`,
+    );
+    assert.doesNotMatch(
+      html,
+      /<td>32<\/td>/,
+      `did not expect a raw sample-count cell for type "${type}"`,
+    );
   }
 });
 
@@ -323,7 +378,12 @@ void test("resource bindings HTML renders the raw sample count, not a byte strid
               space: 0,
               systemReservedSpace: false,
               ranges: [
-                { resourceName: "MsaaTarget", baseRegister: 0, unbounded: false, endRegister: 0 },
+                {
+                  resourceName: "MsaaTarget",
+                  baseRegister: 0,
+                  unbounded: false,
+                  endRegister: 0,
+                },
               ],
             },
           ],
@@ -367,7 +427,12 @@ void test("resource bindings HTML classifies system-reserved register spaces dis
               space: 0xfffffff0,
               systemReservedSpace: true,
               ranges: [
-                { resourceName: "Internal", baseRegister: 0, unbounded: false, endRegister: 0 },
+                {
+                  resourceName: "Internal",
+                  baseRegister: 0,
+                  unbounded: false,
+                  endRegister: 0,
+                },
               ],
             },
           ],
@@ -384,7 +449,11 @@ void test("resource bindings HTML classifies system-reserved register spaces dis
 void test("resource bindings HTML explains an absent root signature", () => {
   const html = resourceBindingsHtml(
     baseInfo({
-      rootSignature: { availability: "absent", unavailableReason: "", details: null },
+      rootSignature: {
+        availability: "absent",
+        unavailableReason: "",
+        details: null,
+      },
     }),
   );
 
@@ -474,7 +543,8 @@ void test("resource bindings HTML explains SPIR-V not-applicable root signatures
       },
       compatibility: {
         status: "unknown",
-        explanation: "Root signature compatibility does not apply to this compilation target (for example, SPIR-V).",
+        explanation:
+          "Root signature compatibility does not apply to this compilation target (for example, SPIR-V).",
         issues: [],
       },
     }),
@@ -496,7 +566,10 @@ void test("resource bindings HTML explains present-but-unavailable root signatur
   );
 
   assert.match(html, /details could not be retrieved on this platform/);
-  assert.match(html, /unavailable on this platform; only presence could be determined/);
+  assert.match(
+    html,
+    /unavailable on this platform; only presence could be determined/,
+  );
 });
 
 void test("resource bindings HTML renders full root signature details", () => {
@@ -549,7 +622,12 @@ void test("resource bindings HTML renders full root signature details", () => {
               visibility: "vertex",
               descriptorTableRanges: [],
               constants: null,
-              rootDescriptor: { type: "cbv", shaderRegister: 1, space: 0, rawFlags: 0 },
+              rootDescriptor: {
+                type: "cbv",
+                shaderRegister: 1,
+                space: 0,
+                rawFlags: 0,
+              },
             },
           ],
           staticSamplers: [
@@ -604,13 +682,17 @@ void test("resource bindings HTML reports compatible, incompatible, and unknown 
             resourceName: "AlbedoTexture",
             registerClass: "srv",
             space: 0,
-            message: "'AlbedoTexture' has no corresponding root signature entry",
+            message:
+              "'AlbedoTexture' has no corresponding root signature entry",
           },
         ],
       },
     }),
   );
-  assert.match(incompatibleHtml, /<h2 class="status-failure">Incompatible<\/h2>/);
+  assert.match(
+    incompatibleHtml,
+    /<h2 class="status-failure">Incompatible<\/h2>/,
+  );
   assert.match(incompatibleHtml, /AlbedoTexture<\/strong> \(SRV, space 0\)/);
   assert.match(incompatibleHtml, /has no corresponding root signature entry/);
 
@@ -625,7 +707,10 @@ void test("resource bindings HTML reports compatible, incompatible, and unknown 
     }),
   );
   assert.match(unknownHtml, /Compatibility is unknown/);
-  assert.match(unknownHtml, /Unavailable root-signature details are never treated as compatible/);
+  assert.match(
+    unknownHtml,
+    /Unavailable root-signature details are never treated as compatible/,
+  );
 });
 
 void test("resource bindings HTML always explains the bindless descriptor-heap limitation", () => {
@@ -679,7 +764,12 @@ void test("resource bindings HTML escapes untrusted resource and collision text"
               space: 0,
               systemReservedSpace: false,
               ranges: [
-                { resourceName: "<evil>", baseRegister: 0, unbounded: false, endRegister: 0 },
+                {
+                  resourceName: "<evil>",
+                  baseRegister: 0,
+                  unbounded: false,
+                  endRegister: 0,
+                },
               ],
             },
           ],
@@ -727,7 +817,10 @@ void test("resource bindings HTML links a resource row only when it has a compil
             usage: "used",
             sourceLocation: {
               uri: "file:///c:/scene/shader.hlsl",
-              range: { start: { line: 3, character: 0 }, end: { line: 3, character: 20 } },
+              range: {
+                start: { line: 3, character: 0 },
+                end: { line: 3, character: 20 },
+              },
             },
           },
           {
@@ -755,8 +848,18 @@ void test("resource bindings HTML links a resource row only when it has a compil
               space: 0,
               systemReservedSpace: false,
               ranges: [
-                { resourceName: "AlbedoTexture", baseRegister: 0, unbounded: false, endRegister: 0 },
-                { resourceName: "NormalTexture", baseRegister: 1, unbounded: false, endRegister: 1 },
+                {
+                  resourceName: "AlbedoTexture",
+                  baseRegister: 0,
+                  unbounded: false,
+                  endRegister: 0,
+                },
+                {
+                  resourceName: "NormalTexture",
+                  baseRegister: 1,
+                  unbounded: false,
+                  endRegister: 1,
+                },
               ],
             },
           ],
@@ -796,7 +899,10 @@ void test("resource bindings HTML links both collision participants only when ea
             usage: "used",
             sourceLocation: {
               uri: "file:///c:/scene/shader.hlsl",
-              range: { start: { line: 1, character: 0 }, end: { line: 1, character: 5 } },
+              range: {
+                start: { line: 1, character: 0 },
+                end: { line: 1, character: 5 },
+              },
             },
           },
           {
@@ -860,7 +966,10 @@ void test("resource bindings HTML never links a collision participant that maps 
         usage: "used",
         sourceLocation: {
           uri: "file:///c:/scene/shader.hlsl",
-          range: { start: { line: 1, character: 0 }, end: { line: 1, character: 5 } },
+          range: {
+            start: { line: 1, character: 0 },
+            end: { line: 1, character: 5 },
+          },
         },
       },
       {
@@ -880,7 +989,10 @@ void test("resource bindings HTML never links a collision participant that maps 
         usage: "used",
         sourceLocation: {
           uri: "file:///c:/scene/shader2.hlsl",
-          range: { start: { line: 4, character: 0 }, end: { line: 4, character: 5 } },
+          range: {
+            start: { line: 4, character: 0 },
+            end: { line: 4, character: 5 },
+          },
         },
       },
     ],
@@ -898,7 +1010,9 @@ void test("resource bindings HTML never links a collision participant that maps 
     },
   });
 
-  const html = resourceBindingsHtml(baseInfo({ reflection: duplicateResource }));
+  const html = resourceBindingsHtml(
+    baseInfo({ reflection: duplicateResource }),
+  );
 
   assert.doesNotMatch(html, /<a[^>]*>Dup<\/a>/);
   assert.match(html, /\(Dup &harr; Dup\)/);
@@ -920,13 +1034,19 @@ void test("parseResourceLocationCommandArg rejects a missing or empty uri", () =
   assert.equal(
     parseResourceLocationCommandArg({
       uri: "",
-      range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
+      range: {
+        start: { line: 0, character: 0 },
+        end: { line: 0, character: 1 },
+      },
     }),
     undefined,
   );
   assert.equal(
     parseResourceLocationCommandArg({
-      range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
+      range: {
+        start: { line: 0, character: 0 },
+        end: { line: 0, character: 1 },
+      },
     }),
     undefined,
   );
@@ -935,32 +1055,47 @@ void test("parseResourceLocationCommandArg rejects a missing or empty uri", () =
 void test("parseResourceLocationCommandArg rejects malformed, non-integer, negative, or inverted ranges", () => {
   const uri = "file:///c:/scene/shader.hlsl";
 
-  assert.equal(parseResourceLocationCommandArg({ uri, range: undefined }), undefined);
+  assert.equal(
+    parseResourceLocationCommandArg({ uri, range: undefined }),
+    undefined,
+  );
   assert.equal(
     parseResourceLocationCommandArg({
       uri,
-      range: { start: { line: 1.5, character: 0 }, end: { line: 1, character: 1 } },
+      range: {
+        start: { line: 1.5, character: 0 },
+        end: { line: 1, character: 1 },
+      },
     }),
     undefined,
   );
   assert.equal(
     parseResourceLocationCommandArg({
       uri,
-      range: { start: { line: -1, character: 0 }, end: { line: 1, character: 1 } },
+      range: {
+        start: { line: -1, character: 0 },
+        end: { line: 1, character: 1 },
+      },
     }),
     undefined,
   );
   assert.equal(
     parseResourceLocationCommandArg({
       uri,
-      range: { start: { line: 2, character: 0 }, end: { line: 1, character: 0 } },
+      range: {
+        start: { line: 2, character: 0 },
+        end: { line: 1, character: 0 },
+      },
     }),
     undefined,
   );
   assert.equal(
     parseResourceLocationCommandArg({
       uri,
-      range: { start: { line: 1, character: 5 }, end: { line: 1, character: 1 } },
+      range: {
+        start: { line: 1, character: 5 },
+        end: { line: 1, character: 1 },
+      },
     }),
     undefined,
   );
@@ -969,7 +1104,10 @@ void test("parseResourceLocationCommandArg rejects malformed, non-integer, negat
 void test("parseResourceLocationCommandArg rejects non-object and null arguments", () => {
   assert.equal(parseResourceLocationCommandArg(null), undefined);
   assert.equal(parseResourceLocationCommandArg(undefined), undefined);
-  assert.equal(parseResourceLocationCommandArg("file:///c:/scene/shader.hlsl"), undefined);
+  assert.equal(
+    parseResourceLocationCommandArg("file:///c:/scene/shader.hlsl"),
+    undefined,
+  );
   assert.equal(parseResourceLocationCommandArg(42), undefined);
 });
 

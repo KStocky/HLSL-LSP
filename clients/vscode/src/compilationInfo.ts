@@ -26,7 +26,8 @@ export interface CompilationSignatureParameter {
 // D3D_SIT_* reflection types collapse onto the same class (e.g. both
 // textures and structured buffers are "srv"); mirrors
 // hlsl_intellisense::dxc::ResourceRegisterClass.
-export type ResourceRegisterClass = "cbv" | "srv" | "uav" | "sampler" | "unknown";
+export type ResourceRegisterClass =
+  "cbv" | "srv" | "uav" | "sampler" | "unknown";
 
 // Whether a reflected resource is used by the compiled shader. Pinned DXC
 // was empirically observed to omit unreferenced resources from reflection
@@ -155,10 +156,7 @@ export interface CompilationReflection {
 // deserialization requires the Windows D3D12 runtime (never a custom RTS0
 // parser). Mirrors hlsl_intellisense::dxc::RootSignatureAvailability.
 export type RootSignatureAvailability =
-  | "present"
-  | "absent"
-  | "notApplicable"
-  | "presentDetailsUnavailable";
+  "present" | "absent" | "notApplicable" | "presentDetailsUnavailable";
 
 // Mirrors D3D12_SHADER_VISIBILITY.
 export type RootSignatureVisibility =
@@ -175,7 +173,8 @@ export type RootSignatureVisibility =
 // The register class a root-signature entry grants access through. Mirrors
 // D3D12_DESCRIPTOR_RANGE_TYPE for ranges; root descriptors/constants are
 // always cbv/srv/uav (never sampler).
-export type RootSignatureRangeType = "srv" | "uav" | "cbv" | "sampler" | "unknown";
+export type RootSignatureRangeType =
+  "srv" | "uav" | "cbv" | "sampler" | "unknown";
 
 // One descriptor range within a descriptor-table root parameter, mirroring
 // D3D12_DESCRIPTOR_RANGE1. `numDescriptors` is `null` exactly when
@@ -208,9 +207,7 @@ export interface RootSignatureRootDescriptor {
 }
 
 export type RootSignatureParameterKind =
-  | "descriptorTable"
-  | "constants"
-  | "rootDescriptor";
+  "descriptorTable" | "constants" | "rootDescriptor";
 
 // One root parameter, mirroring D3D12_ROOT_PARAMETER1; exactly one of
 // `constants`/`rootDescriptor` is non-null, or `descriptorTableRanges` is
@@ -273,7 +270,8 @@ export interface RootSignatureInfo {
 // static samplers are compared; bindless (ResourceDescriptorHeap /
 // SamplerDescriptorHeap) accesses are invisible to reflection and are never
 // guessed at.
-export type ResourceCompatibilityStatus = "compatible" | "incompatible" | "unknown";
+export type ResourceCompatibilityStatus =
+  "compatible" | "incompatible" | "unknown";
 
 export interface ResourceCompatibilityIssue {
   readonly resourceName: string;

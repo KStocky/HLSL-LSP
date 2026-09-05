@@ -867,8 +867,14 @@ export async function activate(
           return;
         }
         const range = new vscode.Range(
-          new vscode.Position(location.range.start.line, location.range.start.character),
-          new vscode.Position(location.range.end.line, location.range.end.character),
+          new vscode.Position(
+            location.range.start.line,
+            location.range.start.character,
+          ),
+          new vscode.Position(
+            location.range.end.line,
+            location.range.end.character,
+          ),
         );
         try {
           const document = await vscode.workspace.openTextDocument(targetUri);
@@ -876,7 +882,10 @@ export async function activate(
             preserveFocus: false,
             selection: range,
           });
-          editor.revealRange(range, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+          editor.revealRange(
+            range,
+            vscode.TextEditorRevealType.InCenterIfOutsideViewport,
+          );
         } catch (error) {
           await vscode.window.showErrorMessage(
             `Unable to navigate to the resource declaration: ${
