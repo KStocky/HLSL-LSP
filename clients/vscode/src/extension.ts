@@ -14,6 +14,11 @@ import {
   resolveCompilationInfoRefresh,
 } from "./compilationInfo";
 import {
+  openResourceLocationCommand,
+  parseResourceLocationCommandArg,
+  resolveResourceBindingsRefresh,
+} from "./resourceBindings";
+import {
   HlslServerSettings,
   readActiveVariant,
   readDefaultLanguageVersion,
@@ -112,8 +117,25 @@ let compilationInfoState: CompilationInfoViewState | undefined;
 let compilationInfoGeneration = 0;
 let compilationInfoDebounce: NodeJS.Timeout | undefined;
 
+// Independently tracked from CompilationInfoViewState: the two panels can be
+// open for different documents at the same time, and neither refresh path
+// may interfere with the other's generation counter or debounce timer.
+interface ResourceBindingsViewState {
+  readonly panel: vscode.WebviewPanel;
+  uri: vscode.Uri;
+  hasContent: boolean;
+}
+
+let resourceBindingsState: ResourceBindingsViewState | undefined;
+let resourceBindingsGeneration = 0;
+let resourceBindingsDebounce: NodeJS.Timeout | undefined;
+
 function compilationInfoLoadingHtml(): string {
   return `<!doctype html><html><body style="color:var(--vscode-foreground);background:var(--vscode-editor-background);font-family:var(--vscode-font-family);padding:1rem 1.5rem;"><p>Compiling…</p></body></html>`;
+}
+
+function resourceBindingsLoadingHtml(): string {
+  return `<!doctype html><html><body style="color:var(--vscode-foreground);background:var(--vscode-editor-background);font-family:var(--vscode-font-family);padding:1rem 1.5rem;"><p>Analyzing resource bindings…</p></body></html>`;
 }
 
 // Fetches the current compilation info for the tracked document and applies it
@@ -152,6 +174,44 @@ async function refreshCompilationInfo(
   }
   if (outcome.html !== undefined) {
     compilationInfoState.panel.webview.html = outcome.html;
+  }
+}
+
+// Mirrors refreshCompilationInfo exactly, reusing the same
+// hlsl/compilationInfo request (the Resource Bindings view is a different
+// presentation of the identical response, not a different protocol
+// request), but against its own independently tracked panel/generation so
+// the two views can never interfere with each other.
+async function refreshResourceBindings(
+  lifecycle: ClientLifecycle<ManagedClient>,
+  uri: vscode.Uri,
+): Promise<void> {
+  const generation = ++resourceBindingsGeneration;
+  let info: CompilationInfo | null | undefined;
+  let failureMessage: string | undefined;
+  try {
+    info = await lifecycle.withClient((client) => client.compilationInfo(uri));
+  } catch (error) {
+    failureMessage =
+      error instanceof Error ? error.message : "The request failed.";
+  }
+  if (
+    generation !== resourceBindingsGeneration ||
+    resourceBindingsState?.uri.toString() !== uri.toString()
+  ) {
+    return;
+  }
+  const outcome = resolveResourceBindingsRefresh(
+    resourceBindingsState.hasContent,
+    info,
+    failureMessage,
+  );
+  resourceBindingsState.hasContent = outcome.hasContent;
+  if (outcome.title !== undefined) {
+    resourceBindingsState.panel.title = outcome.title;
+  }
+  if (outcome.html !== undefined) {
+    resourceBindingsState.panel.webview.html = outcome.html;
   }
 }
 
@@ -740,6 +800,101 @@ export async function activate(
       }
       await refreshCompilationInfo(lifecycle, uri);
     }),
+    vscode.commands.registerCommand("hlsl.showResourceBindings", async () => {
+      const editor = vscode.window.activeTextEditor;
+      if (editor?.document.languageId !== "hlsl") {
+        await vscode.window.showInformationMessage(
+          "Open an HLSL document to inspect its resource bindings.",
+        );
+        return;
+      }
+      const uri = editor.document.uri;
+      if (resourceBindingsState !== undefined) {
+        const switchingDocument =
+          resourceBindingsState.uri.toString() !== uri.toString();
+        resourceBindingsState.uri = uri;
+        if (switchingDocument) {
+          // Only the loading placeholder for a different document replaces
+          // what is on screen; a same-document refresh keeps showing the
+          // last successful content until the new result (or an explicit
+          // error, on failure) is ready.
+          resourceBindingsState.hasContent = false;
+          resourceBindingsState.panel.webview.html =
+            resourceBindingsLoadingHtml();
+        }
+        resourceBindingsState.panel.reveal(vscode.ViewColumn.Beside);
+      } else {
+        const panel = vscode.window.createWebviewPanel(
+          "hlslResourceBindings",
+          "Resource Bindings",
+          vscode.ViewColumn.Beside,
+          {
+            enableScripts: false,
+            // No script execution is used for navigation: resource/collision
+            // labels link through plain `command:` URIs, and this allowlists
+            // only the one command they may invoke -- never `true` (which
+            // would let static HTML trigger arbitrary commands).
+            enableCommandUris: [openResourceLocationCommand],
+          },
+        );
+        panel.webview.html = resourceBindingsLoadingHtml();
+        panel.onDidDispose(() => {
+          if (resourceBindingsState?.panel === panel) {
+            resourceBindingsState = undefined;
+          }
+        });
+        resourceBindingsState = { panel, uri, hasContent: false };
+      }
+      await refreshResourceBindings(lifecycle, uri);
+    }),
+    vscode.commands.registerCommand(
+      openResourceLocationCommand,
+      async (rawArgument: unknown) => {
+        const location = parseResourceLocationCommandArg(rawArgument);
+        if (location === undefined) {
+          await vscode.window.showErrorMessage(
+            "Unable to navigate: the resource location was missing or malformed.",
+          );
+          return;
+        }
+        let targetUri: vscode.Uri;
+        try {
+          targetUri = vscode.Uri.parse(location.uri, true);
+        } catch {
+          await vscode.window.showErrorMessage(
+            "Unable to navigate: the resource location's URI could not be parsed.",
+          );
+          return;
+        }
+        const range = new vscode.Range(
+          new vscode.Position(
+            location.range.start.line,
+            location.range.start.character,
+          ),
+          new vscode.Position(
+            location.range.end.line,
+            location.range.end.character,
+          ),
+        );
+        try {
+          const document = await vscode.workspace.openTextDocument(targetUri);
+          const editor = await vscode.window.showTextDocument(document, {
+            preserveFocus: false,
+            selection: range,
+          });
+          editor.revealRange(
+            range,
+            vscode.TextEditorRevealType.InCenterIfOutsideViewport,
+          );
+        } catch (error) {
+          await vscode.window.showErrorMessage(
+            `Unable to navigate to the resource declaration: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+      },
+    ),
     vscode.commands.registerCommand("hlsl.selectVariant", async () => {
       const editor = vscode.window.activeTextEditor;
       const documentUri =
@@ -866,29 +1021,49 @@ export async function activate(
       ) {
         await refreshCompilationInfo(lifecycle, compilationInfoState.uri);
       }
+      if (
+        event.affectsConfiguration("hlsl.activeVariant", resource) &&
+        resourceBindingsState !== undefined
+      ) {
+        await refreshResourceBindings(lifecycle, resourceBindingsState.uri);
+      }
     }),
     vscode.workspace.onDidChangeWorkspaceFolders(restart),
     vscode.workspace.onDidSaveTextDocument((document) => {
       if (document.uri.toString() === compilationInfoState?.uri.toString()) {
         void refreshCompilationInfo(lifecycle, compilationInfoState.uri);
       }
+      if (document.uri.toString() === resourceBindingsState?.uri.toString()) {
+        void refreshResourceBindings(lifecycle, resourceBindingsState.uri);
+      }
     }),
     vscode.workspace.onDidChangeTextDocument((event) => {
       if (
-        event.document.uri.toString() !== compilationInfoState?.uri.toString()
+        event.document.uri.toString() === compilationInfoState?.uri.toString()
       ) {
-        return;
-      }
-      if (compilationInfoDebounce !== undefined) {
-        clearTimeout(compilationInfoDebounce);
-      }
-      // Debounced so a burst of keystrokes triggers one compile, not a storm
-      // of hlsl/compilationInfo requests.
-      compilationInfoDebounce = setTimeout(() => {
-        if (compilationInfoState !== undefined) {
-          void refreshCompilationInfo(lifecycle, compilationInfoState.uri);
+        if (compilationInfoDebounce !== undefined) {
+          clearTimeout(compilationInfoDebounce);
         }
-      }, 500);
+        // Debounced so a burst of keystrokes triggers one compile, not a
+        // storm of hlsl/compilationInfo requests.
+        compilationInfoDebounce = setTimeout(() => {
+          if (compilationInfoState !== undefined) {
+            void refreshCompilationInfo(lifecycle, compilationInfoState.uri);
+          }
+        }, 500);
+      }
+      if (
+        event.document.uri.toString() === resourceBindingsState?.uri.toString()
+      ) {
+        if (resourceBindingsDebounce !== undefined) {
+          clearTimeout(resourceBindingsDebounce);
+        }
+        resourceBindingsDebounce = setTimeout(() => {
+          if (resourceBindingsState !== undefined) {
+            void refreshResourceBindings(lifecycle, resourceBindingsState.uri);
+          }
+        }, 500);
+      }
     }),
     {
       dispose(): void {
@@ -932,5 +1107,10 @@ export async function deactivate(): Promise<void> {
     compilationInfoDebounce = undefined;
   }
   compilationInfoState = undefined;
+  if (resourceBindingsDebounce !== undefined) {
+    clearTimeout(resourceBindingsDebounce);
+    resourceBindingsDebounce = undefined;
+  }
+  resourceBindingsState = undefined;
   await lifecycle?.stop();
 }

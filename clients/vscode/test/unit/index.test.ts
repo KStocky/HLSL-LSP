@@ -2,6 +2,7 @@ import "./compilationInfo.test";
 import "./configuration.test";
 import "./lifecycle.test";
 import "./memoryLayout.test";
+import "./resourceBindings.test";
 import "./runtime.test";
 import "./settingsSynchronizer.test";
 import "./watchers.test";

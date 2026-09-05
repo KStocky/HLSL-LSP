@@ -71,9 +71,12 @@ hlsl_enable_clang_tidy(hlsl_workspace)
 add_library(hlsl_dxc STATIC)
 target_sources(hlsl_dxc
     PRIVATE
+        src/dxc/compatibility.cpp
         src/dxc/compilation_info.cpp
         src/dxc/intellisense.cpp
         src/dxc/memory_layout.cpp
+        src/dxc/resource_binding_analysis.cpp
+        src/dxc/root_signature.cpp
     PUBLIC
         FILE_SET HEADERS
         BASE_DIRS include
@@ -143,12 +146,16 @@ endif()
 
 if(BUILD_TESTING)
     add_executable(hlsl-intellisense-tests
+        tests/dxc/compatibility_tests.cpp
         tests/dxc/corpus_tests.cpp
-        tests/dxc/intellisense_tests.cpp)
+        tests/dxc/intellisense_tests.cpp
+        tests/dxc/resource_binding_analysis_tests.cpp)
     target_link_libraries(hlsl-intellisense-tests PRIVATE
         Catch2::Catch2WithMain
         hlsl_workspace
         hlsl_project_options)
+    target_include_directories(hlsl-intellisense-tests PRIVATE
+        "${PROJECT_SOURCE_DIR}/src")
     hlsl_enable_clang_tidy(hlsl-intellisense-tests)
     target_compile_definitions(hlsl-intellisense-tests PRIVATE
         HLSL_TEST_CORPUS_DIR="${PROJECT_SOURCE_DIR}/tests/corpus"

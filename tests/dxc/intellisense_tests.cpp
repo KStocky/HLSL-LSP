@@ -919,6 +919,20 @@ TEST_CASE("Compilation info reports SPIR-V output as successful without fabricat
     CHECK_FALSE(info.reflection->available);
     CHECK_FALSE(info.reflection->unavailable_reason.empty());
     CHECK(std::ranges::find(info.compiler_arguments, "-spirv") != info.compiler_arguments.end());
+    // Root signatures are a Direct3D 12 binding-model concept with no SPIR-V
+    // equivalent, so `root_signature` must still be non-null (reporting
+    // `not_applicable` distinctly rather than being omitted), and
+    // `compatibility` must likewise be non-null, reporting `unknown` since
+    // the notion does not apply to this target at all.
+    REQUIRE(info.root_signature.has_value());
+    CHECK(info.root_signature->availability ==
+          hlsl_intellisense::dxc::RootSignatureAvailability::not_applicable);
+    CHECK_FALSE(info.root_signature->unavailable_reason.empty());
+    CHECK_FALSE(info.root_signature->details.has_value());
+    REQUIRE(info.compatibility.has_value());
+    CHECK(info.compatibility->status ==
+          hlsl_intellisense::dxc::ResourceCompatibilityStatus::unknown);
+    CHECK_FALSE(info.compatibility->explanation.empty());
 }
 
 TEST_CASE("Compilation info reports successful DXIL output with unavailable reflection for "
@@ -957,6 +971,23 @@ TEST_CASE("Compilation info reports successful DXIL output with unavailable refl
     CHECK(info.reflection->output_signature.empty());
     CHECK(info.reflection->resources.empty());
     CHECK_FALSE(info.reflection->thread_group_size.has_value());
+    // Extracting the embedded root signature reads directly from the DXIL
+    // container part and does not depend on ID3D12ShaderReflection, so it
+    // must remain populated even though reflection itself failed for this
+    // library target: `root_signature` is non-null whenever compiler output
+    // exists. However, comparing resources to it requires the very
+    // reflected resource list that just failed to materialize, so
+    // `compatibility` must be reported as `unknown` with an explanation
+    // rather than left null (which would previously happen) or fabricated
+    // as `compatible` from an empty resource list.
+    REQUIRE(info.root_signature.has_value());
+    CHECK(info.root_signature->availability ==
+          hlsl_intellisense::dxc::RootSignatureAvailability::absent);
+    REQUIRE(info.compatibility.has_value());
+    CHECK(info.compatibility->status ==
+          hlsl_intellisense::dxc::ResourceCompatibilityStatus::unknown);
+    CHECK_FALSE(info.compatibility->explanation.empty());
+    CHECK(info.compatibility->issues.empty());
 }
 
 TEST_CASE("Compilation info tolerates -Qstrip_reflect without failing translation unit parsing",
@@ -1036,6 +1067,697 @@ TEST_CASE("Compilation info recompiles unsaved edits and reflects resolved inclu
     REQUIRE(info.output.has_value());
 
     std::filesystem::remove_all(directory);
+}
+
+TEST_CASE("Compilation info exposes register class, raw flags, range id, and sample count for "
+          "reflected resources",
+          "[dxc][compilation-info][resource-binding]") {
+    // Also empirically confirms tbuffer binds through an SRV 't' register,
+    // not a CBV 'b' register, despite its constant-buffer-like declaration
+    // syntax.
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.target_profile = "ps_6_6";
+    options.entry_point = "main";
+    const std::string source = "Texture2D<float4> Tex : register(t0);\n"
+                               "SamplerState Samp : register(s0);\n"
+                               "cbuffer CB : register(b0) { float4 tint; }\n"
+                               "RWStructuredBuffer<float4> Uav : register(u0);\n"
+                               "tbuffer TB : register(t3) { float4 tbValue; }\n"
+                               "float4 main() : SV_Target {\n"
+                               "    Uav[0] = tint + tbValue;\n"
+                               "    return Tex.Sample(Samp, float2(0, 0));\n"
+                               "}\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+
+    const auto info = translation_unit.compilation_info();
+    REQUIRE(info.success);
+    REQUIRE(info.reflection.has_value());
+    const auto find_resource = [&](std::string_view name) {
+        return std::ranges::find(info.reflection->resources, name,
+                                 &hlsl_intellisense::dxc::CompilationResourceBinding::name);
+    };
+
+    const auto tex = find_resource("Tex");
+    REQUIRE(tex != info.reflection->resources.end());
+    CHECK(tex->register_class == hlsl_intellisense::dxc::ResourceRegisterClass::srv);
+
+    const auto samp = find_resource("Samp");
+    REQUIRE(samp != info.reflection->resources.end());
+    CHECK(samp->register_class == hlsl_intellisense::dxc::ResourceRegisterClass::sampler);
+
+    const auto cbuf = find_resource("CB");
+    REQUIRE(cbuf != info.reflection->resources.end());
+    CHECK(cbuf->register_class == hlsl_intellisense::dxc::ResourceRegisterClass::cbv);
+
+    const auto uav = find_resource("Uav");
+    REQUIRE(uav != info.reflection->resources.end());
+    CHECK(uav->register_class == hlsl_intellisense::dxc::ResourceRegisterClass::uav);
+
+    // Empirically pinned: tbuffer reflects as an SRV bound through a 't'
+    // register (D3D_SIT_TBUFFER), never as a CBV, even though the HLSL
+    // declaration reads like a constant buffer.
+    const auto tbuf = find_resource("TB");
+    REQUIRE(tbuf != info.reflection->resources.end());
+    CHECK(tbuf->register_class == hlsl_intellisense::dxc::ResourceRegisterClass::srv);
+    CHECK(tbuf->bind_point == 3);
+
+    // Non-multisampled textures report NumSamples == 0xFFFFFFFF ("not
+    // applicable"), passed through unchanged rather than reinterpreted.
+    CHECK(tex->sample_count == 0xFFFFFFFFU);
+    CHECK_FALSE(tex->unbounded);
+    CHECK_FALSE(tex->system_reserved_space);
+}
+
+TEST_CASE("Compilation info attaches an unambiguous declaration location to reflected resources",
+          "[dxc][compilation-info][resource-binding][source-location]") {
+    // Resources are correlated to their declaration site using the same DXC
+    // IntelliSense cursor/document-symbol machinery already used for
+    // hover/go-to-definition (TranslationUnit::symbols()), never by parsing
+    // or guessing from raw text.
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.target_profile = "ps_6_6";
+    options.entry_point = "main";
+    const std::string source = "Texture2D<float4> Tex : register(t0);\n"
+                               "SamplerState Samp : register(s0);\n"
+                               "float4 main() : SV_Target {\n"
+                               "    return Tex.Sample(Samp, float2(0, 0));\n"
+                               "}\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+
+    const auto info = translation_unit.compilation_info();
+    REQUIRE(info.success);
+    REQUIRE(info.reflection.has_value());
+    const auto tex = std::ranges::find(info.reflection->resources, "Tex",
+                                       &hlsl_intellisense::dxc::CompilationResourceBinding::name);
+    REQUIRE(tex != info.reflection->resources.end());
+    REQUIRE(tex->source_location.has_value());
+    CHECK(tex->source_location->path == shader_path);
+    CHECK(tex->source_location->line == 1);
+    // Column 19 is where the "Tex" identifier itself begins on line 1
+    // ("Texture2D<float4> Tex : register(t0);"), not the start of the
+    // declaration statement.
+    CHECK(tex->source_location->column == 19);
+
+    const auto samp = std::ranges::find(info.reflection->resources, "Samp",
+                                        &hlsl_intellisense::dxc::CompilationResourceBinding::name);
+    REQUIRE(samp != info.reflection->resources.end());
+    REQUIRE(samp->source_location.has_value());
+    CHECK(samp->source_location->line == 2);
+}
+
+TEST_CASE("Compilation info attaches a declaration location to an array resource",
+          "[dxc][compilation-info][resource-binding][source-location]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.target_profile = "ps_6_6";
+    options.entry_point = "main";
+    const std::string source = "Texture2D<float4> Tex[4] : register(t0);\n"
+                               "float4 main(uint idx : INDEX) : SV_Target {\n"
+                               "    return Tex[idx].Load(int3(0, 0, 0));\n"
+                               "}\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+
+    const auto info = translation_unit.compilation_info();
+    REQUIRE(info.success);
+    REQUIRE(info.reflection.has_value());
+    const auto tex = std::ranges::find(info.reflection->resources, "Tex",
+                                       &hlsl_intellisense::dxc::CompilationResourceBinding::name);
+    REQUIRE(tex != info.reflection->resources.end());
+    REQUIRE(tex->source_location.has_value());
+    CHECK(tex->source_location->path == shader_path);
+    CHECK(tex->source_location->line == 1);
+}
+
+TEST_CASE("Compilation info recomputes resource declaration locations after unsaved edits",
+          "[dxc][compilation-info][resource-binding][source-location][reparse]") {
+    // A stale cached symbol tree would keep reporting the resource's old
+    // location after it moves; the very next compilation_info() call after
+    // reparse() must observe the new line, proving the location is derived
+    // from the current unsaved snapshot rather than a fabricated or cached
+    // value.
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.target_profile = "ps_6_6";
+    options.entry_point = "main";
+    const std::string original_source = "Texture2D<float4> Tex : register(t0);\n"
+                                        "SamplerState Samp : register(s0);\n"
+                                        "float4 main() : SV_Target {\n"
+                                        "    return Tex.Sample(Samp, float2(0, 0));\n"
+                                        "}\n";
+    auto translation_unit =
+        intellisense.parse(shader_path, {{shader_path, original_source}}, options);
+
+    auto info = translation_unit.compilation_info();
+    REQUIRE(info.success);
+    auto tex = std::ranges::find(info.reflection->resources, "Tex",
+                                 &hlsl_intellisense::dxc::CompilationResourceBinding::name);
+    REQUIRE(tex != info.reflection->resources.end());
+    REQUIRE(tex->source_location.has_value());
+    CHECK(tex->source_location->line == 1);
+
+    const std::string moved_source = "\n\nTexture2D<float4> Tex : register(t0);\n"
+                                     "SamplerState Samp : register(s0);\n"
+                                     "float4 main() : SV_Target {\n"
+                                     "    return Tex.Sample(Samp, float2(0, 0));\n"
+                                     "}\n";
+    translation_unit.reparse({{shader_path, moved_source}});
+    info = translation_unit.compilation_info();
+    REQUIRE(info.success);
+    tex = std::ranges::find(info.reflection->resources, "Tex",
+                            &hlsl_intellisense::dxc::CompilationResourceBinding::name);
+    REQUIRE(tex != info.reflection->resources.end());
+    REQUIRE(tex->source_location.has_value());
+    CHECK(tex->source_location->line == 3);
+}
+
+TEST_CASE("Compilation info omits the resource source location when the name is ambiguous in the "
+          "cursor tree",
+          "[dxc][compilation-info][resource-binding][source-location]") {
+    // "Data" names both the reflected cbuffer resource and an unrelated
+    // struct field elsewhere in the same translation unit. DXC's own cursor
+    // tree cannot disambiguate a plain name match here (both are genuine,
+    // distinct declarations), so the correlation must conservatively omit
+    // the location rather than pick one and risk pointing at the wrong
+    // declaration.
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.target_profile = "ps_6_6";
+    options.entry_point = "main";
+    const std::string source = "struct Unrelated { float Data; };\n"
+                               "cbuffer Data : register(b0) { float4 tint; }\n"
+                               "float4 main() : SV_Target {\n"
+                               "    Unrelated value = (Unrelated)0;\n"
+                               "    return tint + value.Data;\n"
+                               "}\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+
+    const auto info = translation_unit.compilation_info();
+    REQUIRE(info.success);
+    REQUIRE(info.reflection.has_value());
+    const auto data = std::ranges::find(info.reflection->resources, "Data",
+                                        &hlsl_intellisense::dxc::CompilationResourceBinding::name);
+    REQUIRE(data != info.reflection->resources.end());
+    CHECK_FALSE(data->source_location.has_value());
+}
+
+TEST_CASE("Compilation info reports finite resource arrays as bounded",
+          "[dxc][compilation-info][resource-binding]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.target_profile = "ps_6_6";
+    options.entry_point = "main";
+    const std::string source = "Texture2D<float4> Tex[4] : register(t0);\n"
+                               "float4 main(uint idx : INDEX) : SV_Target {\n"
+                               "    return Tex[idx].Load(int3(0, 0, 0));\n"
+                               "}\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+
+    const auto info = translation_unit.compilation_info();
+    REQUIRE(info.success);
+    REQUIRE(info.reflection.has_value());
+    const auto tex = std::ranges::find(info.reflection->resources, "Tex",
+                                       &hlsl_intellisense::dxc::CompilationResourceBinding::name);
+    REQUIRE(tex != info.reflection->resources.end());
+    CHECK_FALSE(tex->unbounded);
+    CHECK(tex->bind_count == 4);
+}
+
+TEST_CASE("Compilation info reports unbounded resource arrays distinctly from finite arrays",
+          "[dxc][compilation-info][resource-binding]") {
+    // Empirically confirmed: an unbounded shader-side resource array reports
+    // BindCount == 0 (not UINT_MAX, which is the *root-signature-side*
+    // convention for unbounded descriptor ranges).
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.target_profile = "ps_6_6";
+    options.entry_point = "main";
+    const std::string source = "Texture2D<float4> Tex[] : register(t0, space1);\n"
+                               "float4 main(uint idx : INDEX) : SV_Target {\n"
+                               "    return Tex[idx].Load(int3(0, 0, 0));\n"
+                               "}\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+
+    const auto info = translation_unit.compilation_info();
+    REQUIRE(info.success);
+    REQUIRE(info.reflection.has_value());
+    const auto tex = std::ranges::find(info.reflection->resources, "Tex",
+                                       &hlsl_intellisense::dxc::CompilationResourceBinding::name);
+    REQUIRE(tex != info.reflection->resources.end());
+    CHECK(tex->unbounded);
+    CHECK(tex->bind_count == 0);
+    CHECK(tex->space == 1);
+}
+
+TEST_CASE("Compilation info classifies resources in D3D12 reserved register spaces",
+          "[dxc][compilation-info][resource-binding]") {
+    // Empirically confirmed: DXC accepts a user-declared space at the start
+    // of D3D12's reserved system range [0xfffffff0, 0xffffffff] without
+    // rejecting the compile; this server must still classify it distinctly
+    // rather than treating it like an ordinary user space.
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.target_profile = "ps_6_6";
+    options.entry_point = "main";
+    const std::string source = "Texture2D<float4> Tex : register(t0, space4294967280);\n"
+                               "float4 main() : SV_Target {\n"
+                               "    return Tex.Load(int3(0, 0, 0));\n"
+                               "}\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+
+    const auto info = translation_unit.compilation_info();
+    REQUIRE(info.success);
+    REQUIRE(info.reflection.has_value());
+    const auto tex = std::ranges::find(info.reflection->resources, "Tex",
+                                       &hlsl_intellisense::dxc::CompilationResourceBinding::name);
+    REQUIRE(tex != info.reflection->resources.end());
+    CHECK(tex->space == 4294967280U);
+    CHECK(tex->system_reserved_space);
+
+    const auto group =
+        std::ranges::find_if(info.reflection->binding_analysis.groups,
+                             [](const auto& group) { return group.space == 4294967280U; });
+    REQUIRE(group != info.reflection->binding_analysis.groups.end());
+    CHECK(group->system_reserved_space);
+}
+
+TEST_CASE("Compilation info groups well-formed resources with no provable collisions",
+          "[dxc][compilation-info][resource-binding]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.target_profile = "ps_6_6";
+    options.entry_point = "main";
+    const std::string source = "Texture2D<float4> TexA : register(t0);\n"
+                               "Texture2D<float4> TexB : register(t1);\n"
+                               "SamplerState Samp : register(s0);\n"
+                               "cbuffer CB : register(b0) { float4 tint; }\n"
+                               "float4 main() : SV_Target {\n"
+                               "    return TexA.Sample(Samp, float2(0, 0)) +\n"
+                               "           TexB.Sample(Samp, float2(0, 0)) + tint;\n"
+                               "}\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+
+    const auto info = translation_unit.compilation_info();
+    REQUIRE(info.success);
+    REQUIRE(info.reflection.has_value());
+    CHECK(info.reflection->binding_analysis.collisions.empty());
+    // srv (2), sampler (1), cbv (1) groups, each in space 0.
+    CHECK(info.reflection->binding_analysis.groups.size() == 3);
+    const auto srv_group =
+        std::ranges::find_if(info.reflection->binding_analysis.groups, [](const auto& group) {
+            return group.register_class == hlsl_intellisense::dxc::ResourceRegisterClass::srv;
+        });
+    REQUIRE(srv_group != info.reflection->binding_analysis.groups.end());
+    CHECK(srv_group->ranges.size() == 2);
+}
+
+TEST_CASE("Compilation info extracts an embedded root signature with parameters, ranges, static "
+          "samplers, and direct-indexing flags",
+          "[dxc][compilation-info][root-signature]") {
+    // Pins the exact 1.1-shaped structure DXC 1.9.2607.13 was empirically
+    // observed to produce for a root signature exercising root constants, a
+    // root CBV descriptor, a descriptor table with a finite DATA_STATIC SRV
+    // range and an unbounded DESCRIPTORS_VOLATILE UAV range, a static
+    // sampler, and CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED.
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.target_profile = "ps_6_6";
+    options.entry_point = "main";
+    const std::string source =
+        R"HLSL(
+#define MyRS "RootFlags(ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT | CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED), " \
+             "RootConstants(num32BitConstants=4, b0, space=0, visibility=SHADER_VISIBILITY_PIXEL), " \
+             "CBV(b1, space=0, visibility=SHADER_VISIBILITY_ALL), " \
+             "DescriptorTable(SRV(t0, numDescriptors=4, space=1, flags=DATA_STATIC), " \
+                             "UAV(u0, numDescriptors=unbounded, space=2, flags=DESCRIPTORS_VOLATILE), " \
+                             "visibility=SHADER_VISIBILITY_PIXEL), " \
+             "StaticSampler(s0, filter=FILTER_MIN_MAG_MIP_LINEAR, space=0, visibility=SHADER_VISIBILITY_PIXEL)"
+Texture2D<float4> Tex[4] : register(t0, space1);
+RWStructuredBuffer<float4> Uav[] : register(u0, space2);
+SamplerState Samp : register(s0);
+cbuffer CB0 : register(b0) { float4 c0; }
+cbuffer CB1 : register(b1) { float4 c1; }
+[RootSignature(MyRS)]
+float4 main(uint idx : INDEX) : SV_Target {
+    Uav[idx][0] = c0;
+    return Tex[idx].Sample(Samp, float2(0,0)) + c1;
+}
+)HLSL";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+
+    const auto info = translation_unit.compilation_info();
+    std::string messages;
+    for (const auto& diagnostic : info.diagnostics) {
+        messages += diagnostic.message;
+        messages += '\n';
+    }
+    INFO(messages);
+    REQUIRE(info.success);
+    REQUIRE(info.root_signature.has_value());
+#ifdef _WIN32
+    // Windows: the official D3D12 deserializer is available, so this
+    // server exposes the full parameter/range/static-sampler structure.
+    REQUIRE(info.root_signature->availability ==
+            hlsl_intellisense::dxc::RootSignatureAvailability::present);
+    REQUIRE(info.root_signature->details.has_value());
+    const auto& details = *info.root_signature->details;
+    CHECK(details.version == "1.1");
+    CHECK(details.cbv_srv_uav_heap_directly_indexed);
+    CHECK_FALSE(details.sampler_heap_directly_indexed);
+    REQUIRE(details.parameters.size() == 3);
+    REQUIRE(details.static_samplers.size() == 1);
+
+    const auto& root_constants_param = details.parameters[0];
+    CHECK(root_constants_param.kind ==
+          hlsl_intellisense::dxc::RootSignatureParameterKind::constants);
+    CHECK(root_constants_param.visibility ==
+          hlsl_intellisense::dxc::RootSignatureVisibility::pixel);
+    REQUIRE(root_constants_param.constants.has_value());
+    CHECK(root_constants_param.constants->shader_register == 0);
+    CHECK(root_constants_param.constants->space == 0);
+    CHECK(root_constants_param.constants->num_32bit_values == 4);
+
+    const auto& root_descriptor_param = details.parameters[1];
+    CHECK(root_descriptor_param.kind ==
+          hlsl_intellisense::dxc::RootSignatureParameterKind::root_descriptor);
+    CHECK(root_descriptor_param.visibility == hlsl_intellisense::dxc::RootSignatureVisibility::all);
+    REQUIRE(root_descriptor_param.root_descriptor.has_value());
+    CHECK(root_descriptor_param.root_descriptor->type ==
+          hlsl_intellisense::dxc::RootSignatureRangeType::cbv);
+    CHECK(root_descriptor_param.root_descriptor->shader_register == 1);
+    CHECK(root_descriptor_param.root_descriptor->space == 0);
+
+    const auto& table_param = details.parameters[2];
+    CHECK(table_param.kind == hlsl_intellisense::dxc::RootSignatureParameterKind::descriptor_table);
+    CHECK(table_param.visibility == hlsl_intellisense::dxc::RootSignatureVisibility::pixel);
+    REQUIRE(table_param.descriptor_table_ranges.size() == 2);
+
+    const auto& srv_range = table_param.descriptor_table_ranges[0];
+    CHECK(srv_range.type == hlsl_intellisense::dxc::RootSignatureRangeType::srv);
+    CHECK_FALSE(srv_range.unbounded);
+    CHECK(srv_range.num_descriptors == 4);
+    CHECK(srv_range.base_register == 0);
+    CHECK(srv_range.space == 1);
+    CHECK((srv_range.raw_flags & 0x8U) != 0); // D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC
+
+    const auto& uav_range = table_param.descriptor_table_ranges[1];
+    CHECK(uav_range.type == hlsl_intellisense::dxc::RootSignatureRangeType::uav);
+    CHECK(uav_range.unbounded);
+    CHECK(uav_range.base_register == 0);
+    CHECK(uav_range.space == 2);
+    CHECK((uav_range.raw_flags & 0x1U) != 0); // D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE
+
+    const auto& sampler = details.static_samplers[0];
+    CHECK(sampler.shader_register == 0);
+    CHECK(sampler.space == 0);
+    CHECK(sampler.visibility == hlsl_intellisense::dxc::RootSignatureVisibility::pixel);
+    CHECK(sampler.filter == 21U); // D3D12_FILTER_MIN_MAG_MIP_LINEAR
+
+    // The reflected resources in this same compilation are fully and
+    // correctly covered for the active (pixel) stage, so compatibility must
+    // report `compatible` with no issues.
+    REQUIRE(info.compatibility.has_value());
+    CHECK(info.compatibility->status ==
+          hlsl_intellisense::dxc::ResourceCompatibilityStatus::compatible);
+    CHECK(info.compatibility->issues.empty());
+#else
+    // Non-Windows (e.g. Linux): the embedded root signature is detected
+    // present via IDxcUtils::GetDxilContainerPart (which is cross-platform),
+    // but detailed deserialization requires the Windows-only
+    // ID3D12VersionedRootSignatureDeserializer, so this server correctly
+    // reports presence without fabricating details, and compatibility
+    // cannot be determined without them.
+    CHECK(info.root_signature->availability ==
+          hlsl_intellisense::dxc::RootSignatureAvailability::present_details_unavailable);
+    CHECK_FALSE(info.root_signature->details.has_value());
+    CHECK_FALSE(info.root_signature->unavailable_reason.empty());
+    REQUIRE(info.compatibility.has_value());
+    CHECK(info.compatibility->status ==
+          hlsl_intellisense::dxc::ResourceCompatibilityStatus::unknown);
+#endif
+}
+
+TEST_CASE("Compilation info reports an absent root signature distinctly when none is embedded",
+          "[dxc][compilation-info][root-signature]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.target_profile = "ps_6_6";
+    options.entry_point = "main";
+    const std::string source = "Texture2D<float4> Tex : register(t0);\n"
+                               "SamplerState Samp : register(s0);\n"
+                               "float4 main() : SV_Target {\n"
+                               "    return Tex.Sample(Samp, float2(0, 0));\n"
+                               "}\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+
+    const auto info = translation_unit.compilation_info();
+    REQUIRE(info.success);
+    REQUIRE(info.root_signature.has_value());
+    CHECK(info.root_signature->availability ==
+          hlsl_intellisense::dxc::RootSignatureAvailability::absent);
+    REQUIRE(info.compatibility.has_value());
+    CHECK(info.compatibility->status ==
+          hlsl_intellisense::dxc::ResourceCompatibilityStatus::unknown);
+    CHECK_FALSE(info.compatibility->explanation.empty());
+}
+
+TEST_CASE("Compilation info reports SPIR-V root signatures as not applicable",
+          "[dxc][compilation-info][root-signature][spirv]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.target_profile = "ps_6_6";
+    options.entry_point = "main";
+    options.additional_arguments = {"-spirv"};
+    const std::string source = "float4 main() : SV_Target {\n"
+                               "    return 1.0.xxxx;\n"
+                               "}\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+
+    const auto info = translation_unit.compilation_info();
+    REQUIRE(info.success);
+    REQUIRE(info.root_signature.has_value());
+    CHECK(info.root_signature->availability ==
+          hlsl_intellisense::dxc::RootSignatureAvailability::not_applicable);
+    CHECK_FALSE(info.root_signature->unavailable_reason.empty());
+    REQUIRE(info.compatibility.has_value());
+    CHECK(info.compatibility->status ==
+          hlsl_intellisense::dxc::ResourceCompatibilityStatus::unknown);
+}
+
+TEST_CASE("Compilation info reports the true root signature version even though details are "
+          "always exposed through the 1.1 shape",
+          "[dxc][compilation-info][root-signature]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.target_profile = "ps_6_6";
+    options.entry_point = "main";
+    options.additional_arguments = {"-force-rootsig-ver", "rootsig_1_0"};
+    const std::string source = R"HLSL(
+#define MyRS "RootFlags(0), CBV(b0)"
+cbuffer CB0 : register(b0) { float4 c0; }
+[RootSignature(MyRS)]
+float4 main() : SV_Target {
+    return c0;
+}
+)HLSL";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+
+    const auto info = translation_unit.compilation_info();
+    std::string messages;
+    for (const auto& diagnostic : info.diagnostics) {
+        messages += diagnostic.message;
+        messages += '\n';
+    }
+    INFO(messages);
+    REQUIRE(info.success);
+    REQUIRE(info.root_signature.has_value());
+#ifdef _WIN32
+    REQUIRE(info.root_signature->details.has_value());
+    CHECK(info.root_signature->details->version == "1.0");
+    REQUIRE(info.root_signature->details->parameters.size() == 1);
+    CHECK(info.root_signature->details->parameters[0].kind ==
+          hlsl_intellisense::dxc::RootSignatureParameterKind::root_descriptor);
+#else
+    // Presence is still correctly detected via GetDxilContainerPart, but the
+    // version-specific parameter shape can only be read back through the
+    // Windows-only deserializer.
+    CHECK(info.root_signature->availability ==
+          hlsl_intellisense::dxc::RootSignatureAvailability::present_details_unavailable);
+    CHECK_FALSE(info.root_signature->details.has_value());
+    CHECK_FALSE(info.root_signature->unavailable_reason.empty());
+#endif
+}
+
+TEST_CASE("Compilation reports the compiler's own root-signature validation diagnostic when a "
+          "descriptor-table range is narrower than the shader's declared resource array",
+          "[dxc][compilation-info][compatibility]") {
+    // Empirically re-verified (see out/scratch/compat_probe.cpp): once a root
+    // signature is embedded via the [RootSignature(...)] attribute, DXC's own
+    // front-end validates finite-vs-finite range coverage at compile time and
+    // rejects a descriptor-table range narrower than the shader's declared
+    // resource array *before* this server's own compilation_info() pipeline
+    // ever runs. This scenario is therefore only reachable as a compile
+    // failure with the compiler's own diagnostic (never as a successful
+    // compile carrying an "incompatible" analysis result) -- this test
+    // pins that compiler-owned behavior. The white-box
+    // tests/dxc/compatibility_tests.cpp exercises the analysis logic itself
+    // with synthetic data for this same shape of mismatch.
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.target_profile = "ps_6_6";
+    options.entry_point = "main";
+    const std::string source = R"HLSL(
+#define MyRS "RootFlags(0), DescriptorTable(SRV(t0, numDescriptors=1, space=0))"
+Texture2D<float4> Tex[4] : register(t0);
+[RootSignature(MyRS)]
+float4 main(uint i : IDX) : SV_Target { return Tex[i].Load(int3(0,0,0)); }
+)HLSL";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+
+    const auto info = translation_unit.compilation_info();
+    CHECK_FALSE(info.success);
+    const bool has_expected_diagnostic =
+        std::ranges::any_of(info.diagnostics, [](const auto& diagnostic) {
+            return diagnostic.message.find("not fully bound in root signature") !=
+                   std::string::npos;
+        });
+    CHECK(has_expected_diagnostic);
+}
+
+TEST_CASE("Compilation info reports compatible for an unbounded resource array covered by a "
+          "bounded root signature range at the same base register",
+          "[dxc][compilation-info][compatibility]") {
+    // Empirically confirmed to compile AND validate successfully through
+    // pinned DXC (see out/scratch/compat_probe.cpp history): the compiler's
+    // own root-signature validator does not require a bounded
+    // descriptor-table range backing an unbounded shader-declared array to
+    // also be declared unbounded. This server's compatibility analysis
+    // matches that authoritative behavior and only requires base-register
+    // coverage for unbounded resources, never flagging this shape as
+    // incompatible on its own.
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.target_profile = "ps_6_6";
+    options.entry_point = "main";
+    const std::string source = R"HLSL(
+#define MyRS "RootFlags(0), DescriptorTable(SRV(t0, numDescriptors=4, space=0))"
+Texture2D<float4> Tex[] : register(t0);
+[RootSignature(MyRS)]
+float4 main(uint i : IDX) : SV_Target { return Tex[i].Load(int3(0,0,0)); }
+)HLSL";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+
+    const auto info = translation_unit.compilation_info();
+    REQUIRE(info.success);
+    REQUIRE(info.compatibility.has_value());
+#ifdef _WIN32
+    CHECK(info.compatibility->status ==
+          hlsl_intellisense::dxc::ResourceCompatibilityStatus::compatible);
+    CHECK(info.compatibility->issues.empty());
+#else
+    // Compatibility cannot be proven without the Windows-only deserialized
+    // root-signature details; this is reported as `unknown`, never a
+    // fabricated verdict.
+    CHECK(info.compatibility->status ==
+          hlsl_intellisense::dxc::ResourceCompatibilityStatus::unknown);
+#endif
+}
+
+TEST_CASE("Compilation info recomputes resources, root signature, and compatibility per active "
+          "entry point and stage",
+          "[dxc][compilation-info][variant]") {
+    // Simulates what a workspace variant switch does at the Manager/Server
+    // layer (re-deriving CompilerOptions with a different entry point and
+    // target profile): parsing the *same* multi-entry-point source with two
+    // different active configurations must yield distinctly-recomputed
+    // resources (compiler-side dead code elimination means only the
+    // resource the active entry point actually references is reflected),
+    // stage, and compatibility - never a stale carryover from a previous
+    // configuration.
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    const std::string source =
+        R"HLSL(
+#define MyRS "RootFlags(0), " \
+             "CBV(b0, space=0, visibility=SHADER_VISIBILITY_VERTEX), " \
+             "CBV(b1, space=0, visibility=SHADER_VISIBILITY_PIXEL)"
+cbuffer VSData : register(b0) { float4 vsValue; }
+cbuffer PSData : register(b1) { float4 psValue; }
+[RootSignature(MyRS)]
+float4 VSMain() : SV_Position { return vsValue; }
+[RootSignature(MyRS)]
+float4 PSMain() : SV_Target { return psValue; }
+)HLSL";
+
+    hlsl_intellisense::dxc::CompilerOptions vs_options;
+    vs_options.target_profile = "vs_6_6";
+    vs_options.entry_point = "VSMain";
+    auto vs_unit = intellisense.parse(shader_path, {{shader_path, source}}, vs_options);
+    const auto vs_info = vs_unit.compilation_info();
+    std::string vs_messages;
+    for (const auto& diagnostic : vs_info.diagnostics) {
+        vs_messages += diagnostic.message;
+        vs_messages += '\n';
+    }
+    INFO(vs_messages);
+    REQUIRE(vs_info.success);
+    CHECK(vs_info.stage == "vertex");
+    REQUIRE(vs_info.reflection.has_value());
+    REQUIRE(vs_info.reflection->resources.size() == 1);
+    CHECK(vs_info.reflection->resources.front().name == "VSData");
+    REQUIRE(vs_info.compatibility.has_value());
+#ifdef _WIN32
+    CHECK(vs_info.compatibility->status ==
+          hlsl_intellisense::dxc::ResourceCompatibilityStatus::compatible);
+#else
+    CHECK(vs_info.compatibility->status ==
+          hlsl_intellisense::dxc::ResourceCompatibilityStatus::unknown);
+#endif
+
+    hlsl_intellisense::dxc::CompilerOptions ps_options;
+    ps_options.target_profile = "ps_6_6";
+    ps_options.entry_point = "PSMain";
+    auto ps_unit = intellisense.parse(shader_path, {{shader_path, source}}, ps_options);
+    const auto ps_info = ps_unit.compilation_info();
+    std::string ps_messages;
+    for (const auto& diagnostic : ps_info.diagnostics) {
+        ps_messages += diagnostic.message;
+        ps_messages += '\n';
+    }
+    INFO(ps_messages);
+    REQUIRE(ps_info.success);
+    CHECK(ps_info.stage == "pixel");
+    REQUIRE(ps_info.reflection.has_value());
+    REQUIRE(ps_info.reflection->resources.size() == 1);
+    CHECK(ps_info.reflection->resources.front().name == "PSData");
+    REQUIRE(ps_info.compatibility.has_value());
+#ifdef _WIN32
+    CHECK(ps_info.compatibility->status ==
+          hlsl_intellisense::dxc::ResourceCompatibilityStatus::compatible);
+#else
+    CHECK(ps_info.compatibility->status ==
+          hlsl_intellisense::dxc::ResourceCompatibilityStatus::unknown);
+#endif
+
+    // Both compiles embed the identical root-signature text, so its
+    // parameter/visibility structure must be identical regardless of which
+    // entry point/stage is active - only the *reflected resources* and
+    // *stage* differ per active configuration.
+    REQUIRE(vs_info.root_signature.has_value());
+    REQUIRE(ps_info.root_signature.has_value());
+#ifdef _WIN32
+    REQUIRE(vs_info.root_signature->details.has_value());
+    REQUIRE(ps_info.root_signature->details.has_value());
+    CHECK(vs_info.root_signature->details->parameters.size() == 2);
+    CHECK(ps_info.root_signature->details->parameters.size() == 2);
+#else
+    CHECK(vs_info.root_signature->availability ==
+          hlsl_intellisense::dxc::RootSignatureAvailability::present_details_unavailable);
+    CHECK(ps_info.root_signature->availability ==
+          hlsl_intellisense::dxc::RootSignatureAvailability::present_details_unavailable);
+    CHECK_FALSE(vs_info.root_signature->details.has_value());
+    CHECK_FALSE(ps_info.root_signature->details.has_value());
+#endif
 }
 
 TEST_CASE("DXC IntelliSense navigates to partially specialized template declarations",

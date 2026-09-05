@@ -307,16 +307,17 @@ export async function run(): Promise<void> {
   await vscode.workspace.fs.writeFile(
     compilationShader,
     encoder.encode(
-      "float4 PSMain(float4 position : SV_Position) : SV_Target {\n" +
-        "#if defined(USE_TINT)\n    return float4(1.0, 0.0, 0.0, 1.0);\n" +
-        "#else\n    return float4(0.0, 1.0, 0.0, 1.0);\n#endif\n" +
+      "Texture2D<float4> AlbedoTexture : register(t0);\n" +
+        "float4 PSMain(float4 position : SV_Position) : SV_Target {\n" +
+        "#if defined(USE_TINT)\n    return float4(1.0, 0.0, 0.0, 1.0) * AlbedoTexture.Load(int3(0, 0, 0));\n" +
+        "#else\n    return float4(0.0, 1.0, 0.0, 1.0) * AlbedoTexture.Load(int3(0, 0, 0));\n#endif\n" +
         "}\n",
     ),
   );
   try {
     const compilationDocument =
       await vscode.workspace.openTextDocument(compilationShader);
-    const compilationEditor =
+    let compilationEditor =
       await vscode.window.showTextDocument(compilationDocument);
 
     // A compilation request racing an edit or variant change can be
@@ -350,6 +351,86 @@ export async function run(): Promise<void> {
       initialInfo.reflection?.available,
       "DXIL output should report available reflection",
     );
+    assert(
+      Array.isArray(initialInfo.reflection.bindingAnalysis.groups),
+      "reflection.bindingAnalysis.groups should be present for available reflection",
+    );
+    assert(
+      Array.isArray(initialInfo.reflection.bindingAnalysis.collisions),
+      "reflection.bindingAnalysis.collisions should be present for available reflection",
+    );
+    assert.strictEqual(
+      initialInfo.rootSignature?.availability,
+      "absent",
+      "This fixture shader has no embedded root signature",
+    );
+    assert(
+      typeof initialInfo.compatibility?.status === "string" &&
+        initialInfo.compatibility.explanation.length > 0,
+      "compatibility should report a status and a non-empty explanation even without a root signature",
+    );
+
+    // The fixture declares exactly one resource with a single, unambiguous
+    // declaration in the current document, so DXC's reflection should
+    // resolve a sourceLocation for it that points back at this same file.
+    const albedoResource = initialInfo.reflection.resources.find(
+      (resource) => resource.name === "AlbedoTexture",
+    );
+    assert(
+      albedoResource !== undefined,
+      "AlbedoTexture should be reflected as a bound resource",
+    );
+    assert(
+      albedoResource.sourceLocation !== null,
+      "AlbedoTexture has exactly one declaration, so its sourceLocation should not be null",
+    );
+    const albedoLocation = albedoResource.sourceLocation;
+    assert.strictEqual(
+      vscode.Uri.parse(albedoLocation.uri).fsPath,
+      compilationShader.fsPath,
+      "AlbedoTexture's sourceLocation should point back at the fixture document",
+    );
+    assert.strictEqual(albedoLocation.range.start.line, 0);
+    assert(
+      albedoLocation.range.end.line >= albedoLocation.range.start.line &&
+        (albedoLocation.range.end.line > albedoLocation.range.start.line ||
+          albedoLocation.range.end.character >=
+            albedoLocation.range.start.character),
+      "sourceLocation range should not be inverted",
+    );
+
+    // Exercising the actual navigation command end-to-end (not just the
+    // pure validation helpers covered by unit tests) confirms the webview's
+    // command-URI handler really opens and selects the declaration.
+    await vscode.commands.executeCommand(
+      "hlsl.resourceBindings.openLocation",
+      albedoLocation,
+    );
+    const navigatedEditor = await waitFor(
+      "editor navigation to AlbedoTexture's declaration",
+      () => {
+        const editor = vscode.window.activeTextEditor;
+        return editor?.document.uri.fsPath === compilationShader.fsPath
+          ? editor
+          : undefined;
+      },
+    );
+    assert.strictEqual(
+      navigatedEditor.selection.start.line,
+      albedoLocation.range.start.line,
+      "The navigation command should select the declaration's start line",
+    );
+    // Reassign the tracked editor to the one navigation just made active, so
+    // the later unsaved-edit step below does not operate on a stale
+    // TextEditor handle for a tab that navigation may have refocused.
+    compilationEditor = navigatedEditor;
+
+    // The Resource Bindings command must reuse the same hlsl/compilationInfo
+    // request and open its own independently tracked panel without throwing,
+    // regardless of the order in which it is invoked relative to Shader
+    // Compilation.
+    await vscode.commands.executeCommand("hlsl.showResourceBindings");
+    await vscode.commands.executeCommand("hlsl.showCompilationInfo");
 
     // Selecting a variant must be reflected on the next request without
     // reopening the document or restarting the server.

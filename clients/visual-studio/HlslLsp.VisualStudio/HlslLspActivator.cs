@@ -371,6 +371,11 @@ public sealed class HlslLspActivator :
         joinableTaskFactory.RunAsync(
                 () => host.RefreshCompilationInfoIfOpenAsync(null, cancellationToken))
             .FileAndForget("HlslLsp/RefreshCompilationInfo");
+        // The Resource Bindings window reuses the same request and is
+        // refreshed independently, mirroring Shader Compilation above.
+        joinableTaskFactory.RunAsync(
+                () => host.RefreshResourceBindingsIfOpenAsync(null, cancellationToken))
+            .FileAndForget("HlslLsp/RefreshResourceBindings");
     }
 
     // A saved HLSL document may change what the server would compile, so a
@@ -405,6 +410,12 @@ public sealed class HlslLspActivator :
             joinableTaskFactory.RunAsync(
                     () => host.RefreshCompilationInfoIfOpenAsync(moniker, disposalToken))
                 .FileAndForget("HlslLsp/RefreshCompilationInfoOnSave");
+            // The Resource Bindings window is refreshed independently on the
+            // same save, matching the same non-file/unrelated-document
+            // filtering performed inside RefreshResourceBindingsIfOpenAsync.
+            joinableTaskFactory.RunAsync(
+                    () => host.RefreshResourceBindingsIfOpenAsync(moniker, disposalToken))
+                .FileAndForget("HlslLsp/RefreshResourceBindingsOnSave");
             return VSConstants.S_OK;
         }
         finally

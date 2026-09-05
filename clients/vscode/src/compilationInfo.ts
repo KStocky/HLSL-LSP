@@ -22,6 +22,42 @@ export interface CompilationSignatureParameter {
   readonly stream: number;
 }
 
+// The register class a resource binds through. Several distinct
+// D3D_SIT_* reflection types collapse onto the same class (e.g. both
+// textures and structured buffers are "srv"); mirrors
+// hlsl_intellisense::dxc::ResourceRegisterClass.
+export type ResourceRegisterClass =
+  "cbv" | "srv" | "uav" | "sampler" | "unknown";
+
+// Whether a reflected resource is used by the compiled shader. Pinned DXC
+// was empirically observed to omit unreferenced resources from reflection
+// entirely rather than emit them "unused", so "unused" is not expected to
+// occur for the single-stage profiles this server reflects; "unknown"
+// covers any resource whose usage flag could not be established.
+export type ResourceUsageStatus = "used" | "unused" | "unknown";
+
+// A single UTF-16 source position, matching the LSP `Position` shape
+// (`{line, character}`, both zero-based).
+export interface CompilationSourcePosition {
+  readonly line: number;
+  readonly character: number;
+}
+
+// An LSP-shaped `{start, end}` source range.
+export interface CompilationSourceRange {
+  readonly start: CompilationSourcePosition;
+  readonly end: CompilationSourcePosition;
+}
+
+// The authoritative declaration site of a reflected resource, resolved by
+// the server from DXC's own cursor/symbol index against the current
+// (possibly unsaved) document snapshot -- never guessed by this client from
+// a resource's name or by any text search.
+export interface CompilationResourceSourceLocation {
+  readonly uri: string;
+  readonly range: CompilationSourceRange;
+}
+
 export interface CompilationResourceBinding {
   readonly name: string;
   readonly type: string;
@@ -30,6 +66,72 @@ export interface CompilationResourceBinding {
   readonly space: number;
   readonly dimension: string;
   readonly returnType: string;
+  readonly registerClass: ResourceRegisterClass;
+  // Raw D3D_SHADER_INPUT_FLAGS bitmask exactly as reported by the compiler;
+  // not interpreted beyond the derived `usage` field.
+  readonly rawFlags: number;
+  readonly rangeId: number;
+  // Raw NumSamples as reported by the compiler. For structured/RWStructured
+  // buffers the compiler reuses this field to store the byte stride rather
+  // than a sample count (an empirically confirmed reflection ABI quirk);
+  // this value is passed through unchanged with no semantics beyond what
+  // the compiler reports.
+  readonly sampleCount: number;
+  // True for a shader-side unbounded resource array (bindCount sentinel 0),
+  // e.g. `Texture2D T[] : register(t0, space1)`. Distinct from the
+  // UINT_MAX sentinel a root-signature descriptor range uses for an
+  // unbounded range (see RootSignatureDescriptorRange.unbounded below).
+  readonly unbounded: boolean;
+  // True when `space` falls in D3D12's reserved system range
+  // [0xfffffff0, 0xffffffff]; never user-addressable.
+  readonly systemReservedSpace: boolean;
+  readonly usage: ResourceUsageStatus;
+  // Populated only when the compiler-reflected resource name matches
+  // exactly one declaration cursor in the current unsaved source snapshot;
+  // `null` when the name cannot be found at all, or matches more than one
+  // declaration (a genuine ambiguity DXC's own cursor tree cannot resolve).
+  // A client must never substitute a name-based guess when this is `null`.
+  readonly sourceLocation: CompilationResourceSourceLocation | null;
+}
+
+// One register range occupied by a single reflected resource within a
+// ResourceBindingGroup. `endRegister` is `null` exactly when `unbounded` is
+// true (it can never overflow).
+export interface ResourceBindingRange {
+  readonly resourceName: string;
+  readonly baseRegister: number;
+  readonly unbounded: boolean;
+  readonly endRegister: number | null;
+}
+
+// A provable overlap between two distinct reflected resource bindings that
+// share the same register class and space. Never reported for
+// system-reserved-space groups, duplicate names, or self comparisons.
+export interface ResourceBindingCollision {
+  readonly firstResource: string;
+  readonly secondResource: string;
+  readonly registerClass: ResourceRegisterClass;
+  readonly space: number;
+  readonly message: string;
+}
+
+// Resources grouped by register class and register space, each carrying the
+// register range(s) it occupies. Group order as reported by the server is
+// first-encountered order, not sorted by space/class; clients that want a
+// space-major, class-minor presentation (as this extension does) must sort
+// this array themselves.
+export interface ResourceBindingGroup {
+  readonly registerClass: ResourceRegisterClass;
+  readonly space: number;
+  readonly systemReservedSpace: boolean;
+  readonly ranges: readonly ResourceBindingRange[];
+}
+
+// Deterministic grouping/collision analysis computed purely from already
+// reflected register data; never HLSL parsing or inference.
+export interface ResourceBindingAnalysis {
+  readonly groups: readonly ResourceBindingGroup[];
+  readonly collisions: readonly ResourceBindingCollision[];
 }
 
 export interface CompilationThreadGroupSize {
@@ -45,6 +147,146 @@ export interface CompilationReflection {
   readonly outputSignature: readonly CompilationSignatureParameter[];
   readonly resources: readonly CompilationResourceBinding[];
   readonly threadGroupSize: CompilationThreadGroupSize | null;
+  readonly bindingAnalysis: ResourceBindingAnalysis;
+}
+
+// Whether an embedded root signature is present in the compiled DXIL
+// container, and if so, whether this platform can deserialize its details.
+// Presence/absence detection works on every platform; only detailed
+// deserialization requires the Windows D3D12 runtime (never a custom RTS0
+// parser). Mirrors hlsl_intellisense::dxc::RootSignatureAvailability.
+export type RootSignatureAvailability =
+  "present" | "absent" | "notApplicable" | "presentDetailsUnavailable";
+
+// Mirrors D3D12_SHADER_VISIBILITY.
+export type RootSignatureVisibility =
+  | "all"
+  | "vertex"
+  | "hull"
+  | "domain"
+  | "geometry"
+  | "pixel"
+  | "amplification"
+  | "mesh"
+  | "unknown";
+
+// The register class a root-signature entry grants access through. Mirrors
+// D3D12_DESCRIPTOR_RANGE_TYPE for ranges; root descriptors/constants are
+// always cbv/srv/uav (never sampler).
+export type RootSignatureRangeType =
+  "srv" | "uav" | "cbv" | "sampler" | "unknown";
+
+// One descriptor range within a descriptor-table root parameter, mirroring
+// D3D12_DESCRIPTOR_RANGE1. `numDescriptors` is `null` exactly when
+// `unbounded` is true (NumDescriptors == UINT_MAX in the deserialized root
+// signature) - a *different* convention from the shader-side BindCount == 0
+// sentinel (see CompilationResourceBinding.unbounded).
+export interface RootSignatureDescriptorRange {
+  readonly type: RootSignatureRangeType;
+  readonly numDescriptors: number | null;
+  readonly unbounded: boolean;
+  readonly baseRegister: number;
+  readonly space: number;
+  readonly rawFlags: number; // D3D12_DESCRIPTOR_RANGE_FLAGS (version 1.1)
+  readonly offsetInDescriptorsFromTableStart: number;
+}
+
+export interface RootSignatureRootConstants {
+  readonly shaderRegister: number;
+  readonly space: number;
+  readonly num32BitValues: number;
+}
+
+// A root CBV/SRV/UAV descriptor bound directly in the root signature,
+// rather than through a descriptor table.
+export interface RootSignatureRootDescriptor {
+  readonly type: RootSignatureRangeType;
+  readonly shaderRegister: number;
+  readonly space: number;
+  readonly rawFlags: number; // D3D12_ROOT_DESCRIPTOR_FLAGS (version 1.1)
+}
+
+export type RootSignatureParameterKind =
+  "descriptorTable" | "constants" | "rootDescriptor";
+
+// One root parameter, mirroring D3D12_ROOT_PARAMETER1; exactly one of
+// `constants`/`rootDescriptor` is non-null, or `descriptorTableRanges` is
+// non-empty, matching `kind`.
+export interface RootSignatureParameter {
+  readonly kind: RootSignatureParameterKind;
+  readonly visibility: RootSignatureVisibility;
+  readonly descriptorTableRanges: readonly RootSignatureDescriptorRange[];
+  readonly constants: RootSignatureRootConstants | null;
+  readonly rootDescriptor: RootSignatureRootDescriptor | null;
+}
+
+// A static sampler declared directly in the root signature; never requires
+// a descriptor-heap slot.
+export interface RootSignatureStaticSampler {
+  readonly shaderRegister: number;
+  readonly space: number;
+  readonly visibility: RootSignatureVisibility;
+  readonly filter: number; // raw D3D12_FILTER
+  readonly addressU: number; // raw D3D12_TEXTURE_ADDRESS_MODE
+  readonly addressV: number;
+  readonly addressW: number;
+  readonly mipLodBias: number;
+  readonly maxAnisotropy: number;
+  readonly comparisonFunc: number; // raw D3D12_COMPARISON_FUNC
+  readonly borderColor: number; // raw D3D12_STATIC_BORDER_COLOR
+  readonly minLod: number;
+  readonly maxLod: number;
+}
+
+// The deserialized contents of an embedded root signature, always exposed
+// through the version-1.1 shape (root descriptors/ranges default flags to
+// NONE for a version-1.0 signature) while `version` reports the true,
+// unconverted version.
+export interface RootSignatureDetails {
+  readonly version: string; // "1.0" or "1.1"
+  readonly rawFlags: number; // D3D12_ROOT_SIGNATURE_FLAGS, unchanged
+  readonly cbvSrvUavHeapDirectlyIndexed: boolean;
+  readonly samplerHeapDirectlyIndexed: boolean;
+  readonly parameters: readonly RootSignatureParameter[];
+  readonly staticSamplers: readonly RootSignatureStaticSampler[];
+}
+
+// The compiler-authoritative embedded root-signature result for a single
+// compilation. Deserialization uses only the official Windows D3D12 API;
+// there is no custom RTS0 binary parser in this codebase.
+export interface RootSignatureInfo {
+  readonly availability: RootSignatureAvailability;
+  // Populated for "notApplicable" and "presentDetailsUnavailable",
+  // explaining why (e.g. SPIR-V has no root signature concept, or this
+  // platform lacks the Windows D3D12 root-signature deserializer).
+  readonly unavailableReason: string;
+  // Populated only when availability === "present".
+  readonly details: RootSignatureDetails | null;
+}
+
+// Whether reflected shader resources are provably covered by the
+// deserialized root signature for the compiled entry point's stage. Only
+// register class/space/range coverage, active-stage shader visibility, and
+// static samplers are compared; bindless (ResourceDescriptorHeap /
+// SamplerDescriptorHeap) accesses are invisible to reflection and are never
+// guessed at.
+export type ResourceCompatibilityStatus =
+  "compatible" | "incompatible" | "unknown";
+
+export interface ResourceCompatibilityIssue {
+  readonly resourceName: string;
+  readonly registerClass: ResourceRegisterClass;
+  readonly space: number;
+  readonly message: string;
+}
+
+export interface CompilationCompatibility {
+  readonly status: ResourceCompatibilityStatus;
+  // Populated when status === "unknown", explaining why compatibility
+  // could not be determined (e.g. no embedded root signature, or its
+  // details are unavailable on this platform).
+  readonly explanation: string;
+  readonly issues: readonly ResourceCompatibilityIssue[];
 }
 
 export interface CompilationInfo {
@@ -61,9 +303,26 @@ export interface CompilationInfo {
   readonly diagnostics: readonly CompilationDiagnostic[];
   readonly output: CompilationOutput | null;
   readonly reflection: CompilationReflection | null;
+  // Populated whenever `output` exists, for both DXIL and SPIR-V output;
+  // SPIR-V is represented as availability "notApplicable" rather than by
+  // this field being `null`. `null` only when there is no output at all
+  // (for example, a failed compilation).
+  readonly rootSignature: RootSignatureInfo | null;
+  // Non-null whenever `rootSignature` is non-null: unconditionally for
+  // SPIR-V output, and for DXIL output regardless of whether reflection
+  // metadata itself is available. When DXIL reflection is unavailable (for
+  // example, no root signature, or the reflected resource list needed to
+  // compare against a present root signature could not be obtained),
+  // `status` reads "unknown" with an explanation rather than the field
+  // being `null` -- reporting `null` compatibility while a root signature
+  // is present would risk a client silently treating an unanalyzed result
+  // as compatible. Both `rootSignature` and `compatibility` are `null`
+  // only when compilation produced no output at all (for example, a
+  // failed compilation).
+  readonly compatibility: CompilationCompatibility | null;
 }
 
-function escapeHtml(value: string): string {
+export function escapeHtml(value: string): string {
   return value
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
@@ -189,7 +448,8 @@ function resourcesTable(
 <table>
 <thead><tr><th>Name</th><th>Type</th><th>Bind point</th><th>Bind count</th><th>Space</th><th>Dimension</th><th>Return type</th></tr></thead>
 <tbody>${rows}</tbody>
-</table>`;
+</table>
+<p class="muted">Run <strong>HLSL: Show Resource Bindings</strong> for register spaces, collisions, root-signature details, and compatibility.</p>`;
 }
 
 function reflectionSection(info: CompilationInfo): string {

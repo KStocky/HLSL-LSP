@@ -116,6 +116,26 @@ it cannot fall behind or cause a request per keystroke. See
 full protocol, including DXIL vs SPIR-V reflection availability and compiler
 failure reporting.
 
+## Resource bindings
+
+Run **HLSL: Show Resource Bindings** to open a dedicated view of the active
+HLSL document's resource bindings grouped by register space then
+CBV/SRV/UAV/sampler class, provable register-range collisions, the embedded
+root signature's state and full details when available, and whether the
+reflected resources are compatible with that root signature. It reuses the
+same `hlsl/compilationInfo` request, current unsaved document, and refresh
+triggers (active-variant change, save, debounced edits) as Shader
+Compilation, tracked in its own independent panel so opening one view never
+disturbs the other. Resource names and collision participants are
+clickable only when DXC's reflection supplies an unambiguous declaration
+location for them; absence or ambiguity is intentionally non-clickable
+rather than a guessed link. See
+[`../../docs/resource-bindings.md`](../../docs/resource-bindings.md) for the
+full protocol, grouping/collision semantics, root-signature states
+(including the Windows-only detail-deserialization requirement and SPIR-V's
+"not applicable" state), compatibility meanings, and the bindless
+descriptor-heap limitation.
+
 ## DXC runtime selection
 
 By default the extension loads the bundled, pinned DXC runtime. Set

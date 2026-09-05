@@ -2415,6 +2415,120 @@ TEST_CASE("Server compiles hlsl/compilationInfo using DXC and honors the active 
     CHECK(std::ranges::any_of(
         resources, [](const Json& resource) { return resource["name"] == "MainSampler"; }));
     CHECK(info["reflection"]["threadGroupSize"].is_null());
+
+    // hlsl/compilationInfo backward-compatibly extends each resource with
+    // compiler-owned register class, raw reflection flags, range id, sample
+    // count, unbounded/system-reserved-space status, and a usage status
+    // derived only from compiler flags.
+    const auto texture_it = std::ranges::find_if(
+        resources, [](const Json& resource) { return resource["name"] == "MainTexture"; });
+    REQUIRE(texture_it != resources.end());
+    const auto& texture = *texture_it;
+    CHECK(texture["registerClass"] == "srv");
+    CHECK(texture["rawFlags"].is_number_unsigned());
+    CHECK(texture["rangeId"].is_number_unsigned());
+    CHECK(texture["sampleCount"].is_number_unsigned());
+    CHECK(texture["unbounded"] == false);
+    CHECK(texture["systemReservedSpace"] == false);
+    CHECK((texture["usage"] == "used" || texture["usage"] == "unknown"));
+
+    // hlsl/compilationInfo also attaches the resource's declaration site,
+    // reusing the same DXC IntelliSense cursor/document-symbol machinery
+    // already used for hover/go-to-definition, as a proper LSP {uri, range}
+    // location (0-based line/UTF-16 character) rather than a raw compiler
+    // byte column, so clients can navigate straight to it.
+    REQUIRE(!texture["sourceLocation"].is_null());
+    CHECK(texture["sourceLocation"]["uri"] == document.uri());
+    const auto& texture_range = texture["sourceLocation"]["range"];
+    CHECK(texture_range["start"]["line"] == 0);
+    CHECK(texture_range["start"]["character"] == 18);
+    CHECK(texture_range["end"]["line"] == 0);
+    CHECK(texture_range["end"]["character"] == 18 + std::string_view{"MainTexture"}.size());
+
+    const auto sampler_it = std::ranges::find_if(
+        resources, [](const Json& resource) { return resource["name"] == "MainSampler"; });
+    REQUIRE(sampler_it != resources.end());
+    CHECK((*sampler_it)["registerClass"] == "sampler");
+    REQUIRE(!(*sampler_it)["sourceLocation"].is_null());
+    CHECK((*sampler_it)["sourceLocation"]["range"]["start"]["line"] == 1);
+
+    // hlsl/compilationInfo also surfaces deterministic resource-binding
+    // analysis grouped by register class and register space.
+    REQUIRE(!info["reflection"]["bindingAnalysis"].is_null());
+    const auto& binding_analysis = info["reflection"]["bindingAnalysis"];
+    REQUIRE(binding_analysis.contains("groups"));
+    REQUIRE(binding_analysis.contains("collisions"));
+    CHECK(binding_analysis["collisions"].empty());
+    CHECK(std::ranges::any_of(binding_analysis["groups"], [](const Json& group) {
+        return group["registerClass"] == "srv" && !group["ranges"].empty();
+    }));
+    CHECK(std::ranges::any_of(binding_analysis["groups"], [](const Json& group) {
+        return group["registerClass"] == "sampler" && !group["ranges"].empty();
+    }));
+
+    // hlsl/compilationInfo reports embedded root-signature availability and
+    // resource/root-signature compatibility even when no [RootSignature(...)]
+    // attribute is present in the source.
+    REQUIRE(!info["rootSignature"].is_null());
+    CHECK(info["rootSignature"]["availability"] == "absent");
+    CHECK(info["rootSignature"]["details"].is_null());
+    REQUIRE(!info["compatibility"].is_null());
+    CHECK(info["compatibility"]["status"] == "unknown");
+}
+
+TEST_CASE("Server recomputes reflected resource source locations after an unsaved edit moves the "
+          "declaration",
+          "[lsp][compilation-info][source-location][integration]") {
+    // A stale cached location would keep pointing at the pre-edit line; the
+    // very next hlsl/compilationInfo call after didChange must reflect the
+    // current unsaved buffer, since sourceLocation is derived from the same
+    // DXC IntelliSense parse index used for hover/go-to-definition, not a
+    // fabricated or cached value.
+    TestDirectory directory;
+    write_compilation_info_config(directory);
+    const auto document = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "shader.hlsl").string());
+    hlsl_intellisense::lsp::Server server{[](const auto&) {}};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params = Json{{"textDocument",
+                        {{"uri", document.uri()},
+                         {"languageId", "hlsl"},
+                         {"version", 1},
+                         {"text", compilation_info_shader()}}}}}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "hlsl/didChangeActiveVariant", .params = Json{{"variant", "Prod"}}}));
+
+    const auto find_texture_location = [&](std::int64_t id) {
+        const auto response = server.handle(hlsl_intellisense::json_rpc::Request{
+            .id = id,
+            .method = "hlsl/compilationInfo",
+            .params = Json{{"textDocument", {{"uri", document.uri()}}}}});
+        const auto* result = std::get_if<hlsl_intellisense::json_rpc::Response>(&*response);
+        REQUIRE(result != nullptr);
+        INFO(result->result.dump());
+        REQUIRE(result->result["success"] == true);
+        const auto& resources = result->result["reflection"]["resources"];
+        const auto texture_it = std::ranges::find_if(
+            resources, [](const Json& resource) { return resource["name"] == "MainTexture"; });
+        REQUIRE(texture_it != resources.end());
+        REQUIRE(!(*texture_it)["sourceLocation"].is_null());
+        return (*texture_it)["sourceLocation"]["range"]["start"]["line"].get<std::uint32_t>();
+    };
+
+    CHECK(find_texture_location(2) == 0);
+
+    const auto moved_text = "\n\n" + compilation_info_shader();
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didChange",
+        .params = Json{{"textDocument", {{"uri", document.uri()}, {"version", 2}}},
+                       {"contentChanges", Json::array({Json{{"text", moved_text}}})}}}));
+
+    CHECK(find_texture_location(3) == 2);
 }
 
 TEST_CASE("Server reports SPIR-V compilation info without fabricated reflection",
@@ -2461,6 +2575,167 @@ TEST_CASE("Server reports SPIR-V compilation info without fabricated reflection"
     REQUIRE(!info["reflection"].is_null());
     CHECK(info["reflection"]["available"] == false);
     CHECK_FALSE(info["reflection"]["unavailableReason"].get<std::string>().empty());
+
+    // Root signatures are a DXIL-container concept; for SPIR-V output this is
+    // reported distinctly as "not applicable" rather than absent.
+    REQUIRE(!info["rootSignature"].is_null());
+    CHECK(info["rootSignature"]["availability"] == "notApplicable");
+    REQUIRE(!info["compatibility"].is_null());
+    CHECK(info["compatibility"]["status"] == "unknown");
+}
+
+TEST_CASE("Server reports unavailable reflection and unknown compatibility for library-target "
+          "DXIL compilation info",
+          "[lsp][compilation-info][integration]") {
+    // A `lib_*` target profile compiles successfully to DXIL but produces a
+    // library container rather than a single-stage shader, so
+    // ID3D12ShaderReflection is genuinely unavailable even though the
+    // compile succeeded. `rootSignature` extraction reads the DXIL container
+    // directly and does not depend on reflection, so it must stay non-null;
+    // `compatibility` must likewise stay non-null, reporting "unknown"
+    // rather than being fabricated from an empty resource list or left null.
+    TestDirectory directory;
+    {
+        std::ofstream config{directory.path() / "shadertoolsconfig.json"};
+        REQUIRE(config);
+        config << R"({
+            "root": true,
+            "hlsl.targetProfile": "lib_6_3"
+        })";
+        REQUIRE(config);
+    }
+    const auto document = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "shader.hlsl").string());
+    hlsl_intellisense::lsp::Server server{[](const auto&) {}};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params = Json{{"textDocument",
+                        {{"uri", document.uri()},
+                         {"languageId", "hlsl"},
+                         {"version", 1},
+                         {"text", "export float4 Shade(float4 color) {\n"
+                                  "    return color;\n"
+                                  "}\n"}}}}}));
+
+    const auto response = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{2},
+        .method = "hlsl/compilationInfo",
+        .params = Json{{"textDocument", {{"uri", document.uri()}}}}});
+    REQUIRE(response.has_value());
+    const auto* result = std::get_if<hlsl_intellisense::json_rpc::Response>(&*response);
+    REQUIRE(result != nullptr);
+    const auto& info = result->result;
+    INFO(info.dump());
+    REQUIRE(info["success"] == true);
+    REQUIRE(!info["output"].is_null());
+    CHECK(info["output"]["type"] == "dxil");
+    REQUIRE(!info["reflection"].is_null());
+    CHECK(info["reflection"]["available"] == false);
+    CHECK_FALSE(info["reflection"]["unavailableReason"].get<std::string>().empty());
+
+    REQUIRE(!info["rootSignature"].is_null());
+    CHECK(info["rootSignature"]["availability"] == "absent");
+    REQUIRE(!info["compatibility"].is_null());
+    CHECK(info["compatibility"]["status"] == "unknown");
+    CHECK_FALSE(info["compatibility"]["explanation"].get<std::string>().empty());
+    CHECK(info["compatibility"]["issues"].empty());
+}
+
+TEST_CASE("Server surfaces embedded root-signature details and resource compatibility over "
+          "hlsl/compilationInfo",
+          "[lsp][compilation-info][root-signature][integration]") {
+    TestDirectory directory;
+    {
+        std::ofstream config{directory.path() / "shadertoolsconfig.json"};
+        REQUIRE(config);
+        config << R"({
+            "root": true,
+            "hlsl.targetProfile": "ps_6_6",
+            "hlsl.entryPoint": "main"
+        })";
+        REQUIRE(config);
+    }
+    const auto document = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "shader.hlsl").string());
+    hlsl_intellisense::lsp::Server server{[](const auto&) {}};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params = Json{{"textDocument",
+                        {{"uri", document.uri()},
+                         {"languageId", "hlsl"},
+                         {"version", 1},
+                         {"text", "#define MyRS \"RootFlags(0), "
+                                  "DescriptorTable(SRV(t0, numDescriptors=1, space=0)), "
+                                  "StaticSampler(s0, filter=FILTER_MIN_MAG_MIP_LINEAR)\"\n"
+                                  "Texture2D<float4> Tex : register(t0);\n"
+                                  "SamplerState Samp : register(s0);\n"
+                                  "[RootSignature(MyRS)]\n"
+                                  "float4 main() : SV_Target {\n"
+                                  "    return Tex.Sample(Samp, float2(0, 0));\n"
+                                  "}\n"}}}}}));
+
+    const auto response = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{2},
+        .method = "hlsl/compilationInfo",
+        .params = Json{{"textDocument", {{"uri", document.uri()}}}}});
+    REQUIRE(response.has_value());
+    const auto* result = std::get_if<hlsl_intellisense::json_rpc::Response>(&*response);
+    REQUIRE(result != nullptr);
+    const auto& info = result->result;
+    INFO(info.dump());
+    REQUIRE(info["success"] == true);
+
+    REQUIRE(!info["rootSignature"].is_null());
+#ifdef _WIN32
+    // Windows: the official D3D12 deserializer is available, so this
+    // server exposes the full parameter/range/static-sampler structure and
+    // a concrete compatibility verdict.
+    CHECK(info["rootSignature"]["availability"] == "present");
+    REQUIRE(!info["rootSignature"]["details"].is_null());
+    const auto& details = info["rootSignature"]["details"];
+    CHECK((details["version"] == "1.0" || details["version"] == "1.1"));
+    CHECK(details.contains("rawFlags"));
+    CHECK(details.contains("cbvSrvUavHeapDirectlyIndexed"));
+    CHECK(details.contains("samplerHeapDirectlyIndexed"));
+    REQUIRE(!details["parameters"].empty());
+    const auto& parameter = details["parameters"][0];
+    CHECK(parameter["kind"] == "descriptorTable");
+    REQUIRE(!parameter["descriptorTableRanges"].empty());
+    const auto& range = parameter["descriptorTableRanges"][0];
+    CHECK(range["type"] == "srv");
+    CHECK(range["baseRegister"] == 0);
+    CHECK(range["space"] == 0);
+    REQUIRE(!details["staticSamplers"].empty());
+    CHECK(details["staticSamplers"][0]["shaderRegister"] == 0);
+
+    // Fully-covered resources compile cleanly and the compatibility analysis
+    // reports "compatible" with no issues.
+    REQUIRE(!info["compatibility"].is_null());
+    CHECK(info["compatibility"]["status"] == "compatible");
+    CHECK(info["compatibility"]["issues"].empty());
+#else
+    // Non-Windows (e.g. Linux): presence is still correctly detected via
+    // IDxcUtils::GetDxilContainerPart (cross-platform), but detailed
+    // deserialization requires the Windows-only
+    // ID3D12VersionedRootSignatureDeserializer, so this server reports
+    // "presentDetailsUnavailable" with an explicit reason instead of
+    // fabricating details, and compatibility is reported as "unknown"
+    // rather than a guessed verdict.
+    CHECK(info["rootSignature"]["availability"] == "presentDetailsUnavailable");
+    CHECK(info["rootSignature"]["details"].is_null());
+    CHECK_FALSE(info["rootSignature"]["unavailableReason"].get<std::string>().empty());
+
+    REQUIRE(!info["compatibility"].is_null());
+    CHECK(info["compatibility"]["status"] == "unknown");
+#endif
 }
 
 TEST_CASE("Server rejects hlsl/compilationInfo for invalid or unopened documents",

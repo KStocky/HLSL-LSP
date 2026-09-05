@@ -19,6 +19,7 @@
 #include <limits>
 #include <stdexcept>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -337,6 +338,114 @@ void append_document_symbols(Json& output, const std::vector<dxc::Symbol>& symbo
     return "scalar";
 }
 
+[[nodiscard]] std::string_view resource_register_class(dxc::ResourceRegisterClass register_class) {
+    switch (register_class) {
+    case dxc::ResourceRegisterClass::cbv:
+        return "cbv";
+    case dxc::ResourceRegisterClass::srv:
+        return "srv";
+    case dxc::ResourceRegisterClass::uav:
+        return "uav";
+    case dxc::ResourceRegisterClass::sampler:
+        return "sampler";
+    case dxc::ResourceRegisterClass::unknown:
+        return "unknown";
+    }
+    return "unknown";
+}
+
+[[nodiscard]] std::string_view resource_usage_status(dxc::ResourceUsageStatus usage) {
+    switch (usage) {
+    case dxc::ResourceUsageStatus::used:
+        return "used";
+    case dxc::ResourceUsageStatus::unused:
+        return "unused";
+    case dxc::ResourceUsageStatus::unknown:
+        return "unknown";
+    }
+    return "unknown";
+}
+
+[[nodiscard]] std::string_view
+root_signature_availability(dxc::RootSignatureAvailability availability) {
+    switch (availability) {
+    case dxc::RootSignatureAvailability::present:
+        return "present";
+    case dxc::RootSignatureAvailability::absent:
+        return "absent";
+    case dxc::RootSignatureAvailability::not_applicable:
+        return "notApplicable";
+    case dxc::RootSignatureAvailability::present_details_unavailable:
+        return "presentDetailsUnavailable";
+    }
+    return "absent";
+}
+
+[[nodiscard]] std::string_view root_signature_visibility(dxc::RootSignatureVisibility visibility) {
+    switch (visibility) {
+    case dxc::RootSignatureVisibility::all:
+        return "all";
+    case dxc::RootSignatureVisibility::vertex:
+        return "vertex";
+    case dxc::RootSignatureVisibility::hull:
+        return "hull";
+    case dxc::RootSignatureVisibility::domain:
+        return "domain";
+    case dxc::RootSignatureVisibility::geometry:
+        return "geometry";
+    case dxc::RootSignatureVisibility::pixel:
+        return "pixel";
+    case dxc::RootSignatureVisibility::amplification:
+        return "amplification";
+    case dxc::RootSignatureVisibility::mesh:
+        return "mesh";
+    case dxc::RootSignatureVisibility::unknown:
+        return "unknown";
+    }
+    return "unknown";
+}
+
+[[nodiscard]] std::string_view root_signature_range_type(dxc::RootSignatureRangeType type) {
+    switch (type) {
+    case dxc::RootSignatureRangeType::srv:
+        return "srv";
+    case dxc::RootSignatureRangeType::uav:
+        return "uav";
+    case dxc::RootSignatureRangeType::cbv:
+        return "cbv";
+    case dxc::RootSignatureRangeType::sampler:
+        return "sampler";
+    case dxc::RootSignatureRangeType::unknown:
+        return "unknown";
+    }
+    return "unknown";
+}
+
+[[nodiscard]] std::string_view root_signature_parameter_kind(dxc::RootSignatureParameterKind kind) {
+    switch (kind) {
+    case dxc::RootSignatureParameterKind::descriptor_table:
+        return "descriptorTable";
+    case dxc::RootSignatureParameterKind::constants:
+        return "constants";
+    case dxc::RootSignatureParameterKind::root_descriptor:
+        return "rootDescriptor";
+    }
+    return "descriptorTable";
+}
+
+[[nodiscard]] std::string_view
+resource_compatibility_status(dxc::ResourceCompatibilityStatus status) {
+    switch (status) {
+    case dxc::ResourceCompatibilityStatus::compatible:
+        return "compatible";
+    case dxc::ResourceCompatibilityStatus::incompatible:
+        return "incompatible";
+    case dxc::ResourceCompatibilityStatus::unknown:
+        return "unknown";
+    }
+    return "unknown";
+}
+
 [[nodiscard]] Json layout_element_json(const dxc::MemoryLayoutElement& element,
                                        std::uint32_t padding_before) {
     Json members = Json::array();
@@ -402,18 +511,110 @@ compilation_signature_parameter_json(const dxc::CompilationSignatureParameter& p
         {"readWriteMask", parameter.read_write_mask}, {"stream", parameter.stream}};
 }
 
-[[nodiscard]] Json
-compilation_resource_binding_json(const dxc::CompilationResourceBinding& resource) {
-    return {{"name", resource.name},
-            {"type", resource.type},
-            {"bindPoint", resource.bind_point},
-            {"bindCount", resource.bind_count},
-            {"space", resource.space},
-            {"dimension", resource.dimension},
-            {"returnType", resource.return_type}};
+// Forward-declared: needed here but defined later in this file (with
+// `append_semantic_token`), which itself needs types not yet declared this
+// early.
+[[nodiscard]] std::optional<std::size_t> dxc_offset_at(std::string_view text, std::uint32_t line,
+                                                       std::uint32_t column);
+
+// Builds an LSP `{uri, range}` location for a reflected resource's
+// declaration site, converting the compiler's 1-based byte line/column into
+// a 0-based UTF-16 range spanning the resource's name -- the same
+// conversion `Server::definition` already performs for go-to-definition
+// results, kept consistent here. `resource_location_texts` maps a source
+// path to its full text (open-document buffer if available, otherwise a
+// best-effort disk read), resolved once per distinct path by the caller.
+// When the text for a location's path could not be resolved at all, the
+// byte column is used directly as a best-effort UTF-16 character offset
+// (correct for ASCII source, the overwhelming common case for register
+// declarations) rather than omitting the location entirely.
+[[nodiscard]] Json resource_source_location_json(
+    const dxc::SourceLocation& location, const std::string& resource_name,
+    const std::unordered_map<std::string, std::string>& resource_location_texts) {
+    const auto target = workspace::DocumentUri::from_path(location.path);
+    workspace::Position start{.line = location.line > 0 ? location.line - 1 : 0,
+                              .character = location.column > 0 ? location.column - 1 : 0};
+    const auto text_it = resource_location_texts.find(location.path);
+    if (text_it != resource_location_texts.end() && !text_it->second.empty()) {
+        if (const auto offset = dxc_offset_at(text_it->second, location.line, location.column)) {
+            start = workspace::lsp_position_at(text_it->second, *offset);
+        }
+    }
+    auto end = start;
+    const auto name_length = workspace::utf16_length(resource_name);
+    if (name_length <= std::numeric_limits<std::uint32_t>::max() - end.character) {
+        end.character += static_cast<std::uint32_t>(name_length);
+    }
+    return {{"uri", target.uri()}, {"range", lsp_range({.start = start, .end = end})}};
 }
 
-[[nodiscard]] Json compilation_reflection_json(const dxc::CompilationReflection& reflection) {
+[[nodiscard]] Json compilation_resource_binding_json(
+    const dxc::CompilationResourceBinding& resource,
+    const std::unordered_map<std::string, std::string>& resource_location_texts) {
+    Json result{{"name", resource.name},
+                {"type", resource.type},
+                {"bindPoint", resource.bind_point},
+                {"bindCount", resource.bind_count},
+                {"space", resource.space},
+                {"dimension", resource.dimension},
+                {"returnType", resource.return_type},
+                {"registerClass", resource_register_class(resource.register_class)},
+                {"rawFlags", resource.raw_flags},
+                {"rangeId", resource.range_id},
+                {"sampleCount", resource.sample_count},
+                {"unbounded", resource.unbounded},
+                {"systemReservedSpace", resource.system_reserved_space},
+                {"usage", resource_usage_status(resource.usage)}};
+    result["sourceLocation"] =
+        resource.source_location.has_value()
+            ? resource_source_location_json(*resource.source_location, resource.name,
+                                            resource_location_texts)
+            : Json(nullptr);
+    return result;
+}
+
+[[nodiscard]] Json resource_binding_range_json(const dxc::ResourceBindingRange& range) {
+    Json result{{"resourceName", range.resource_name},
+                {"baseRegister", range.base_register},
+                {"unbounded", range.unbounded}};
+    result["endRegister"] = range.unbounded ? Json(nullptr) : Json(range.end_register);
+    return result;
+}
+
+[[nodiscard]] Json resource_binding_collision_json(const dxc::ResourceBindingCollision& collision) {
+    return {{"firstResource", collision.first_resource},
+            {"secondResource", collision.second_resource},
+            {"registerClass", resource_register_class(collision.register_class)},
+            {"space", collision.space},
+            {"message", collision.message}};
+}
+
+[[nodiscard]] Json resource_binding_group_json(const dxc::ResourceBindingGroup& group) {
+    Json ranges = Json::array();
+    for (const auto& range : group.ranges) {
+        ranges.push_back(resource_binding_range_json(range));
+    }
+    return {{"registerClass", resource_register_class(group.register_class)},
+            {"space", group.space},
+            {"systemReservedSpace", group.system_reserved_space},
+            {"ranges", std::move(ranges)}};
+}
+
+[[nodiscard]] Json resource_binding_analysis_json(const dxc::ResourceBindingAnalysis& analysis) {
+    Json groups = Json::array();
+    for (const auto& group : analysis.groups) {
+        groups.push_back(resource_binding_group_json(group));
+    }
+    Json collisions = Json::array();
+    for (const auto& collision : analysis.collisions) {
+        collisions.push_back(resource_binding_collision_json(collision));
+    }
+    return {{"groups", std::move(groups)}, {"collisions", std::move(collisions)}};
+}
+
+[[nodiscard]] Json compilation_reflection_json(
+    const dxc::CompilationReflection& reflection,
+    const std::unordered_map<std::string, std::string>& resource_location_texts) {
     Json input_signature = Json::array();
     for (const auto& parameter : reflection.input_signature) {
         input_signature.push_back(compilation_signature_parameter_json(parameter));
@@ -424,13 +625,14 @@ compilation_resource_binding_json(const dxc::CompilationResourceBinding& resourc
     }
     Json resources = Json::array();
     for (const auto& resource : reflection.resources) {
-        resources.push_back(compilation_resource_binding_json(resource));
+        resources.push_back(compilation_resource_binding_json(resource, resource_location_texts));
     }
     Json result{{"available", reflection.available},
                 {"unavailableReason", reflection.unavailable_reason},
                 {"inputSignature", std::move(input_signature)},
                 {"outputSignature", std::move(output_signature)},
-                {"resources", std::move(resources)}};
+                {"resources", std::move(resources)},
+                {"bindingAnalysis", resource_binding_analysis_json(reflection.binding_analysis)}};
     if (reflection.thread_group_size.has_value()) {
         result["threadGroupSize"] = Json{{"x", reflection.thread_group_size->x},
                                          {"y", reflection.thread_group_size->y},
@@ -439,6 +641,112 @@ compilation_resource_binding_json(const dxc::CompilationResourceBinding& resourc
         result["threadGroupSize"] = nullptr;
     }
     return result;
+}
+
+[[nodiscard]] Json
+root_signature_descriptor_range_json(const dxc::RootSignatureDescriptorRange& range) {
+    Json result{
+        {"type", root_signature_range_type(range.type)},
+        {"unbounded", range.unbounded},
+        {"baseRegister", range.base_register},
+        {"space", range.space},
+        {"rawFlags", range.raw_flags},
+        {"offsetInDescriptorsFromTableStart", range.offset_in_descriptors_from_table_start}};
+    result["numDescriptors"] = range.unbounded ? Json(nullptr) : Json(range.num_descriptors);
+    return result;
+}
+
+[[nodiscard]] Json
+root_signature_root_constants_json(const dxc::RootSignatureRootConstants& constants) {
+    return {{"shaderRegister", constants.shader_register},
+            {"space", constants.space},
+            {"num32BitValues", constants.num_32bit_values}};
+}
+
+[[nodiscard]] Json
+root_signature_root_descriptor_json(const dxc::RootSignatureRootDescriptor& descriptor) {
+    return {{"type", root_signature_range_type(descriptor.type)},
+            {"shaderRegister", descriptor.shader_register},
+            {"space", descriptor.space},
+            {"rawFlags", descriptor.raw_flags}};
+}
+
+[[nodiscard]] Json root_signature_parameter_json(const dxc::RootSignatureParameter& parameter) {
+    Json descriptor_table_ranges = Json::array();
+    for (const auto& range : parameter.descriptor_table_ranges) {
+        descriptor_table_ranges.push_back(root_signature_descriptor_range_json(range));
+    }
+    Json result{{"kind", root_signature_parameter_kind(parameter.kind)},
+                {"visibility", root_signature_visibility(parameter.visibility)},
+                {"descriptorTableRanges", std::move(descriptor_table_ranges)}};
+    result["constants"] = parameter.constants.has_value()
+                              ? root_signature_root_constants_json(*parameter.constants)
+                              : Json(nullptr);
+    result["rootDescriptor"] = parameter.root_descriptor.has_value()
+                                   ? root_signature_root_descriptor_json(*parameter.root_descriptor)
+                                   : Json(nullptr);
+    return result;
+}
+
+[[nodiscard]] Json
+root_signature_static_sampler_json(const dxc::RootSignatureStaticSampler& sampler) {
+    return {{"shaderRegister", sampler.shader_register},
+            {"space", sampler.space},
+            {"visibility", root_signature_visibility(sampler.visibility)},
+            {"filter", sampler.filter},
+            {"addressU", sampler.address_u},
+            {"addressV", sampler.address_v},
+            {"addressW", sampler.address_w},
+            {"mipLodBias", sampler.mip_lod_bias},
+            {"maxAnisotropy", sampler.max_anisotropy},
+            {"comparisonFunc", sampler.comparison_func},
+            {"borderColor", sampler.border_color},
+            {"minLod", sampler.min_lod},
+            {"maxLod", sampler.max_lod}};
+}
+
+[[nodiscard]] Json root_signature_details_json(const dxc::RootSignatureDetails& details) {
+    Json parameters = Json::array();
+    for (const auto& parameter : details.parameters) {
+        parameters.push_back(root_signature_parameter_json(parameter));
+    }
+    Json static_samplers = Json::array();
+    for (const auto& sampler : details.static_samplers) {
+        static_samplers.push_back(root_signature_static_sampler_json(sampler));
+    }
+    return {{"version", details.version},
+            {"rawFlags", details.raw_flags},
+            {"cbvSrvUavHeapDirectlyIndexed", details.cbv_srv_uav_heap_directly_indexed},
+            {"samplerHeapDirectlyIndexed", details.sampler_heap_directly_indexed},
+            {"parameters", std::move(parameters)},
+            {"staticSamplers", std::move(static_samplers)}};
+}
+
+[[nodiscard]] Json root_signature_info_json(const dxc::RootSignatureInfo& root_signature) {
+    Json result{{"availability", root_signature_availability(root_signature.availability)},
+                {"unavailableReason", root_signature.unavailable_reason}};
+    result["details"] = root_signature.details.has_value()
+                            ? root_signature_details_json(*root_signature.details)
+                            : Json(nullptr);
+    return result;
+}
+
+[[nodiscard]] Json resource_compatibility_issue_json(const dxc::ResourceCompatibilityIssue& issue) {
+    return {{"resourceName", issue.resource_name},
+            {"registerClass", resource_register_class(issue.register_class)},
+            {"space", issue.space},
+            {"message", issue.message}};
+}
+
+[[nodiscard]] Json
+compilation_compatibility_json(const dxc::CompilationCompatibility& compatibility) {
+    Json issues = Json::array();
+    for (const auto& issue : compatibility.issues) {
+        issues.push_back(resource_compatibility_issue_json(issue));
+    }
+    return {{"status", resource_compatibility_status(compatibility.status)},
+            {"explanation", compatibility.explanation},
+            {"issues", std::move(issues)}};
 }
 
 [[nodiscard]] Json compilation_diagnostics_json(const std::vector<dxc::Diagnostic>& diagnostics) {
@@ -453,8 +761,10 @@ compilation_resource_binding_json(const dxc::CompilationResourceBinding& resourc
     return result;
 }
 
-[[nodiscard]] Json compilation_info_json(const dxc::CompilationInfo& info,
-                                         const std::optional<std::string>& active_variant) {
+[[nodiscard]] Json
+compilation_info_json(const dxc::CompilationInfo& info,
+                      const std::optional<std::string>& active_variant,
+                      const std::unordered_map<std::string, std::string>& resource_location_texts) {
     Json result{{"entryPoint", info.entry_point},
                 {"stage", info.stage},
                 {"targetProfile", info.target_profile},
@@ -472,9 +782,20 @@ compilation_resource_binding_json(const dxc::CompilationResourceBinding& resourc
         result["output"] = nullptr;
     }
     if (info.reflection.has_value()) {
-        result["reflection"] = compilation_reflection_json(*info.reflection);
+        result["reflection"] =
+            compilation_reflection_json(*info.reflection, resource_location_texts);
     } else {
         result["reflection"] = nullptr;
+    }
+    if (info.root_signature.has_value()) {
+        result["rootSignature"] = root_signature_info_json(*info.root_signature);
+    } else {
+        result["rootSignature"] = nullptr;
+    }
+    if (info.compatibility.has_value()) {
+        result["compatibility"] = compilation_compatibility_json(*info.compatibility);
+    } else {
+        result["compatibility"] = nullptr;
     }
     return result;
 }
@@ -2091,7 +2412,39 @@ Json Server::compilation_info(const std::optional<Json>& params,
         }
         active_variant = active_variant_;
     }
-    return compilation_info_json(info, active_variant);
+
+    // Resolves the source text for every distinct path a reflected
+    // resource's `source_location` points into, so `sourceLocation` in the
+    // response can carry a proper UTF-16 range rather than a raw byte
+    // column. Prefers the open-document buffer (the current unsaved
+    // snapshot) and falls back to disk, mirroring how `definition()`
+    // resolves cross-file targets.
+    std::unordered_map<std::string, std::string> resource_location_texts;
+    if (info.reflection.has_value()) {
+        for (const auto& resource : info.reflection->resources) {
+            if (!resource.source_location.has_value()) {
+                continue;
+            }
+            const auto& path = resource.source_location->path;
+            if (path.empty() || resource_location_texts.contains(path)) {
+                continue;
+            }
+            std::string text;
+            const auto target_uri = workspace::DocumentUri::from_path(path).uri();
+            {
+                std::scoped_lock state_lock{state_mutex_};
+                if (documents_.contains(target_uri)) {
+                    text = documents_.snapshot(target_uri).text();
+                }
+            }
+            if (text.empty()) {
+                std::ifstream stream{path, std::ios::binary};
+                text = {std::istreambuf_iterator<char>{stream}, std::istreambuf_iterator<char>{}};
+            }
+            resource_location_texts.emplace(path, std::move(text));
+        }
+    }
+    return compilation_info_json(info, active_variant, resource_location_texts);
 }
 
 Json Server::signature_help(const std::optional<Json>& params,

@@ -37,6 +37,7 @@
     "onCommand:hlsl.showDiagnostics",
     "onCommand:hlsl.showMemoryLayout",
     "onCommand:hlsl.showCompilationInfo",
+    "onCommand:hlsl.showResourceBindings",
     "onCommand:hlsl.selectVariant"
   ],
   "capabilities": {
@@ -91,6 +92,11 @@
       {
         "command": "hlsl.showCompilationInfo",
         "title": "HLSL: Show Shader Compilation",
+        "category": "HLSL"
+      },
+      {
+        "command": "hlsl.showResourceBindings",
+        "title": "HLSL: Show Resource Bindings",
         "category": "HLSL"
       },
       {
