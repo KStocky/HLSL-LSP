@@ -152,7 +152,8 @@ public sealed class HlslLspActivator :
             initialOptions.LanguageVersion,
             lastRuntimeDirectory,
             workspaceActiveVariant,
-            OnServerRuntimeRestartRequestedAsync);
+            OnServerRuntimeRestartRequestedAsync,
+            OnActiveVariantChangedFromServerAsync);
         MemoryLayoutBridge.Register(languageClient.GetMemoryLayoutAsync);
         CompilationInfoBridge.Register(languageClient.GetCompilationInfoAsync);
         VariantBridge.Register(
@@ -352,18 +353,40 @@ public sealed class HlslLspActivator :
         string variant,
         CancellationToken cancellationToken)
     {
-        workspaceActiveVariant = variant ?? string.Empty;
         var client = languageClient;
         if (client == null)
         {
             return;
         }
+        var value = variant ?? string.Empty;
+        workspaceActiveVariant = value;
         // The refresh below must observe the server's new active variant, so
         // it is only scheduled after the notification is awaited. Awaiting
         // (rather than returning the task, as before) preserves the same
         // error-propagation behavior for a failed notification while adding
         // that ordering guarantee.
-        await client.UpdateActiveVariantAsync(workspaceActiveVariant);
+        await client.UpdateActiveVariantAsync(value);
+        RefreshVariantDependentWindows(cancellationToken);
+    }
+
+    // Applies a variant the server itself already selected and applied (via
+    // the hlsl-lsp.selectVariant command, e.g. from a code action's include
+    // recovery), reported back through the hlsl/activeVariantChanged
+    // notification. This keeps the client's own durable/cached active variant
+    // and any variant-dependent windows equivalent to what the manual "Select
+    // HLSL Shader Variant" picker above produces, without re-notifying the
+    // server of a change it already made (which would be a redundant,
+    // feedback-loop-prone round trip: the server is the source of truth
+    // here, not the client).
+    private Task OnActiveVariantChangedFromServerAsync(string variant)
+    {
+        workspaceActiveVariant = variant ?? string.Empty;
+        RefreshVariantDependentWindows(CancellationToken.None);
+        return Task.CompletedTask;
+    }
+
+    private void RefreshVariantDependentWindows(CancellationToken cancellationToken)
+    {
         // A previously opened Shader Compilation window can only become stale
         // through this variant change (the server itself is not restarted),
         // so refresh it here rather than waiting for the next manual

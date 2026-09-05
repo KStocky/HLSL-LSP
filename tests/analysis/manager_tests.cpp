@@ -142,7 +142,13 @@ TEST_CASE("Analysis cache measures cold parse, cache hit, reparse, and completio
     static_cast<void>(manager.complete(uri.identity(), 2, uri.path(), 2, 40, cancellation));
     metrics = manager.metrics();
     CHECK(metrics.completion_count == 1);
-    CHECK(diagnostic_versions == std::vector<std::int64_t>{1, 2});
+    // Diagnostics are (re-)reported for every analyze(), including the cache
+    // hit (second call, same version 1): extraction from the already-parsed
+    // translation unit is cheap, and always reporting keeps a consumer's
+    // notion of "current generation" reconciled even when a reanalysis
+    // resolves to an identical cache key (e.g. a config/variant change that
+    // does not affect this particular document).
+    CHECK(diagnostic_versions == std::vector<std::int64_t>{1, 1, 2});
 }
 
 TEST_CASE("Translation-unit cache evicts the least recently used idle root",

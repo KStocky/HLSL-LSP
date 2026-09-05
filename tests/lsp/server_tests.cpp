@@ -1,3 +1,5 @@
+#include <hlsl_intellisense/analysis/manager.h>
+#include <hlsl_intellisense/dxc/intellisense.h>
 #include <hlsl_intellisense/json_rpc/framing.h>
 #include <hlsl_intellisense/json_rpc/message.h>
 #include <hlsl_intellisense/lsp/server.h>
@@ -7,6 +9,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <filesystem>
 #include <fstream>
 #include <future>
@@ -1569,6 +1572,15 @@ TEST_CASE("Client language defaults remain below shader-tools configuration",
     static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
         .method = "hlsl/didChangeClientDefaults",
         .params = Json{{"hlsl", {{"languageVersion", "2021"}}}}}));
+    // Both open documents are reanalyzed by reanalyze_all(): default_document
+    // has a real configuration change (client default 2018 -> 2021) while
+    // configured_document's effective configuration is unaffected (it has its
+    // own root config), so its reanalysis resolves to an identical cache key.
+    // default_document's diagnostics genuinely differ (2021 no longer flags
+    // the same issue), so it republishes; configured_document's reanalysis
+    // is a same-version, same-diagnostics cache hit (only its cached analysis
+    // generation advances internally, which textDocument/codeAction depends
+    // on staying current, covered separately), so it is not republished.
     REQUIRE(notifications.size() == 3);
     CHECK((*notifications.back().params)["diagnostics"].empty());
 }
@@ -2883,4 +2895,665 @@ TEST_CASE("Server cancellation returns RequestCancelled for hlsl/compilationInfo
     CHECK(error->error.code == hlsl_intellisense::json_rpc::request_cancelled_code);
     release.set_value();
     server.wait_for_analysis();
+}
+
+namespace {
+
+[[nodiscard]] hlsl_intellisense::json_rpc::Request
+code_action_request(std::int64_t id, std::string_view uri, Json range,
+                    Json context = Json{{"diagnostics", Json::array()}}) {
+    return hlsl_intellisense::json_rpc::Request{
+        .id = id,
+        .method = "textDocument/codeAction",
+        .params = Json{{"textDocument", {{"uri", std::string{uri}}}},
+                       {"range", std::move(range)},
+                       {"context", std::move(context)}}};
+}
+
+[[nodiscard]] Json code_action_result(hlsl_intellisense::lsp::Server& server,
+                                      const hlsl_intellisense::json_rpc::Request& request) {
+    const auto result = server.handle(request);
+    REQUIRE(result.has_value());
+    const auto* response = std::get_if<hlsl_intellisense::json_rpc::Response>(&*result);
+    REQUIRE(response != nullptr);
+    return response->result;
+}
+
+[[nodiscard]] Json zero_width_range(Json position) {
+    return {{"start", position}, {"end", position}};
+}
+
+} // namespace
+
+TEST_CASE("textDocument/codeAction returns a versioned quickfix for a verified DXC fix-it",
+          "[lsp][code-action][fixit][integration]") {
+    // The trailing UTF-16 surrogate-pair comment before the fix-it location
+    // exercises UTF-16 position math on an unsaved (never-saved) open buffer:
+    // the produced edit range must be measured in UTF-16 code units, not bytes
+    // or codepoints.
+    const std::string source = "float4 main() : SV_Target {\n"
+                               "    /* \xF0\x9F\x98\x80 */ float x = 1.0\n"
+                               "    return x.xxxx;\n"
+                               "}\n";
+    const auto uri = shader_uri();
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    hlsl_intellisense::lsp::Server server{
+        [&notifications](const auto& value) { notifications.push_back(value); }};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params =
+            Json{{"textDocument",
+                  {{"uri", uri}, {"languageId", "hlsl"}, {"version", 1}, {"text", source}}}}}));
+
+    const auto insertion_offset = source.find("1.0") + std::string_view{"1.0"}.size();
+    const auto insertion_position = position_at(source, insertion_offset);
+
+    const auto find_fix_it_action = [](const Json& actions) -> const Json* {
+        for (const auto& action : actions) {
+            if (action.contains("edit")) {
+                return &action;
+            }
+        }
+        return nullptr;
+    };
+
+    // A request range overlapping the fix-it location surfaces the action.
+    const auto actions = code_action_result(
+        server, code_action_request(2, uri, zero_width_range(insertion_position)));
+    REQUIRE(actions.is_array());
+    const auto* fix_it_action = find_fix_it_action(actions);
+    REQUIRE(fix_it_action != nullptr);
+    CHECK((*fix_it_action)["kind"] == "quickfix");
+    CHECK((*fix_it_action)["title"].get<std::string>().find("expected ';'") != std::string::npos);
+    REQUIRE((*fix_it_action)["diagnostics"].size() == 1);
+    CHECK((*fix_it_action)["diagnostics"][0]["message"] == "expected ';' at end of declaration");
+    const auto& document_changes = (*fix_it_action)["edit"]["documentChanges"];
+    REQUIRE(document_changes.size() == 1);
+    CHECK(document_changes[0]["textDocument"]["uri"] == uri);
+    CHECK(document_changes[0]["textDocument"]["version"] == 1);
+    REQUIRE(document_changes[0]["edits"].size() == 1);
+    CHECK(document_changes[0]["edits"][0]["newText"] == ";");
+    CHECK(document_changes[0]["edits"][0]["range"]["start"] == insertion_position);
+    CHECK(document_changes[0]["edits"][0]["range"]["end"] == insertion_position);
+
+    // A request range far from the diagnostic omits the fix-it.
+    const auto far_actions = code_action_result(
+        server, code_action_request(3, uri, zero_width_range(position_at(source, 0))));
+    CHECK(find_fix_it_action(far_actions) == nullptr);
+
+    // context.only excluding "quickfix" omits every action.
+    const auto refactor_only =
+        code_action_result(server, code_action_request(4, uri, zero_width_range(insertion_position),
+                                                       Json{{"only", Json::array({"refactor"})}}));
+    CHECK(refactor_only.empty());
+
+    // context.only including "quickfix" still surfaces the action.
+    const auto quickfix_only = code_action_result(
+        server, code_action_request(5, uri, zero_width_range(insertion_position),
+                                    Json{{"only", Json::array({"refactor", "quickfix"})}}));
+    CHECK(find_fix_it_action(quickfix_only) != nullptr);
+}
+
+TEST_CASE("textDocument/codeAction offers independent multi-edit fixes and omits "
+          "diagnostics DXC gave no fix-it for",
+          "[lsp][code-action][fixit][integration]") {
+    const std::string source = "float combine(float a, float b) { return a + b; }\n"
+                               "float4 main() : SV_Target {\n"
+                               "    float total = combin(1.0, 2.0);\n"
+                               "    float other = totally_unresolvable_zzz_identifier;\n"
+                               "    return float4(total, other, 0, 0);\n"
+                               "}\n";
+    const auto uri = shader_uri();
+    hlsl_intellisense::lsp::Server server{[](const auto&) {}};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params =
+            Json{{"textDocument",
+                  {{"uri", uri}, {"languageId", "hlsl"}, {"version", 1}, {"text", source}}}}}));
+
+    const auto whole_document =
+        Json{{"start", position_at(source, 0)}, {"end", position_at(source, source.size())}};
+    const auto actions = code_action_result(server, code_action_request(2, uri, whole_document));
+    REQUIRE(actions.is_array());
+
+    // Exactly one action: the typo correction. The undeclared identifier with
+    // no close match gets no fix-it (verified empirically) and is not an
+    // include path, so include-recovery does not apply either.
+    std::size_t edit_actions{};
+    for (const auto& action : actions) {
+        if (action.contains("edit")) {
+            ++edit_actions;
+            CHECK(action["edit"]["documentChanges"][0]["edits"][0]["newText"] == "combine");
+            REQUIRE(action["diagnostics"].size() == 1);
+            CHECK(action["diagnostics"][0]["message"].get<std::string>().find("did you mean") !=
+                  std::string::npos);
+        }
+    }
+    CHECK(edit_actions == 1);
+}
+
+TEST_CASE("textDocument/codeAction rejects malformed, overlapping, and cross-file fix-its via a "
+          "diagnostics test seam while still offering unaffected fixes",
+          "[lsp][code-action][safety]") {
+    // Real DXC 1.9.2607.13 was not observed to produce malformed/overlapping/
+    // cross-file fix-its; this exercises the rejection paths using the
+    // AnalysisHooks::after_diagnostics test seam to corrupt genuinely-produced
+    // diagnostics before the server caches them.
+    const std::string source = "float4 main() : SV_Target {\n"
+                               "    float x = 1.0\n"
+                               "    return x.xxxx;\n"
+                               "}\n";
+    const auto uri = shader_uri();
+    auto hooks = std::make_shared<hlsl_intellisense::analysis::AnalysisHooks>();
+    hooks->after_diagnostics =
+        [&source](std::vector<hlsl_intellisense::dxc::Diagnostic>& diagnostics) {
+            REQUIRE(!diagnostics.empty());
+            auto& fixable = diagnostics.front();
+            REQUIRE(!fixable.fix_its.empty());
+            const auto valid = fixable.fix_its.front();
+
+            hlsl_intellisense::dxc::Diagnostic overlapping = fixable;
+            overlapping.message = "test-seam: overlapping edits";
+            // Widen the valid edit's range so it has non-zero width, then start a
+            // second edit strictly inside that widened range: the two ranges
+            // genuinely overlap and must be rejected wholesale.
+            auto first_wide = valid;
+            first_wide.range.end.offset = valid.range.start.offset + 2;
+            auto second_overlapping = valid;
+            second_overlapping.range.start.offset = valid.range.start.offset + 1;
+            second_overlapping.range.end.offset = valid.range.start.offset + 3;
+            overlapping.fix_its = {first_wide, second_overlapping};
+
+            hlsl_intellisense::dxc::Diagnostic malformed_utf8 = fixable;
+            malformed_utf8.message = "test-seam: malformed UTF-8 replacement";
+            malformed_utf8.fix_its = {valid};
+            malformed_utf8.fix_its.front().replacement_text = "\xFF\xFE";
+
+            hlsl_intellisense::dxc::Diagnostic out_of_bounds = fixable;
+            out_of_bounds.message = "test-seam: out-of-bounds offset";
+            out_of_bounds.fix_its = {valid};
+            out_of_bounds.fix_its.front().range.end.offset =
+                static_cast<std::uint32_t>(source.size() + 1000);
+
+            hlsl_intellisense::dxc::Diagnostic cross_file = fixable;
+            cross_file.message = "test-seam: cross-file fix-it";
+            cross_file.fix_its = {valid};
+            cross_file.fix_its.front().range.start.path = "different-file.hlsl";
+            cross_file.fix_its.front().range.end.path = "different-file.hlsl";
+
+            diagnostics.push_back(overlapping);
+            diagnostics.push_back(malformed_utf8);
+            diagnostics.push_back(out_of_bounds);
+            diagnostics.push_back(cross_file);
+        };
+    hlsl_intellisense::lsp::ServerOptions options;
+    options.analysis_hooks = hooks;
+    hlsl_intellisense::lsp::Server server{[](const auto&) {}, {}, options};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params =
+            Json{{"textDocument",
+                  {{"uri", uri}, {"languageId", "hlsl"}, {"version", 1}, {"text", source}}}}}));
+
+    const auto whole_document =
+        Json{{"start", position_at(source, 0)}, {"end", position_at(source, source.size())}};
+    const auto actions = code_action_result(server, code_action_request(2, uri, whole_document));
+    REQUIRE(actions.is_array());
+
+    std::vector<std::string> edit_titles;
+    for (const auto& action : actions) {
+        if (action.contains("edit")) {
+            edit_titles.push_back(action["title"].get<std::string>());
+        }
+    }
+    // Only the genuine, uncorrupted fix-it survives; every corrupted variant
+    // (overlapping, malformed UTF-8, out-of-bounds, cross-file) is rejected
+    // wholesale rather than partially applied.
+    REQUIRE(edit_titles.size() == 1);
+    CHECK(edit_titles.front().find("expected ';'") != std::string::npos);
+    for (const auto& title : edit_titles) {
+        CHECK(title.find("test-seam") == std::string::npos);
+    }
+}
+
+TEST_CASE("textDocument/codeAction rejects two fix-it edits from the same diagnostic that start "
+          "at the exact same offset, applying all-or-nothing semantics deterministically",
+          "[lsp][code-action][safety][ordering]") {
+    // Real DXC 1.9.2607.13 was not observed to produce two edits sharing a
+    // start offset; this exercises the tie-rejection path using the
+    // AnalysisHooks::after_diagnostics test seam. Two edits with an identical
+    // start offset have no DXC-guaranteed relative order, so the whole
+    // multi-edit fix must be rejected rather than depending on sort stability
+    // to silently pick one order over another.
+    const std::string source = "float4 main() : SV_Target {\n"
+                               "    float x = 1.0\n"
+                               "    return x.xxxx;\n"
+                               "}\n";
+    const auto uri = shader_uri();
+    auto hooks = std::make_shared<hlsl_intellisense::analysis::AnalysisHooks>();
+    hooks->after_diagnostics = [](std::vector<hlsl_intellisense::dxc::Diagnostic>& diagnostics) {
+        REQUIRE(!diagnostics.empty());
+        auto& fixable = diagnostics.front();
+        REQUIRE(!fixable.fix_its.empty());
+        const auto valid = fixable.fix_its.front();
+
+        hlsl_intellisense::dxc::Diagnostic equal_start = fixable;
+        equal_start.message = "test-seam: equal-start edits";
+        // Two zero-width edits at the identical start offset: neither
+        // overlaps the other by the strict start-before-end definition,
+        // but their relative order is genuinely ambiguous.
+        auto first = valid;
+        first.range.end.offset = first.range.start.offset;
+        first.replacement_text = "A";
+        auto second = valid;
+        second.range.end.offset = second.range.start.offset;
+        second.replacement_text = "B";
+        equal_start.fix_its = {first, second};
+        diagnostics.push_back(equal_start);
+    };
+    hlsl_intellisense::lsp::ServerOptions options;
+    options.analysis_hooks = hooks;
+    hlsl_intellisense::lsp::Server server{[](const auto&) {}, {}, options};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params =
+            Json{{"textDocument",
+                  {{"uri", uri}, {"languageId", "hlsl"}, {"version", 1}, {"text", source}}}}}));
+
+    const auto whole_document =
+        Json{{"start", position_at(source, 0)}, {"end", position_at(source, source.size())}};
+    const auto actions = code_action_result(server, code_action_request(2, uri, whole_document));
+    REQUIRE(actions.is_array());
+
+    std::vector<std::string> edit_titles;
+    for (const auto& action : actions) {
+        if (action.contains("edit")) {
+            edit_titles.push_back(action["title"].get<std::string>());
+        }
+    }
+    // Only the genuine fix-it survives; the synthetic equal-start diagnostic's
+    // fix is rejected wholesale, never partially applied as just "A" or "B".
+    REQUIRE(edit_titles.size() == 1);
+    CHECK(edit_titles.front().find("expected ';'") != std::string::npos);
+    for (const auto& title : edit_titles) {
+        CHECK(title.find("test-seam") == std::string::npos);
+    }
+}
+
+TEST_CASE("textDocument/codeAction omits results while a configuration/variant reanalysis is in "
+          "flight, even though the document version has not changed",
+          "[lsp][code-action][safety][generation]") {
+    const auto uri = shader_uri();
+    const std::string broken = "float4 main() : SV_Target {\n"
+                               "    float x = 1.0\n"
+                               "    return x.xxxx;\n"
+                               "}\n";
+    auto hooks = std::make_shared<hlsl_intellisense::analysis::AnalysisHooks>();
+    std::atomic_int analysis_calls{};
+    std::promise<void> second_entered;
+    std::promise<void> release_second;
+    auto released = release_second.get_future().share();
+    hooks->before_analysis = [&](std::string_view, std::int64_t) {
+        const auto call_index = analysis_calls.fetch_add(1);
+        if (call_index == 1) {
+            // The second analysis for this document: triggered by the variant
+            // change below, at the *same* document version as the first.
+            second_entered.set_value();
+            released.wait();
+        }
+    };
+    hlsl_intellisense::lsp::ServerOptions options;
+    options.background_analysis = true;
+    options.analysis_hooks = hooks;
+    hlsl_intellisense::lsp::Server server{[](const auto&) {}, {}, options};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params =
+            Json{{"textDocument",
+                  {{"uri", uri}, {"languageId", "hlsl"}, {"version", 1}, {"text", broken}}}}}));
+    server.wait_for_analysis();
+
+    const auto whole_document =
+        Json{{"start", position_at(broken, 0)}, {"end", position_at(broken, broken.size())}};
+
+    // The initial analysis is cached: a request now finds the fix-it.
+    const auto fresh = code_action_result(server, code_action_request(2, uri, whole_document));
+    CHECK(std::ranges::any_of(fresh, [](const auto& action) { return action.contains("edit"); }));
+
+    // Selecting an active variant bumps analysis_generations_ synchronously
+    // (see Server::analyze_and_publish) and starts a background reanalysis,
+    // without changing the document's *version* at all. Block that
+    // reanalysis before it completes.
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "hlsl/didChangeActiveVariant", .params = Json{{"variant", "SomeVariant"}}}));
+    second_entered.get_future().wait();
+
+    // The cached diagnostics are still from the pre-variant-change generation:
+    // a request during this window must omit rather than reuse the stale
+    // generation's actions, even though snapshot.version() has not changed.
+    const auto stale = code_action_result(server, code_action_request(3, uri, whole_document));
+    CHECK(stale.empty());
+
+    release_second.set_value();
+    server.wait_for_analysis();
+
+    // Once the variant-triggered analysis completes, the same request
+    // succeeds again against the new generation's diagnostics.
+    const auto recovered = code_action_result(server, code_action_request(4, uri, whole_document));
+    CHECK(
+        std::ranges::any_of(recovered, [](const auto& action) { return action.contains("edit"); }));
+}
+
+TEST_CASE("textDocument/codeAction omits results for a stale document version and returns "
+          "RequestCancelled when cancelled",
+          "[lsp][code-action][safety][cancellation]") {
+    const auto uri = shader_uri();
+    const std::string broken = "float4 main() : SV_Target {\n"
+                               "    float x = 1.0\n"
+                               "    return x.xxxx;\n"
+                               "}\n";
+    auto hooks = std::make_shared<hlsl_intellisense::analysis::AnalysisHooks>();
+    std::atomic_int analysis_calls{};
+    std::promise<void> second_entered;
+    std::promise<void> release_second;
+    auto released = release_second.get_future().share();
+    hooks->before_analysis = [&](std::string_view, std::int64_t version) {
+        if (version == 2) {
+            second_entered.set_value();
+            released.wait();
+        }
+        analysis_calls.fetch_add(1);
+    };
+    hlsl_intellisense::lsp::ServerOptions options;
+    options.background_analysis = true;
+    options.analysis_hooks = hooks;
+    hlsl_intellisense::lsp::Server server{[](const auto&) {}, {}, options};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params =
+            Json{{"textDocument",
+                  {{"uri", uri}, {"languageId", "hlsl"}, {"version", 1}, {"text", broken}}}}}));
+    server.wait_for_analysis();
+
+    const auto whole_document =
+        Json{{"start", position_at(broken, 0)}, {"end", position_at(broken, broken.size())}};
+
+    // A version-1 request now finds the version-1 diagnostics already cached.
+    const auto fresh = code_action_result(server, code_action_request(2, uri, whole_document));
+    CHECK(std::ranges::any_of(fresh, [](const auto& action) { return action.contains("edit"); }));
+
+    // Change to version 2 but block its analysis before it completes: the
+    // cached diagnostics are still version 1, so a version-2 request must omit
+    // (not error, not guess) rather than reuse stale content.
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didChange",
+        .params = Json{{"textDocument", {{"uri", uri}, {"version", 2}}},
+                       {"contentChanges", Json::array({Json{{"text", broken}}})}}}));
+    second_entered.get_future().wait();
+    const auto stale = code_action_result(server, code_action_request(3, uri, whole_document));
+    CHECK(stale.empty());
+
+    // Cancellation is honored consistently with every other request handler.
+    const hlsl_intellisense::json_rpc::Request cancelled_request{
+        .id = std::int64_t{4},
+        .method = "textDocument/codeAction",
+        .params = Json{{"textDocument", {{"uri", uri}}},
+                       {"range", whole_document},
+                       {"context", {{"diagnostics", Json::array()}}}}};
+    const auto cancellation = server.begin_request(cancelled_request.id);
+    cancellation.cancel();
+    const auto cancelled_result = server.handle(cancelled_request, cancellation);
+    const auto* cancel_error =
+        std::get_if<hlsl_intellisense::json_rpc::ErrorResponse>(&cancelled_result);
+    REQUIRE(cancel_error != nullptr);
+    CHECK(cancel_error->error.code == hlsl_intellisense::json_rpc::request_cancelled_code);
+
+    release_second.set_value();
+    server.wait_for_analysis();
+
+    // Once the version-2 analysis completes, the same request now succeeds.
+    const auto recovered = code_action_result(server, code_action_request(5, uri, whole_document));
+    CHECK(
+        std::ranges::any_of(recovered, [](const auto& action) { return action.contains("edit"); }));
+}
+
+TEST_CASE("A cache-hit reanalysis with identical diagnostics still refreshes the cached "
+          "generation, so textDocument/codeAction stays current without a republish",
+          "[lsp][code-action][diagnostics][generation]") {
+    const auto uri = shader_uri();
+    const std::string broken = "float4 main() : SV_Target {\n"
+                               "    float x = 1.0\n"
+                               "    return x.xxxx;\n"
+                               "}\n";
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    hlsl_intellisense::lsp::Server server{
+        [&notifications](const auto& value) { notifications.push_back(value); }};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params =
+            Json{{"textDocument",
+                  {{"uri", uri}, {"languageId", "hlsl"}, {"version", 1}, {"text", broken}}}}}));
+    server.wait_for_analysis();
+    REQUIRE(notifications.size() == 1);
+
+    const auto whole_document =
+        Json{{"start", position_at(broken, 0)}, {"end", position_at(broken, broken.size())}};
+    const auto fresh = code_action_result(server, code_action_request(2, uri, whole_document));
+    CHECK(std::ranges::any_of(fresh, [](const auto& action) { return action.contains("edit"); }));
+
+    // "Unrelated" is not referenced by this document or any configuration, so
+    // the reanalysis it triggers via reanalyze_all() bumps this document's
+    // analysis generation but reproduces byte-for-byte identical diagnostics:
+    // a cache hit under the item-3 dedup rule, so no new
+    // textDocument/publishDiagnostics is sent for it.
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "hlsl/didChangeActiveVariant", .params = Json{{"variant", "Unrelated"}}}));
+    server.wait_for_analysis();
+    CHECK(notifications.size() == 1);
+
+    // The cached DiagnosticsRecord's generation must still have been
+    // refreshed to match the bumped analysis generation: otherwise every
+    // subsequent request would find a generation mismatch against its own
+    // valid, unchanged diagnostics and incorrectly treat them as stale
+    // forever, even though nothing was ever republished.
+    const auto after_bump = code_action_result(server, code_action_request(3, uri, whole_document));
+    CHECK(std::ranges::any_of(after_bump,
+                              [](const auto& action) { return action.contains("edit"); }));
+}
+
+TEST_CASE("Diagnostics are republished only when their version or content actually changes",
+          "[lsp][diagnostics][safety]") {
+    const auto uri = shader_uri();
+    const std::string broken = "float4 main() : SV_Target {\n"
+                               "    float x = 1.0\n"
+                               "    return x.xxxx;\n"
+                               "}\n";
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    hlsl_intellisense::lsp::Server server{
+        [&notifications](const auto& value) { notifications.push_back(value); }};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params =
+            Json{{"textDocument",
+                  {{"uri", uri}, {"languageId", "hlsl"}, {"version", 1}, {"text", broken}}}}}));
+    server.wait_for_analysis();
+    REQUIRE(notifications.size() == 1);
+    CHECK(!last_diagnostics(notifications, uri).empty());
+
+    // A reanalysis that reproduces identical diagnostics at the same document
+    // version (see the generation-refresh test above) is not republished.
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "hlsl/didChangeActiveVariant", .params = Json{{"variant", "Unrelated"}}}));
+    server.wait_for_analysis();
+    REQUIRE(notifications.size() == 1);
+
+    // A genuine edit that both bumps the document version and changes the
+    // diagnostics (fixing the missing semicolon) always republishes.
+    const std::string fixed = "float4 main() : SV_Target {\n"
+                              "    float x = 1.0;\n"
+                              "    return x.xxxx;\n"
+                              "}\n";
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didChange",
+        .params = Json{{"textDocument", {{"uri", uri}, {"version", 2}}},
+                       {"contentChanges", Json::array({Json{{"text", fixed}}})}}}));
+    server.wait_for_analysis();
+    REQUIRE(notifications.size() == 2);
+    CHECK(last_diagnostics(notifications, uri).empty());
+}
+
+TEST_CASE("textDocument/codeAction offers a deterministic variant-select recovery action for an "
+          "unresolved #include, executable via workspace/executeCommand",
+          "[lsp][code-action][include][variants][integration]") {
+    TestDirectory directory;
+    std::filesystem::create_directories(directory.path() / "variant_includes");
+    {
+        std::ofstream include{directory.path() / "variant_includes" / "extra.hlsli"};
+        REQUIRE(include);
+        include << "static const float extraValue = 1.0;\n";
+    }
+    {
+        std::ofstream config{directory.path() / "shadertoolsconfig.json"};
+        REQUIRE(config);
+        config << R"({
+            "root": true,
+            "hlsl.variantsVersion": 1,
+            "hlsl.variants": [
+                { "name": "WithExtraIncludes",
+                  "hlsl.additionalIncludeDirectories": ["variant_includes"] }
+            ]
+        })";
+        REQUIRE(config);
+    }
+    const auto document = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "root.hlsl").string());
+    const std::string source = "#include \"extra.hlsli\"\n"
+                               "float4 main() : SV_Target { return 1.0.xxxx; }\n";
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    hlsl_intellisense::lsp::Server server{
+        [&notifications](const auto& value) { notifications.push_back(value); }};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(
+        hlsl_intellisense::json_rpc::Notification{.method = "textDocument/didOpen",
+                                                  .params = Json{{"textDocument",
+                                                                  {{"uri", document.uri()},
+                                                                   {"languageId", "hlsl"},
+                                                                   {"version", 1},
+                                                                   {"text", source}}}}}));
+    // Confirms the #include really fails to resolve under the default config.
+    CHECK(mentions(last_diagnostics(notifications, document.uri()), "extra.hlsli"));
+
+    const auto whole_document =
+        Json{{"start", position_at(source, 0)}, {"end", position_at(source, source.size())}};
+    const auto actions =
+        code_action_result(server, code_action_request(2, document.uri(), whole_document));
+    REQUIRE(actions.is_array());
+    const Json* recovery_action = nullptr;
+    for (const auto& action : actions) {
+        if (action.contains("command")) {
+            recovery_action = &action;
+        }
+    }
+    REQUIRE(recovery_action != nullptr);
+    CHECK((*recovery_action)["kind"] == "quickfix");
+    REQUIRE((*recovery_action)["diagnostics"].size() == 1);
+    const auto& command = (*recovery_action)["command"];
+    CHECK(command["command"] == "hlsl-lsp.selectVariant");
+    REQUIRE(command["arguments"].size() == 1);
+    CHECK(command["arguments"][0]["variant"] == "WithExtraIncludes");
+
+    const auto execute_result = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{3},
+        .method = "workspace/executeCommand",
+        .params = Json{{"command", command["command"]}, {"arguments", command["arguments"]}}});
+    REQUIRE(execute_result.has_value());
+    const auto* execute_response =
+        std::get_if<hlsl_intellisense::json_rpc::Response>(&*execute_result);
+    REQUIRE(execute_response != nullptr);
+    CHECK(execute_response->result.is_null());
+
+    // A durable client (VS Code, Visual Studio) needs to persist this
+    // server-driven selection itself, or a later settings resync would
+    // silently overwrite it back to whatever the client still has stored.
+    // The server reports its resulting authoritative variant via a narrow
+    // custom notification so the client can update its own persisted
+    // setting/cache and stay in sync.
+    const auto variant_changed = std::ranges::find_if(notifications, [](const auto& notification) {
+        return notification.method == "hlsl/activeVariantChanged";
+    });
+    REQUIRE(variant_changed != notifications.end());
+    REQUIRE(variant_changed->params.has_value());
+    CHECK((*variant_changed->params)["variant"] == "WithExtraIncludes");
+
+    // Selecting the variant actually fixes the compile: the #include now
+    // resolves and no diagnostics remain for the document.
+    CHECK(last_diagnostics(notifications, document.uri()).empty());
+}
+
+TEST_CASE("hlsl/didChangeActiveVariant from the client does not echo "
+          "hlsl/activeVariantChanged back, avoiding a settings-sync feedback loop",
+          "[lsp][code-action][include][variants]") {
+    // The client (VS Code's settings synchronizer, Visual Studio's
+    // configuration cache) already owns and persists hlsl.activeVariant
+    // itself before sending this notification, so the server must not also
+    // report it back as if it were a server-originated change: only the
+    // workspace/executeCommand hlsl-lsp.selectVariant path (which changes
+    // *only* server state) needs that round trip.
+    TestDirectory directory;
+    const auto document = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "root.hlsl").string());
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    hlsl_intellisense::lsp::Server server{
+        [&notifications](const auto& value) { notifications.push_back(value); }};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(
+        hlsl_intellisense::json_rpc::Notification{.method = "textDocument/didOpen",
+                                                  .params = Json{{"textDocument",
+                                                                  {{"uri", document.uri()},
+                                                                   {"languageId", "hlsl"},
+                                                                   {"version", 1},
+                                                                   {"text", valid_hlsl()}}}}}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "hlsl/didChangeActiveVariant", .params = Json{{"variant", "SomeVariant"}}}));
+    CHECK(std::ranges::none_of(notifications, [](const auto& notification) {
+        return notification.method == "hlsl/activeVariantChanged";
+    }));
 }

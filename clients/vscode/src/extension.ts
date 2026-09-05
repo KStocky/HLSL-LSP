@@ -88,6 +88,10 @@ interface RuntimeRestartRequest {
   readonly reason?: string;
 }
 
+interface ActiveVariantChanged {
+  readonly variant: string | null;
+}
+
 interface ClientSettings {
   readonly trace: TraceSetting;
   readonly languageVersion: string;
@@ -292,6 +296,7 @@ class VscodeLanguageClient implements ManagedClient {
     initialSettings: ClientSettings,
     serverArgs: readonly string[],
     onRuntimeRestartRequired: (request: RuntimeRestartRequest) => void,
+    onActiveVariantChanged: (variant: string | null) => void,
   ) {
     const executable: Executable = {
       command: runtime.command,
@@ -348,6 +353,18 @@ class VscodeLanguageClient implements ManagedClient {
       "hlsl/dxcRuntimeRestartRequired",
       (params: unknown) => {
         onRuntimeRestartRequired(runtimeRestartRequest(params));
+      },
+    );
+    // The recovery code action's hlsl-lsp.selectVariant command changes only
+    // the server's in-memory active variant; this notification is how the
+    // server reports the resulting authoritative value back so the client can
+    // durably persist it (matching the manual "Select HLSL Shader Variant"
+    // picker's own persistence), instead of leaving the selection
+    // session-only and silently diverging from hlsl.activeVariant.
+    this.client.onNotification(
+      "hlsl/activeVariantChanged",
+      (params: unknown) => {
+        onActiveVariantChanged(activeVariantChanged(params));
       },
     );
     this.settingsSynchronizer = new RunningSettingsSynchronizer<ClientSettings>(
@@ -481,6 +498,14 @@ function runtimeRestartRequest(value: unknown): RuntimeRestartRequest {
   return result;
 }
 
+function activeVariantChanged(value: unknown): string | null {
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+  const candidate = value as Partial<ActiveVariantChanged>;
+  return typeof candidate.variant === "string" ? candidate.variant : null;
+}
+
 function memoryLayoutTarget(value: unknown): MemoryLayoutTarget | undefined {
   if (typeof value !== "object" || value === null) {
     return undefined;
@@ -575,6 +600,7 @@ export async function activate(
         initialSettings,
         serverArgs,
         handleRuntimeRestartRequired,
+        handleActiveVariantChanged,
       );
     } catch (error) {
       for (const watcher of watchers) {
@@ -623,6 +649,40 @@ export async function activate(
       );
     }
     await updateVariantStatus();
+  };
+
+  // Persists the resulting active variant a hlsl-lsp.selectVariant command
+  // reported back (see the comment above the client's onNotification
+  // registration) into hlsl.activeVariant, matching the manual "Select HLSL
+  // Shader Variant" picker's own scope choice, so the recovery action's
+  // effect survives a later settings resync or restart instead of being
+  // session-only server state that silently diverges from the setting.
+  const handleActiveVariantChanged = (variant: string | null): void => {
+    const normalized = variant ?? "";
+    if (readActiveVariant(configuration()) === normalized) {
+      // Already converged: either this is the settings-resync echo of a
+      // change this client just persisted itself, or the value already
+      // matches for another reason. Skip the write to avoid a redundant
+      // configuration change (and the resync it would otherwise retrigger).
+      return;
+    }
+    const target =
+      vscode.workspace.workspaceFolders &&
+      vscode.workspace.workspaceFolders.length > 0
+        ? vscode.ConfigurationTarget.Workspace
+        : vscode.ConfigurationTarget.Global;
+    void (async () => {
+      try {
+        await configuration().update("activeVariant", normalized, target);
+        await updateVariantStatus();
+      } catch (error) {
+        await reportError(
+          outputChannel,
+          "Unable to persist the HLSL shader variant selection reported by the language server",
+          error,
+        );
+      }
+    })();
   };
 
   // The server requests a controlled restart when shadertoolsconfig.json selects

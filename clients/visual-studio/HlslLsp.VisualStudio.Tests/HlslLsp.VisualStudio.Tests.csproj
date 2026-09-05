@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net472</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>HlslLsp.VisualStudio.Tests</RootNamespace>
+    <AssemblyName>HlslLsp.VisualStudio.Tests</AssemblyName>
+    <IsPackable>false</IsPackable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <!--
+      VS threading analyzers (VSTHRD*) come in transitively from the
+      HlslLsp.VisualStudio project reference and its VS SDK package
+      references. They target UI-thread-affine VSIX code; this is a plain
+      xunit test project with no VS thread affinity, so the subset that
+      doesn't apply here is suppressed rather than worked around with
+      unnatural code.
+    -->
+    <NoWarn>VSTHRD003;VSTHRD110;VSTHRD200</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+    <PackageReference Include="StreamJsonRpc" Version="2.22.11" />
+    <PackageReference Include="Nerdbank.Streams" Version="2.12.87" />
+    <!--
+      Unlike the VSIX project's reference to this package (which excludes
+      runtime assets because Visual Studio itself supplies the assembly),
+      this plain test host has no VS runtime to supply it, so the assembly
+      must actually be copied to the test output directory.
+    -->
+    <PackageReference Include="Microsoft.VisualStudio.LanguageServer.Client" Version="17.14.60" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\HlslLsp.VisualStudio\HlslLsp.VisualStudio.csproj" />
+  </ItemGroup>
+</Project>

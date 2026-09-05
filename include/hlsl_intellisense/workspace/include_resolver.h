@@ -75,4 +75,12 @@ resolve_include_at(const SourceSnapshot& root, std::span<const SourceSnapshot> o
                    const WorkspaceConfiguration& configuration, std::size_t utf8_offset,
                    IncludeMetadataCache* cache = nullptr);
 
+// Returns true when `utf8_offset` falls within an `#include` directive's path
+// span in `text`, using only lightweight textual include-directive parsing:
+// no `WorkspaceConfiguration` (and therefore no filesystem access) is
+// required. Lets callers cheaply pre-filter candidates -- e.g. deciding
+// whether a diagnostic is even structurally on an include path -- before
+// paying for any configuration-dependent include resolution.
+[[nodiscard]] bool is_include_directive_at(std::string_view text, std::size_t utf8_offset);
+
 } // namespace hlsl_intellisense::workspace

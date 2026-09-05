@@ -47,7 +47,12 @@ variant for the current document. Changing the active variant reanalyzes open
 documents and restarts the language server only if the variant selects a
 different DXC runtime. See the repository's
 [named compilation variants](../../docs/shadertoolsconfig.md#named-compilation-variants)
-reference for details.
+reference for details. Quick fixes offered through the native lightbulb
+(`Ctrl+.`, see [code actions](../../docs/code-actions.md)) can also change the
+active variant through the same underlying mechanism: the client's cached
+active variant and the picker's own state stay in sync either way, because
+the server reports its resulting variant back through a
+`hlsl/activeVariantChanged` notification after the command completes.
 
 Run **Tools > HLSL Shader Compilation** to open a tool window with the active
 HLSL document's effective compiler configuration, compiler success/failure and
@@ -131,3 +136,24 @@ Use `.vs\VSWorkspaceSettings.json` for editor overrides:
 ```
 
 Visual Studio LSP traces can be enabled with `"hlsl.trace.server": "Verbose"`.
+
+## Tests
+
+`HlslLsp.VisualStudio.Tests` covers the language client's custom-notification
+wiring (`hlsl/activeVariantChanged`, `hlsl/didChangeActiveVariant`,
+`hlsl/dxcRuntimeRestartRequired`) with real `StreamJsonRpc` instances
+connected over an in-memory duplex stream, driven through the same
+`ILanguageClientCustomMessage2` entry points (`CustomMessageTarget`,
+`AttachForCustomMessageAsync`) Visual Studio itself uses — concrete
+protocol-level evidence rather than an assumption that the generic LSP SDK
+client supports these notifications. It does not require Visual Studio to be
+installed or running. Run it with:
+
+```powershell
+dotnet test clients\visual-studio\HlslLsp.VisualStudio.Tests\HlslLsp.VisualStudio.Tests.csproj
+```
+
+The rest of the extension's Visual Studio-specific integration surface
+(commands, tool windows, editor content-type switching) requires the full VS
+SDK experimental instance and is verified manually per the build/run
+instructions above; it is not covered by this automated project.

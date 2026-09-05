@@ -134,6 +134,44 @@ export async function run(): Promise<void> {
     "Expected unknown-identifier diagnostic was not published",
   );
 
+  const codeActionDocument = await openFixture("codeaction.hlsl");
+  const missingSemicolonRange = await waitFor(
+    "quickfix code action for a verified DXC fix-it",
+    async () => {
+      const position = positionInLast(codeActionDocument, "1.0", "1.0".length);
+      const current = await vscode.commands.executeCommand<
+        readonly (vscode.CodeAction | vscode.Command)[]
+      >(
+        "vscode.executeCodeActionProvider",
+        codeActionDocument.uri,
+        new vscode.Range(position, position),
+      );
+      const fixIt = current.find(
+        (item): item is vscode.CodeAction =>
+          "kind" in item &&
+          item.kind.value === vscode.CodeActionKind.QuickFix.value &&
+          item.edit !== undefined,
+      );
+      return fixIt;
+    },
+  );
+  assert(
+    missingSemicolonRange.title.includes("expected ';'"),
+    "The verified missing-semicolon DXC fix-it did not surface as a quickfix code action",
+  );
+  // Native VS Code lightbulbs apply CodeAction.edit via
+  // vscode.workspace.applyEdit; exercising that here confirms the whole path
+  // (server-owned WorkspaceEdit -> vscode-languageclient -> editor) actually
+  // inserts the missing semicolon rather than just returning a well-formed
+  // action object.
+  assert(missingSemicolonRange.edit);
+  await vscode.workspace.applyEdit(missingSemicolonRange.edit);
+  assert(
+    codeActionDocument.getText().includes("float x = 1.0;"),
+    "Applying the quickfix code action did not insert the missing semicolon",
+  );
+  await vscode.commands.executeCommand("workbench.action.files.revert");
+
   await vscode.commands.executeCommand("hlsl.restartServer");
   await waitFor("language-server restart", () =>
     api.state === "running" ? true : undefined,
@@ -246,6 +284,23 @@ export async function run(): Promise<void> {
     vscode.workspace
       .getConfiguration("hlsl")
       .update("activeVariant", value, vscode.ConfigurationTarget.Global);
+  // The durable variant-select recovery action (below) can persist
+  // hlsl.activeVariant at Workspace scope (matching the "Select HLSL Shader
+  // Variant" picker's own scope choice whenever a workspace folder is open,
+  // which it always is in this test host). Workspace scope outranks Global
+  // scope when VS Code resolves the effective setting value, so clearing
+  // only the Global scope (as setActiveVariant above does) would silently
+  // fail to actually clear the active variant once a Workspace-scoped
+  // override exists. Remove any override at both scopes to guarantee a
+  // clean, no-active-variant state regardless of which scope last wrote it.
+  const resetActiveVariant = async (): Promise<void> => {
+    await vscode.workspace
+      .getConfiguration("hlsl")
+      .update("activeVariant", undefined, vscode.ConfigurationTarget.Workspace);
+    await vscode.workspace
+      .getConfiguration("hlsl")
+      .update("activeVariant", undefined, vscode.ConfigurationTarget.Global);
+  };
   const waitForVariantMarker = (marker: string): Promise<unknown> =>
     waitFor(`variant reanalysis for ${marker}`, () =>
       vscode.languages
@@ -269,6 +324,143 @@ export async function run(): Promise<void> {
   } finally {
     await setActiveVariant("");
     await vscode.workspace.fs.delete(variantDirectory, { recursive: true });
+  }
+
+  // The include/configuration recovery code action's hlsl-lsp.selectVariant
+  // command changes only the server's in-memory active variant; the server's
+  // hlsl/activeVariantChanged notification (added for issue #20's review) is
+  // what makes VS Code persist that selection into hlsl.activeVariant so it
+  // survives a later settings resync/restart, just like the picker command.
+  const recoveryDirectory = vscode.Uri.joinPath(
+    folder.uri,
+    "code-action-variant",
+  );
+  const recoveryConfig = vscode.Uri.joinPath(
+    recoveryDirectory,
+    "shadertoolsconfig.json",
+  );
+  const recoveryInclude = vscode.Uri.joinPath(
+    recoveryDirectory,
+    "recovery_includes",
+    "extra.hlsli",
+  );
+  const recoveryShader = vscode.Uri.joinPath(
+    recoveryDirectory,
+    "recoveryShader.hlsl",
+  );
+  await vscode.workspace.fs.createDirectory(
+    vscode.Uri.joinPath(recoveryDirectory, "recovery_includes"),
+  );
+  await vscode.workspace.fs.writeFile(
+    recoveryInclude,
+    encoder.encode("static const float extraValue = 1.0;\n"),
+  );
+  await vscode.workspace.fs.writeFile(
+    recoveryConfig,
+    encoder.encode(
+      JSON.stringify({
+        root: true,
+        "hlsl.variantsVersion": 1,
+        "hlsl.variants": [
+          {
+            name: "WithExtraIncludes",
+            "hlsl.additionalIncludeDirectories": ["recovery_includes"],
+          },
+        ],
+      }),
+    ),
+  );
+  await vscode.workspace.fs.writeFile(
+    recoveryShader,
+    encoder.encode(
+      '#include "extra.hlsli"\n' +
+        "float4 Main() : SV_Target { return extraValue.xxxx; }\n",
+    ),
+  );
+  try {
+    const recoveryDocument =
+      await vscode.workspace.openTextDocument(recoveryShader);
+    await vscode.window.showTextDocument(recoveryDocument);
+    await waitFor("unresolved #include diagnostic", () =>
+      vscode.languages
+        .getDiagnostics(recoveryShader)
+        .some((item) => item.message.includes("extra.hlsli"))
+        ? true
+        : undefined,
+    );
+    const recoveryAction = await waitFor(
+      "variant-select recovery code action",
+      async () => {
+        const current = await vscode.commands.executeCommand<
+          readonly (vscode.CodeAction | vscode.Command)[]
+        >(
+          "vscode.executeCodeActionProvider",
+          recoveryShader,
+          new vscode.Range(0, 0, recoveryDocument.lineCount, 0),
+        );
+        return current.find(
+          (item): item is vscode.CodeAction =>
+            "kind" in item &&
+            item.command?.command === "hlsl-lsp.selectVariant",
+        );
+      },
+    );
+    assert(recoveryAction.command);
+    const recoveryArguments: unknown[] = recoveryAction.command.arguments ?? [];
+    const recoveryArgument = recoveryArguments[0];
+    const recoveryVariant =
+      typeof recoveryArgument === "object" &&
+      recoveryArgument !== null &&
+      "variant" in recoveryArgument
+        ? (recoveryArgument as { variant?: unknown }).variant
+        : undefined;
+    assert.strictEqual(
+      recoveryVariant,
+      "WithExtraIncludes",
+      "The recovery action did not target the variant that resolves the include",
+    );
+    await vscode.commands.executeCommand(
+      recoveryAction.command.command,
+      ...recoveryArguments,
+    );
+    await waitFor(
+      "include resolved after selecting the recovery variant",
+      () =>
+        vscode.languages
+          .getDiagnostics(recoveryShader)
+          .every((item) => !item.message.includes("extra.hlsli"))
+          ? true
+          : undefined,
+    );
+    // The command changed only server state; confirm VS Code durably
+    // persisted the resulting selection into its own setting rather than
+    // leaving it session-only (the review's issue #2).
+    await waitFor(
+      "hlsl.activeVariant persisted after the recovery command",
+      () =>
+        vscode.workspace.getConfiguration("hlsl").get("activeVariant") ===
+        "WithExtraIncludes"
+          ? true
+          : undefined,
+    );
+    await resetActiveVariant();
+    // Confirms the server-side revert (triggered by the settings
+    // synchronizer resending hlsl/didChangeActiveVariant(null) once the
+    // config write above lands) has actually completed before this test
+    // deletes its fixture directory: otherwise a later test that expects no
+    // active variant could race against this cleanup still being in flight.
+    await waitFor(
+      "unresolved #include diagnostic reappears once the variant is cleared",
+      () =>
+        vscode.languages
+          .getDiagnostics(recoveryShader)
+          .some((item) => item.message.includes("extra.hlsli"))
+          ? true
+          : undefined,
+    );
+  } finally {
+    await resetActiveVariant();
+    await vscode.workspace.fs.delete(recoveryDirectory, { recursive: true });
   }
 
   const compilationDirectory = vscode.Uri.joinPath(

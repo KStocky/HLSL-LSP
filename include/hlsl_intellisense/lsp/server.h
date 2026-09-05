@@ -56,6 +56,18 @@ class Server final {
   private:
     struct ReferenceResult;
 
+    // The diagnostics last published for a document, alongside the exact
+    // snapshot version and analysis generation they were computed from.
+    // textDocument/codeAction requires an exact match against the requesting
+    // document's current version before deriving any action from this cache,
+    // so a document that has changed since its last analysis (or has none yet)
+    // never offers fixes for stale content.
+    struct DiagnosticsRecord {
+        std::int64_t version{};
+        std::uint64_t generation{};
+        std::vector<dxc::Diagnostic> diagnostics;
+    };
+
     enum class State { uninitialized, awaiting_initialized, running, shutdown };
 
     void register_handlers();
@@ -90,6 +102,9 @@ class Server final {
                                                  const json_rpc::RequestContext& context);
     [[nodiscard]] json_rpc::Json dxc_runtime(const std::optional<json_rpc::Json>& params);
     [[nodiscard]] json_rpc::Json variants(const std::optional<json_rpc::Json>& params);
+    [[nodiscard]] json_rpc::Json code_action(const std::optional<json_rpc::Json>& params,
+                                             const json_rpc::RequestContext& context);
+    [[nodiscard]] json_rpc::Json execute_command(const std::optional<json_rpc::Json>& params);
     void initialized(const std::optional<json_rpc::Json>& params);
     void did_open(const std::optional<json_rpc::Json>& params);
     void did_change(const std::optional<json_rpc::Json>& params);
@@ -118,13 +133,81 @@ class Server final {
     void analysis_completed(const workspace::SourceSnapshot& snapshot,
                             const std::vector<dxc::Diagnostic>& diagnostics,
                             std::uint64_t generation);
+    // A narrow, point-in-time copy of exactly the server state that
+    // configuration resolution depends on, snapshotted under a single brief
+    // state_mutex_ lock. The static configuration_for/variant_configuration_for
+    // overloads below take this by value so that (possibly disk-I/O-bound)
+    // configuration computation for a whole request can happen without
+    // holding state_mutex_ for its duration.
+    struct ConfigurationState {
+        workspace::ConfigurationOverrides editor_settings;
+        std::optional<std::string> client_default_language_version;
+        std::optional<std::string> active_variant;
+        std::unordered_map<std::string, std::filesystem::path> workspace_folders;
+    };
+    [[nodiscard]] ConfigurationState snapshot_configuration_state() const;
+    [[nodiscard]] workspace::WorkspaceConfiguration
+    base_configuration_for(const workspace::SourceSnapshot& snapshot) const;
+    // Same computation, but taking the client default language version
+    // explicitly instead of reading client_default_language_version_, so it
+    // can be called against a state already snapshotted outside the lock.
+    [[nodiscard]] static workspace::WorkspaceConfiguration
+    base_configuration_for(const workspace::SourceSnapshot& snapshot,
+                           const std::optional<std::string>& client_default_language_version);
     [[nodiscard]] workspace::WorkspaceConfiguration
     configuration_for(const workspace::SourceSnapshot& snapshot,
                       const workspace::ConfigurationOverrides& overrides) const;
+    // Explicit-state overload of configuration_for; see ConfigurationState.
+    [[nodiscard]] static workspace::WorkspaceConfiguration
+    configuration_for(const workspace::SourceSnapshot& snapshot, const ConfigurationState& state);
+    // Resolves the configuration that would be active if `variant_name` were
+    // selected instead of (or in addition to, if none is currently active) the
+    // active variant, applied on top of the same file-derived base and editor
+    // overrides `configuration_for` uses. Lets code actions probe "would
+    // switching variants fix this?" using the exact same structured
+    // include/configuration machinery as real analysis, without mutating
+    // server state.
+    [[nodiscard]] workspace::WorkspaceConfiguration
+    variant_configuration_for(const workspace::SourceSnapshot& snapshot,
+                              std::string_view variant_name,
+                              const workspace::ConfigurationOverrides& overrides) const;
+    // Explicit-state overload of variant_configuration_for; see ConfigurationState.
+    [[nodiscard]] static workspace::WorkspaceConfiguration
+    variant_configuration_for(const workspace::SourceSnapshot& snapshot,
+                              std::string_view variant_name, const ConfigurationState& state);
     [[nodiscard]] std::filesystem::path
     configuration_base_directory(std::string_view shader_path) const;
+    [[nodiscard]] static std::filesystem::path configuration_base_directory(
+        std::string_view shader_path,
+        const std::unordered_map<std::string, std::filesystem::path>& workspace_folders);
     void publish_diagnostics(const workspace::SourceSnapshot& snapshot,
-                             const std::vector<dxc::Diagnostic>& diagnostics);
+                             const std::vector<dxc::Diagnostic>& diagnostics,
+                             std::uint64_t generation);
+    // Builds a quickfix CodeAction from a diagnostic's DXC fix-its, revalidating
+    // every fix-it's byte range and replacement text against `snapshot`'s
+    // current content. Returns nullopt if any fix-it in the diagnostic is
+    // malformed, stale, cross-file, or overlaps another fix-it in the same
+    // diagnostic: a multi-edit fix is never partially offered.
+    [[nodiscard]] std::optional<json_rpc::Json>
+    fix_it_code_action(const workspace::SourceSnapshot& snapshot, const dxc::Diagnostic& diagnostic,
+                       const json_rpc::Json& diagnostic_item) const;
+    // Offers a deterministic "select shader variant" command action when a
+    // diagnostic's location falls exactly on an #include directive's path that
+    // fails to resolve under the active configuration but is proven (via the
+    // same structured include-resolution machinery real analysis uses) to
+    // resolve under an inactive, applicable variant already declared for this
+    // shader. Never fabricates include paths and never parses diagnostic text.
+    // `active_configuration` and `variant_configurations` (a cache keyed by
+    // variant name, populated lazily as variants are probed) are computed once
+    // per code_action request by the caller, not reloaded per diagnostic.
+    [[nodiscard]] static std::optional<json_rpc::Json> include_recovery_action(
+        const workspace::SourceSnapshot& snapshot,
+        const std::vector<workspace::SourceSnapshot>& open_documents,
+        const dxc::Diagnostic& diagnostic, const json_rpc::Json& diagnostic_item,
+        const workspace::WorkspaceConfiguration& active_configuration,
+        const std::optional<std::string>& active_variant,
+        const std::function<const workspace::WorkspaceConfiguration&(std::string_view)>&
+            variant_configuration_for_name);
     void require_running() const;
     void log(std::string_view message) const;
 
@@ -143,6 +226,10 @@ class Server final {
     analysis::Manager analysis_;
     mutable std::mutex state_mutex_;
     std::unordered_map<std::string, std::uint64_t> analysis_generations_;
+    // The diagnostics last published for each document (keyed by document
+    // identity), used exclusively to derive textDocument/codeAction results.
+    // Never populated from, or trusted against, a client-supplied payload.
+    std::unordered_map<std::string, DiagnosticsRecord> diagnostics_by_identity_;
     State state_{State::uninitialized};
     bool command_links_{};
     // Loop prevention: the runtime target already requested and the runtime issue

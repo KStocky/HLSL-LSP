@@ -736,6 +736,120 @@ TEST_CASE("DXC IntelliSense reports diagnostics", "[dxc][integration]") {
     }));
 }
 
+TEST_CASE("DXC IntelliSense reports a fix-it for a missing semicolon",
+          "[dxc][integration][fixit]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    auto translation_unit =
+        intellisense.parse(shader_path, {{shader_path, "float4 main() : SV_Target {\n"
+                                                       "    float x = 1.0\n"
+                                                       "    return x.xxxx;\n"
+                                                       "}\n"}});
+    const auto diagnostics = translation_unit.diagnostics();
+    REQUIRE(!diagnostics.empty());
+    const auto missing_semicolon = std::ranges::find_if(diagnostics, [](const auto& diagnostic) {
+        return diagnostic.message == "expected ';' at end of declaration";
+    });
+    REQUIRE(missing_semicolon != diagnostics.end());
+    REQUIRE(missing_semicolon->fix_its.size() == 1);
+    const auto& fix_it = missing_semicolon->fix_its.front();
+    CHECK(fix_it.replacement_text == ";");
+    CHECK(fix_it.range.start.path == shader_path);
+    CHECK(fix_it.range.start.path == fix_it.range.end.path);
+    CHECK(fix_it.range.start.offset == fix_it.range.end.offset);
+}
+
+TEST_CASE("DXC IntelliSense reports independent fix-its for repeated missing semicolons",
+          "[dxc][integration][fixit]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    auto translation_unit =
+        intellisense.parse(shader_path, {{shader_path, "float4 main() : SV_Target {\n"
+                                                       "    float a = 1.0\n"
+                                                       "    float b = 2.0\n"
+                                                       "    return float4(a, b, 0, 0);\n"
+                                                       "}\n"}});
+    const auto diagnostics = translation_unit.diagnostics();
+    std::vector<std::uint32_t> fix_it_offsets;
+    for (const auto& diagnostic : diagnostics) {
+        for (const auto& fix_it : diagnostic.fix_its) {
+            fix_it_offsets.push_back(fix_it.range.start.offset);
+        }
+    }
+    REQUIRE(fix_it_offsets.size() == 2);
+    CHECK(fix_it_offsets[0] != fix_it_offsets[1]);
+}
+
+TEST_CASE("DXC IntelliSense reports a replacement fix-it for a typo'd declared identifier",
+          "[dxc][integration][fixit]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    auto translation_unit = intellisense.parse(
+        shader_path, {{shader_path, "float combine(float a, float b) { return a + b; }\n"
+                                    "float4 main() : SV_Target { return "
+                                    "combin(1.0, 2.0).xxxx; }\n"}});
+    const auto diagnostics = translation_unit.diagnostics();
+    const auto typo = std::ranges::find_if(diagnostics, [](const auto& diagnostic) {
+        return diagnostic.message.find("did you mean") != std::string::npos;
+    });
+    REQUIRE(typo != diagnostics.end());
+    REQUIRE(typo->fix_its.size() == 1);
+    const auto& fix_it = typo->fix_its.front();
+    CHECK(fix_it.replacement_text == "combine");
+    CHECK(fix_it.range.end.offset > fix_it.range.start.offset);
+}
+
+TEST_CASE("DXC IntelliSense reports no fix-it for diagnostics with no compiler-suggested repair",
+          "[dxc][integration][fixit]") {
+    // Verified empirically against pinned DXC 1.9.2607.13: none of these common
+    // diagnostic categories carry a fix-it, and callers must not assume one.
+    using namespace std::string_view_literals;
+    const std::vector<std::string_view> sources{
+        // Undeclared identifier with no close match: no "did you mean", no fix-it.
+        "float4 main() : SV_Target { return missing_symbol; }\n"sv,
+        // Struct member typo: DXC does not offer "did you mean" for member lookups.
+        "struct S { float value; };\n"
+        "float4 main() : SV_Target { S s; return s.valeu.xxxx; }\n"sv,
+        // Assignment used as a condition: a warning with no machine-applicable fix.
+        "float4 main() : SV_Target {\n"
+        "    int a = 0; int b = 1;\n"
+        "    if (a = b) { return float4(1,1,1,1); }\n"
+        "    return float4(0,0,0,0);\n"
+        "}\n"sv,
+        // Missing include: no fix-it (there is nothing deterministic to insert).
+        "#include \"does_not_exist.hlsli\"\n"
+        "float4 main() : SV_Target { return float4(0,0,0,0); }\n"sv,
+        // "expected ';' after struct": unlike some other missing-';' diagnostics,
+        // this one carries no fix-it, so fix-its cannot be assumed present even
+        // within the same broad diagnostic family.
+        "struct S { float value; }\n"
+        "float4 main() : SV_Target { return float4(0,0,0,0); }\n"sv,
+    };
+
+    for (const auto& source : sources) {
+        hlsl_intellisense::dxc::Intellisense intellisense;
+        auto translation_unit =
+            intellisense.parse(shader_path, {{shader_path, std::string{source}}});
+        for (const auto& diagnostic : translation_unit.diagnostics()) {
+            CHECK(diagnostic.fix_its.empty());
+        }
+    }
+}
+
+TEST_CASE("DXC IntelliSense diagnostics with non-zero GetNumRanges do not crash fix-it extraction",
+          "[dxc][integration][fixit]") {
+    // Regression coverage for an empirically confirmed DXC 1.9.2607.13 defect:
+    // IDxcDiagnostic::GetRangeAt crashes whenever GetNumRanges() > 0. The
+    // production code must never call GetRangeAt; this only exercises
+    // diagnostics known to report a non-zero range count, to guard against a
+    // future regression that reintroduces the call.
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    auto translation_unit =
+        intellisense.parse(shader_path, {{shader_path, "struct S { float value; };\n"
+                                                       "float4 main() : SV_Target {\n"
+                                                       "    S s;\n"
+                                                       "    return s.valeu.xxxx;\n"
+                                                       "}\n"}});
+    CHECK_NOTHROW(translation_unit.diagnostics());
+}
+
 TEST_CASE("DXC IntelliSense reparses edited sources", "[dxc][integration]") {
     hlsl_intellisense::dxc::Intellisense intellisense;
     auto translation_unit =
