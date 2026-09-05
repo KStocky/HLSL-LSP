@@ -32,6 +32,8 @@ public sealed class MemoryLayoutMemberModel
 
     public string Type { get; set; }
 
+    public string Kind { get; set; }
+
     public long Offset { get; set; }
 
     public long Size { get; set; }
@@ -40,8 +42,41 @@ public sealed class MemoryLayoutMemberModel
 
     public long PaddingBefore { get; set; }
 
+    public long? ArrayStride { get; set; }
+
+    public IReadOnlyList<long> ArrayDimensions { get; set; } =
+        Array.Empty<long>();
+
+    public long? MatrixStride { get; set; }
+
+    public bool? RowMajor { get; set; }
+
     public IReadOnlyList<MemoryLayoutMemberModel> Members { get; set; } =
         Array.Empty<MemoryLayoutMemberModel>();
+}
+
+internal static class MemoryLayoutDisplayName
+{
+    internal static string Qualify(
+        string parentName,
+        string childName,
+        string parentKind,
+        bool parentRowMajor)
+    {
+        if (string.IsNullOrEmpty(parentName))
+        {
+            return childName;
+        }
+
+        if (!childName.StartsWith("[", StringComparison.Ordinal))
+        {
+            return parentName + "." + childName;
+        }
+
+        return string.Equals(parentKind, "matrix", StringComparison.Ordinal)
+            ? $"{parentName}.{(parentRowMajor ? "row" : "column")}{childName}"
+            : parentName + childName;
+    }
 }
 
 public static class MemoryLayoutBridge

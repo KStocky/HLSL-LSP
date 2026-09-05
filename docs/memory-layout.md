@@ -56,10 +56,14 @@ declaration. Otherwise the result has this shape:
 ```
 
 `mode` is `natural` for structure layouts and `constantBuffer` for cbuffers.
-Every recursive member contains `name`, `type`, `offset`, `size`, `alignment`,
-`paddingBefore`, and `members`. Expanded array elements may additionally
-contain a nonnegative `arrayIndex`. A recognized but unsupported declaration
-returns its explanation in `diagnostics`; offsets are never guessed.
+Every recursive member contains `name`, `type`, `kind`, `offset`, `size`,
+`alignment`, `paddingBefore`, and `members`. Expanded array elements may
+additionally contain a nonnegative `arrayIndex`. Array parents expose
+`arrayStride` and `arrayDimensions`; matrix parents expose `matrixStride` and
+`rowMajor`. Editor diagrams qualify leaf labels with their complete hierarchy,
+such as `constants[1].material.colour`, and identify matrix vectors as rows or
+columns. A recognized but unsupported declaration returns its explanation in
+`diagnostics`; offsets are never guessed.
 
 Record declarations referenced from included files are not currently expanded.
 If an include before the selected declaration could affect matrix packing, the
