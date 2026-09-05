@@ -461,6 +461,7 @@ resource_compatibility_status(dxc::ResourceCompatibilityStatus status) {
                 {"kind", layout_element_kind(element.kind)},
                 {"offset", element.offset},
                 {"size", element.size},
+                {"allocationSize", element.allocation_size},
                 {"alignment", element.alignment},
                 {"paddingBefore", padding_before},
                 {"members", std::move(members)}};

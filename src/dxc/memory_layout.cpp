@@ -504,6 +504,10 @@ void populate_matrix_vectors(const ShaderTypeDesc& desc, MemoryLayoutElement& el
                                 .alignment = component_size,
                                 .array_index = vector});
     }
+    if (!element.members.empty()) {
+        const auto& last = element.members.back();
+        element.size = last.offset + last.size;
+    }
 }
 
 [[nodiscard]] std::uint32_t infer_alignment_from_stride(std::uint32_t stride) {
@@ -576,6 +580,7 @@ void walk_struct_members(IShaderReflectionType* type, const ShaderTypeDesc& desc
             proto.type = member_spelling;
             proto.kind = map_element_kind(elem_desc.Class);
             proto.offset = 0;
+            proto.size = data_size;
             proto.array_index = 0;
 
             // Walk element's own struct members if it's a struct.
@@ -675,10 +680,12 @@ void fix_sizes(std::vector<MemoryLayoutElement>& members, std::uint32_t parent_s
             // Expand the array elements from the prototype.
             if (m.members.size() == 1) {
                 auto proto = std::move(m.members[0]);
-                proto.size = (count > 1 && array_stride > 0) ? array_stride : m.size;
+                proto.allocation_size = array_stride;
                 // Fix prototype's internal sizes recursively.
                 if (!proto.members.empty() && proto.kind == MemoryLayoutElementKind::record) {
-                    fix_sizes(proto.members, proto.size, is_cbuffer);
+                    fix_sizes(proto.members, array_stride, is_cbuffer);
+                    const auto& last = proto.members.back();
+                    proto.size = last.offset + last.size;
                 }
 
                 m.members.clear();
@@ -694,6 +701,8 @@ void fix_sizes(std::vector<MemoryLayoutElement>& members, std::uint32_t parent_s
             }
         } else if (m.kind == MemoryLayoutElementKind::record && !m.members.empty()) {
             fix_sizes(m.members, m.size, is_cbuffer);
+            const auto& last = m.members.back();
+            m.size = last.offset + last.size;
         } else if (m.kind == MemoryLayoutElementKind::matrix && !m.members.empty()) {
             // Fix matrix vector sub-elements.
             const auto vectors = static_cast<std::uint32_t>(m.members.size());
@@ -722,6 +731,27 @@ void fix_sizes(std::vector<MemoryLayoutElement>& members, std::uint32_t parent_s
                 m.alignment = 1;
             }
         }
+    }
+}
+
+void finalize_element_allocations(MemoryLayoutElement& element) {
+    for (auto& member : element.members) {
+        finalize_element_allocations(member);
+    }
+
+    if (element.kind == MemoryLayoutElementKind::array && element.array_stride > 0) {
+        for (auto& member : element.members) {
+            member.allocation_size = element.array_stride;
+        }
+    } else if (element.kind == MemoryLayoutElementKind::matrix && element.matrix_stride > 0) {
+        for (auto& member : element.members) {
+            const auto remaining = element.size > member.offset ? element.size - member.offset : 0U;
+            member.allocation_size = (std::min)(element.matrix_stride, remaining);
+        }
+    }
+
+    if (element.allocation_size == 0) {
+        element.allocation_size = element.size;
     }
 }
 
@@ -1032,7 +1062,12 @@ std::optional<MemoryLayout> memory_layout_from_probe(DxcCreateInstanceProc creat
                 MemoryLayoutElement proto;
                 proto.type = element.type;
                 proto.kind = map_element_kind(elem_desc.Class);
-                proto.size = array_stride;
+                if (elem_desc.Class == SVC_SCALAR) {
+                    proto.size = scalar_byte_size(elem_desc.Type);
+                } else if (elem_desc.Class == SVC_VECTOR) {
+                    proto.size = scalar_byte_size(elem_desc.Type) * elem_desc.Columns;
+                }
+                proto.allocation_size = array_stride;
                 proto.row_major = (elem_desc.Class == SVC_MATRIX_ROWS);
 
                 if (elem_desc.Class == SVC_STRUCT) {
@@ -1042,7 +1077,11 @@ std::optional<MemoryLayout> memory_layout_from_probe(DxcCreateInstanceProc creat
                         layout.explanation = walk_ctx.error;
                         return layout;
                     }
-                    fix_sizes(proto.members, proto.size, is_cbuffer);
+                    fix_sizes(proto.members, array_stride, is_cbuffer);
+                    if (!proto.members.empty()) {
+                        const auto& last = proto.members.back();
+                        proto.size = last.offset + last.size;
+                    }
                 }
 
                 if (elem_desc.Class == SVC_MATRIX_ROWS || elem_desc.Class == SVC_MATRIX_COLUMNS) {
@@ -1068,6 +1107,10 @@ std::optional<MemoryLayout> memory_layout_from_probe(DxcCreateInstanceProc creat
                                                 .size = vec_size,
                                                 .alignment = scalar_byte_size(elem_desc.Type),
                                                 .array_index = v});
+                    }
+                    if (!proto.members.empty()) {
+                        const auto& last = proto.members.back();
+                        proto.size = last.offset + last.size;
                     }
                 }
 
@@ -1228,6 +1271,10 @@ std::optional<MemoryLayout> memory_layout_from_probe(DxcCreateInstanceProc creat
         }
 
         layout.alignment = infer_struct_alignment(layout.members, layout.allocation_size, false);
+    }
+
+    for (auto& member : layout.members) {
+        finalize_element_allocations(member);
     }
 
     // Step 8: Set selected member info.

@@ -4,6 +4,7 @@ export interface MemoryLayoutMember {
   readonly kind: "scalar" | "vector" | "matrix" | "array" | "record";
   readonly offset: number;
   readonly size: number;
+  readonly allocationSize: number;
   readonly alignment: number;
   readonly paddingBefore: number;
   readonly arrayIndex?: number;
@@ -25,11 +26,13 @@ export interface MemoryLayout {
   readonly diagnostics: readonly string[];
 }
 
-interface Segment {
+export interface MemoryLayoutSegment {
   readonly name: string;
   readonly offset: number;
   readonly size: number;
   readonly depth: number;
+  readonly kind:
+    "value" | "internal-padding" | "inter-member-padding" | "trailing-padding";
 }
 
 function escapeHtml(value: string): string {
@@ -48,10 +51,27 @@ function flattenMembers(
   parentName = "",
   parentKind?: MemoryLayoutMember["kind"],
   parentRowMajor = false,
-): Segment[] {
-  const result: Segment[] = [];
+  extent?: number,
+): MemoryLayoutSegment[] {
+  const result: MemoryLayoutSegment[] = [];
+  let previousEnd = 0;
   for (const member of members) {
     const offset = baseOffset + member.offset;
+    if (member.offset > previousEnd) {
+      result.push({
+        name:
+          parentKind === "array" || parentKind === "matrix"
+            ? "internal padding"
+            : "inter-member padding",
+        offset: baseOffset + previousEnd,
+        size: member.offset - previousEnd,
+        depth,
+        kind:
+          parentKind === "array" || parentKind === "matrix"
+            ? "internal-padding"
+            : "inter-member-padding",
+      });
+    }
     const indexedName =
       parentKind === "matrix"
         ? `${parentName}.${parentRowMajor ? "row" : "column"}${member.name}`
@@ -68,7 +88,17 @@ function flattenMembers(
         offset,
         size: member.size,
         depth,
+        kind: "value",
       });
+      if (member.allocationSize > member.size) {
+        result.push({
+          name: "internal padding",
+          offset: offset + member.size,
+          size: member.allocationSize - member.size,
+          depth: depth + 1,
+          kind: "internal-padding",
+        });
+      }
     } else {
       result.push(
         ...flattenMembers(
@@ -78,18 +108,43 @@ function flattenMembers(
           name,
           member.kind,
           member.rowMajor,
+          member.allocationSize,
         ),
       );
     }
+    previousEnd = Math.max(previousEnd, member.offset + member.allocationSize);
+  }
+  if (extent !== undefined && extent > previousEnd) {
+    result.push({
+      name: "trailing padding",
+      offset: baseOffset + previousEnd,
+      size: extent - previousEnd,
+      depth,
+      kind: "trailing-padding",
+    });
   }
   return result;
+}
+
+export function memoryLayoutSegments(
+  layout: MemoryLayout,
+): MemoryLayoutSegment[] {
+  return flattenMembers(
+    layout.members,
+    0,
+    0,
+    "",
+    undefined,
+    false,
+    layout.allocationSize,
+  );
 }
 
 function rowDiagram(layout: MemoryLayout): string {
   const rowSize = 16;
   const total = Math.max(layout.allocationSize, layout.size, rowSize);
   const rows = Math.ceil(total / rowSize);
-  const segments = flattenMembers(layout.members);
+  const segments = memoryLayoutSegments(layout);
   const blocks: string[] = [];
   for (let row = 0; row < rows; ++row) {
     const start = row * rowSize;
@@ -107,7 +162,7 @@ function rowDiagram(layout: MemoryLayout): string {
         const left = ((segmentStart - start) / rowSize) * 100;
         const width = ((segmentEnd - segmentStart) / rowSize) * 100;
         const title = `${segment.name}: offset ${String(segment.offset)}, ${String(segment.size)} bytes`;
-        return `<div class="block depth-${String(segment.depth % 5)}" style="left:${String(left)}%;width:${String(width)}%" title="${escapeHtml(title)}">${escapeHtml(segment.name)}</div>`;
+        return `<div class="block ${segment.kind} depth-${String(segment.depth % 5)}" style="left:${String(left)}%;width:${String(width)}%" title="${escapeHtml(title)}">${escapeHtml(segment.name)}</div>`;
       })
       .join("");
     blocks.push(
@@ -178,6 +233,9 @@ export function memoryLayoutHtml(layout: MemoryLayout): string {
   .depth-2 { border-color: var(--vscode-symbolIcon-variableForeground); }
   .depth-3 { border-color: var(--vscode-symbolIcon-arrayForeground); }
   .depth-4 { border-color: var(--vscode-symbolIcon-numberForeground); }
+  .internal-padding { border: 1px dashed var(--vscode-descriptionForeground); background: repeating-linear-gradient(135deg, transparent 0, transparent 5px, color-mix(in srgb, var(--vscode-descriptionForeground) 18%, transparent) 5px, color-mix(in srgb, var(--vscode-descriptionForeground) 18%, transparent) 8px); color: var(--vscode-descriptionForeground); }
+  .inter-member-padding { border: 1px dotted var(--vscode-editorWarning-foreground); background: color-mix(in srgb, var(--vscode-editorWarning-foreground) 10%, transparent); color: var(--vscode-descriptionForeground); }
+  .trailing-padding { border: 1px dotted var(--vscode-disabledForeground); background: color-mix(in srgb, var(--vscode-disabledForeground) 10%, transparent); color: var(--vscode-descriptionForeground); }
   table { border-collapse: collapse; width: 100%; max-width: 70rem; }
   th, td { border-bottom: 1px solid var(--vscode-panel-border); padding: .45rem .5rem; text-align: left; }
   th { color: var(--vscode-descriptionForeground); }

@@ -293,11 +293,15 @@ TEST_CASE("Nested matrix arrays preserve compiler-owned vector structure",
         CHECK(transform.kind == hlsl_intellisense::dxc::MemoryLayoutElementKind::matrix);
         CHECK(transform.row_major);
         CHECK(transform.matrix_stride == 16);
+        CHECK(transform.size == 24);
+        CHECK(transform.allocation_size == 32);
         REQUIRE(transform.members.size() == 2);
         CHECK(transform.members[0].offset == 0);
         CHECK(transform.members[0].size == 8);
+        CHECK(transform.members[0].allocation_size == 16);
         CHECK(transform.members[1].offset == 16);
         CHECK(transform.members[1].size == 8);
+        CHECK(transform.members[1].allocation_size == 8);
     }
     CHECK(transforms.members[1].offset == 32);
 
@@ -305,9 +309,13 @@ TEST_CASE("Nested matrix arrays preserve compiler-owned vector structure",
     CHECK(basis.kind == hlsl_intellisense::dxc::MemoryLayoutElementKind::matrix);
     CHECK_FALSE(basis.row_major);
     CHECK(basis.matrix_stride == 16);
+    CHECK(basis.size == 24);
+    CHECK(basis.allocation_size == 24);
     REQUIRE(basis.members.size() == 2);
+    CHECK(basis.members[0].allocation_size == 16);
     CHECK(basis.members[1].offset == 16);
     CHECK(basis.members[1].size == 8);
+    CHECK(basis.members[1].allocation_size == 8);
 }
 
 TEST_CASE("Matrix layouts honor compiler defaults and position-sensitive pragmas",
@@ -449,6 +457,80 @@ TEST_CASE("Constant-buffer root size includes the final register row",
     CHECK(layout->allocation_size == 16);
 }
 
+TEST_CASE("Constant-buffer arrays separate value bytes from allocation stride",
+          "[dxc][memory-layout][cbuffer][regression]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.additional_arguments = {"-enable-16bit-types"};
+    auto translation_unit = intellisense.parse(
+        shader_path, {{shader_path, "cbuffer Constants { int16_t values[5]; };\n"}}, options);
+
+    const auto layout = translation_unit.memory_layout_at(shader_path, 1, 33);
+    REQUIRE(layout.has_value());
+    INFO(layout->explanation);
+    REQUIRE(layout->supported);
+    REQUIRE(layout->members.size() == 1);
+    const auto& values = layout->members[0];
+    CHECK(values.size == 80);
+    CHECK(values.allocation_size == 80);
+    CHECK(values.array_stride == 16);
+    REQUIRE(values.members.size() == 5);
+    for (std::uint32_t index = 0; index < values.members.size(); ++index) {
+        const auto& value = values.members[index];
+        CHECK(value.offset == index * 16);
+        CHECK(value.size == 2);
+        CHECK(value.allocation_size == 16);
+    }
+    CHECK(layout->size == 80);
+    CHECK(layout->allocation_size == 80);
+
+    auto nested_translation =
+        intellisense.parse(shader_path,
+                           {{shader_path, "struct Inner { int16_t values[5]; };\n"
+                                          "cbuffer Constants { Inner data; };\n"}},
+                           options);
+    const auto nested = nested_translation.memory_layout_at(shader_path, 2, 27);
+    REQUIRE(nested.has_value());
+    INFO(nested->explanation);
+    REQUIRE(nested->supported);
+    REQUIRE(nested->members.size() == 1);
+    REQUIRE(nested->members[0].members.size() == 1);
+    const auto& nested_values = nested->members[0].members[0];
+    REQUIRE(nested_values.members.size() == 5);
+    for (const auto& value : nested_values.members) {
+        CHECK(value.size == 2);
+        CHECK(value.allocation_size == 16);
+    }
+}
+
+TEST_CASE("Nested records keep ancestor tail padding out of their value extent",
+          "[dxc][memory-layout][regression]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.additional_arguments = {"-enable-16bit-types"};
+    const std::string source = "struct Leaf { int16_t value; };\n"
+                               "struct Middle { double prefix; Leaf inner; };\n"
+                               "struct Outer { Middle values[4]; };\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+
+    const auto layout = translation_unit.memory_layout_at(shader_path, 3, 24);
+    REQUIRE(layout.has_value());
+    INFO(layout->explanation);
+    REQUIRE(layout->supported);
+    REQUIRE(layout->members.size() == 1);
+    REQUIRE(layout->members[0].members.size() == 4);
+    const auto& middle = layout->members[0].members[0];
+    CHECK(middle.size == 10);
+    CHECK(middle.allocation_size == 16);
+    REQUIRE(middle.members.size() == 2);
+    const auto& inner = middle.members[1];
+    CHECK(inner.size == 2);
+    CHECK(inner.allocation_size == 2);
+    REQUIRE(inner.members.size() == 1);
+    CHECK(inner.members[0].size == 2);
+    CHECK(inner.members[0].allocation_size == 2);
+}
+
 TEST_CASE("DXC memory layouts honor native 16-bit types and explain unsupported fields",
           "[dxc][memory-layout]") {
     hlsl_intellisense::dxc::Intellisense intellisense;
@@ -519,6 +601,8 @@ TEST_CASE("Memory layouts reject ambiguous types and excessive expansion", "[dxc
             CHECK(layout->members[0].members[0].members[0].array_stride == 4);
             REQUIRE(layout->members[0].members[0].members[0].members.size() == 8);
             CHECK(layout->members[0].members[0].members[0].members[7].offset == 28);
+            CHECK(layout->members[0].members[0].members[0].members[7].size == 4);
+            CHECK(layout->members[0].members[0].members[0].members[7].allocation_size == 4);
         }
     }
 
