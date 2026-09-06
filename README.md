@@ -127,6 +127,14 @@ meanings, and navigation behavior.
 In Visual Studio, run **Tools > HLSL Resource Bindings**. In Visual Studio
 Code, run **HLSL: Show Resource Bindings** from the Command Palette.
 
+### Tutorials
+
+Start with these task-oriented walkthroughs:
+
+- [Switch shader compilation variants](docs/tutorials/shader-variants.md)
+- [Inspect shader resource bindings](docs/tutorials/resource-bindings.md)
+- [Inspect shader compilation and disassembly](docs/tutorials/shader-compilation.md)
+
 ### Preprocessor explorer
 
 The Preprocessor Explorer shows the resolved include graph, missing, cyclic,

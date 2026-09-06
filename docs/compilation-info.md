@@ -3,6 +3,8 @@
 HLSL-LSP can report the effective compiler configuration, diagnostics, and
 DXC reflection for the active HLSL document through the combined **Shader
 Compilation** view and its cross-editor `hlsl/compilationInfo` protocol.
+For a runnable walkthrough, see the
+[Shader Compilation tutorial](tutorials/shader-compilation.md).
 
 In Visual Studio, run **Tools > HLSL Shader Compilation**. In Visual Studio
 Code, run **HLSL: Show Shader Compilation** from the Command Palette. Both
