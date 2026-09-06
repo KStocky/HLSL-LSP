@@ -1,3 +1,4 @@
+using System.Linq;
 using HlslLsp.VisualStudio.Bootstrap;
 using Xunit;
 
@@ -26,4 +27,10 @@ public sealed class MemoryLayoutDisplayNameTests
                 parentKind,
                 parentRowMajor));
     }
+
+    [Fact]
+    public void ByteScale_LabelsAbsoluteFourByteBoundaries()
+        => Assert.Equal(
+            new long[] { 32, 36, 40, 44, 48 },
+            MemoryLayoutByteScale.Labels(32).ToArray());
 }

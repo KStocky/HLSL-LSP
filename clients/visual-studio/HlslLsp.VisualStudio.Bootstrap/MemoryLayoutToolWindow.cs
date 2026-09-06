@@ -122,23 +122,52 @@ internal sealed class MemoryLayoutControl : UserControl
                 FontFamily = new FontFamily("Consolas"),
             };
             line.Children.Add(offset);
+            var lane = new StackPanel();
+            var scale = new Canvas
+            {
+                Width = bytesPerRow * pixelsPerByte,
+                Height = 18,
+            };
+            var labels = MemoryLayoutByteScale.Labels(start);
+            for (var labelIndex = 0; labelIndex < labels.Count; ++labelIndex)
+            {
+                var marker = labelIndex * 4;
+                var label = new TextBlock
+                {
+                    Text = labels[labelIndex].ToString(),
+                    FontFamily = new FontFamily("Consolas"),
+                    FontSize = 11,
+                    Opacity = 0.75,
+                };
+                scale.Children.Add(label);
+                Canvas.SetLeft(
+                    label,
+                    Math.Max(0, Math.Min(
+                        marker * pixelsPerByte - (marker == 0 ? 0 : 8),
+                        bytesPerRow * pixelsPerByte - 24)));
+            }
+            lane.Children.Add(scale);
             var canvas = new Canvas
             {
                 Width = bytesPerRow * pixelsPerByte,
                 Height = 38,
                 Background = new SolidColorBrush(Color.FromArgb(25, 128, 128, 128)),
             };
-            Grid.SetColumn(canvas, 1);
-            for (var marker = 0; marker <= bytesPerRow; marker += 4)
+            for (var marker = 2; marker < bytesPerRow; marker += 2)
             {
-                canvas.Children.Add(new Border
+                var guide = new Border
                 {
-                    BorderBrush = new SolidColorBrush(Color.FromArgb(70, 128, 128, 128)),
-                    BorderThickness = new Thickness(marker == bytesPerRow ? 0 : 1, 0, 0, 0),
-                    Width = 4 * pixelsPerByte,
+                    BorderBrush = new SolidColorBrush(Color.FromArgb(
+                        marker % 4 == 0 ? (byte)70 : (byte)35,
+                        128,
+                        128,
+                        128)),
+                    BorderThickness = new Thickness(1, 0, 0, 0),
+                    Width = 1,
                     Height = 38,
-                });
-                Canvas.SetLeft(canvas.Children[canvas.Children.Count - 1], marker * pixelsPerByte);
+                };
+                canvas.Children.Add(guide);
+                Canvas.SetLeft(guide, marker * pixelsPerByte);
             }
             foreach (var segment in segments.Where(
                          item => item.Size > 0 &&
@@ -172,7 +201,9 @@ internal sealed class MemoryLayoutControl : UserControl
                 canvas.Children.Add(border);
                 Canvas.SetLeft(border, (segmentStart - start) * pixelsPerByte);
             }
-            line.Children.Add(canvas);
+            lane.Children.Add(canvas);
+            Grid.SetColumn(lane, 1);
+            line.Children.Add(lane);
             content.Children.Add(line);
         }
     }
