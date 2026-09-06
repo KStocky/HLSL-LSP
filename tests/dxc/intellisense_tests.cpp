@@ -112,9 +112,12 @@ TEST_CASE("DXC inlay hints use inferred cursor types and unambiguous signatures"
 
     const auto first_argument = static_cast<std::uint32_t>(source.find("1.0"));
     const auto second_argument = static_cast<std::uint32_t>(source.find("2.0"));
+    const auto declaration_argument = static_cast<std::uint32_t>(source.find("float value"));
     const auto hints = translation_unit.inlay_hints(
-        shader_path, 0, static_cast<std::uint32_t>(source.size()),
-        {{.line = 2, .column = 43, .argument_offsets = {first_argument, second_argument}}}, {});
+        shader_path, {{.start = 0, .end = static_cast<std::uint32_t>(source.size())}},
+        {{.line = 1, .column = 7, .argument_offsets = {declaration_argument}},
+         {.line = 2, .column = 43, .argument_offsets = {first_argument, second_argument}}},
+        {});
 
     CHECK(std::ranges::any_of(hints, [](const auto& hint) {
         return hint.category == hlsl_intellisense::dxc::InlayHintCategory::type &&
@@ -128,16 +131,25 @@ TEST_CASE("DXC inlay hints use inferred cursor types and unambiguous signatures"
         return hint.category == hlsl_intellisense::dxc::InlayHintCategory::parameter &&
                hint.label == "bias:";
     }));
+    CHECK_FALSE(std::ranges::any_of(hints, [declaration_argument](const auto& hint) {
+        return hint.category == hlsl_intellisense::dxc::InlayHintCategory::parameter &&
+               hint.offset == declaration_argument;
+    }));
+    const auto exclusive_end = translation_unit.inlay_hints(
+        shader_path, {{.start = 0, .end = first_argument}},
+        {{.line = 2, .column = 43, .argument_offsets = {first_argument, second_argument}}},
+        {.types = false, .parameters = true});
+    CHECK(exclusive_end.empty());
 
     const std::string overloaded = "float shade(float value) { return value; }\n"
                                    "float shade(int count) { return count; }\n"
                                    "float4 main() : SV_Target { return shade(1).xxxx; }\n";
     auto overloaded_unit = intellisense.parse(shader_path, {{shader_path, overloaded}}, options);
     const auto argument = static_cast<std::uint32_t>(overloaded.find("1)"));
-    const auto ambiguous =
-        overloaded_unit.inlay_hints(shader_path, 0, static_cast<std::uint32_t>(overloaded.size()),
-                                    {{.line = 3, .column = 36, .argument_offsets = {argument}}},
-                                    {.types = false, .parameters = true});
+    const auto ambiguous = overloaded_unit.inlay_hints(
+        shader_path, {{.start = 0, .end = static_cast<std::uint32_t>(overloaded.size())}},
+        {{.line = 3, .column = 36, .argument_offsets = {argument}}},
+        {.types = false, .parameters = true});
     CHECK(ambiguous.empty());
 }
 
@@ -161,8 +173,13 @@ TEST_CASE("DXC inlay hints expose compiler-reflected layout and register data",
                                                           .registers = true,
                                                           .packed_offsets = true,
                                                           .array_strides = true};
+    hlsl_intellisense::dxc::InlayHintWork work;
+    const auto split = static_cast<std::uint32_t>(source.find("values"));
     const auto hints = translation_unit.inlay_hints(
-        shader_path, 0, static_cast<std::uint32_t>(source.size()), {}, hint_options);
+        shader_path,
+        {{.start = 0, .end = split},
+         {.start = split, .end = static_cast<std::uint32_t>(source.size())}},
+        {}, hint_options, &work);
 
     CHECK(std::ranges::any_of(hints, [](const auto& hint) {
         return hint.category == hlsl_intellisense::dxc::InlayHintCategory::matrix_orientation &&
@@ -180,6 +197,12 @@ TEST_CASE("DXC inlay hints expose compiler-reflected layout and register data",
         return hint.category == hlsl_intellisense::dxc::InlayHintCategory::register_binding &&
                hint.label.starts_with(" register(");
     }));
+    CHECK(work.reflection_compilations == 1);
+    CHECK(work.layout_probes == 1);
+    CHECK(std::adjacent_find(hints.begin(), hints.end(), [](const auto& left, const auto& right) {
+              return left.offset == right.offset && left.category == right.category &&
+                     left.label == right.label;
+          }) == hints.end());
 }
 
 TEST_CASE("DXC IntelliSense computes natural HLSL record layouts", "[dxc][memory-layout]") {

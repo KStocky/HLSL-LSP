@@ -332,7 +332,8 @@ TEST_CASE("Inlay hint queries preserve cancellation and stale-version safety",
     json_rpc::CancellationToken cancellation;
     auto request = std::async(std::launch::async, [&] {
         return manager.inlay_hints(
-            uri.identity(), 1, uri.path(), 0, static_cast<std::uint32_t>(source.size()),
+            uri.identity(), 1, uri.path(),
+            {{.start = 0, .end = static_cast<std::uint32_t>(source.size())}},
             {{.line = 2,
               .column = 36,
               .argument_offsets = {static_cast<std::uint32_t>(source.find("1.0"))}}},
@@ -350,9 +351,11 @@ TEST_CASE("Inlay hint queries preserve cancellation and stale-version safety",
     manager.wait_idle();
 
     json_rpc::CancellationToken current;
-    CHECK_THROWS_AS(manager.inlay_hints(uri.identity(), 2, uri.path(), 0,
-                                        static_cast<std::uint32_t>(source.size()), {}, {}, current),
-                    json_rpc::HandlerError);
+    CHECK_THROWS_AS(
+        manager.inlay_hints(uri.identity(), 2, uri.path(),
+                            {{.start = 0, .end = static_cast<std::uint32_t>(source.size())}}, {},
+                            {}, current),
+        json_rpc::HandlerError);
 }
 
 TEST_CASE("Compilation info queries (root signature, binding analysis, compatibility) preserve "

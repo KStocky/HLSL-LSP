@@ -147,7 +147,9 @@ class Server final {
     // deduplicated window/showMessage; a variant change reanalyzes rather than
     // restarts, so this never triggers a restart on its own.
     void reevaluate_variant_selection();
+    void invalidate_inlay_hints(bool refresh);
     void request_inlay_hint_refresh();
+    void finalize_inlay_hint_refresh() noexcept;
     [[nodiscard]] std::string loaded_runtime_directory() const;
     void analysis_completed(const workspace::SourceSnapshot& snapshot,
                             const std::vector<dxc::Diagnostic>& diagnostics,
@@ -178,7 +180,8 @@ class Server final {
                       const workspace::ConfigurationOverrides& overrides) const;
     // Explicit-state overload of configuration_for; see ConfigurationState.
     [[nodiscard]] static workspace::WorkspaceConfiguration
-    configuration_for(const workspace::SourceSnapshot& snapshot, const ConfigurationState& state);
+    configuration_for(const workspace::SourceSnapshot& snapshot, const ConfigurationState& state,
+                      workspace::VariantSelection* active_variant_selection = nullptr);
     // Resolves the configuration that would be active if `variant_name` were
     // selected instead of (or in addition to, if none is currently active) the
     // active variant, applied on top of the same file-derived base and editor

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -613,10 +614,20 @@ struct InlayCall {
     std::vector<std::uint32_t> argument_offsets;
 };
 
+struct SourceOffsetRange {
+    std::uint32_t start{};
+    std::uint32_t end{};
+};
+
 struct InlayHint {
     std::uint32_t offset{};
     std::string label;
     InlayHintCategory category{InlayHintCategory::type};
+};
+
+struct InlayHintWork {
+    std::size_t reflection_compilations{};
+    std::size_t layout_probes{};
 };
 
 class TranslationUnit final {
@@ -646,8 +657,10 @@ class TranslationUnit final {
     [[nodiscard]] std::vector<Signature> signatures_at(std::string_view path, std::uint32_t line,
                                                        std::uint32_t column) const;
     [[nodiscard]] std::vector<InlayHint>
-    inlay_hints(std::string_view path, std::uint32_t start_offset, std::uint32_t end_offset,
-                const std::vector<InlayCall>& calls, const InlayHintOptions& options) const;
+    inlay_hints(std::string_view path, const std::vector<SourceOffsetRange>& ranges,
+                const std::vector<InlayCall>& calls, const InlayHintOptions& options,
+                InlayHintWork* work = nullptr,
+                const std::function<void()>& cancellation_checkpoint = {}) const;
     [[nodiscard]] std::vector<Token> tokens(std::string_view path) const;
     // Returns conditional-compilation regions that DXC excluded for every
     // source in the current unsaved translation-unit snapshot.

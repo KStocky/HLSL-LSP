@@ -876,7 +876,7 @@ void attach_resource_source_locations(CompilationInfo& info,
 }
 
 [[nodiscard]] std::string inferred_cursor_type(IDxcCursor& declaration) {
-    const auto declared = cursor_type(declaration);
+    auto declared = cursor_type(declaration);
     if (!declared.empty() && declared.find("auto") == std::string::npos &&
         declared.find("dependent") == std::string::npos &&
         declared.find("<error") == std::string::npos) {
@@ -917,6 +917,49 @@ void attach_resource_source_locations(CompilationInfo& info,
     return kind == DxcCursor_StructDecl || kind == DxcCursor_UnionDecl ||
            kind == DxcCursor_ClassDecl || kind == DxcCursor_ClassTemplate ||
            kind == DxcCursor_ClassTemplatePartialSpecialization;
+}
+
+[[nodiscard]] bool expression_cursor(DxcCursorKind kind) {
+    return kind >= DxcCursor_FirstExpr && kind <= DxcCursor_LastExpr;
+}
+
+[[nodiscard]] std::optional<std::string> layout_container_key(IDxcCursor& cursor) {
+    const auto parent_key = [](IDxcCursor& parent) -> std::optional<std::string> {
+        const auto kind = cursor_kind(parent);
+        if (kind == DxcCursor_StructDecl) {
+            auto name = cursor_qualified_symbol_name(parent);
+            return name.empty() ? std::nullopt
+                                : std::optional<std::string>{"record:" + std::move(name)};
+        }
+        if (kind == DxcCursor_UnexposedDecl) {
+            const auto formatted = cursor_formatted_name(parent);
+            if (formatted.starts_with("cbuffer ")) {
+                ComPtr<IDxcSourceLocation> location;
+                check(parent.GetLocation(location.put()), "GetLocation");
+                if (location.get() == nullptr) {
+                    return std::nullopt;
+                }
+                const auto source = make_source_location(*location.get());
+                return "cbuffer:" + formatted + ':' + source.path + ':' +
+                       std::to_string(source.offset);
+            }
+        }
+        return std::nullopt;
+    };
+
+    ComPtr<IDxcCursor> semantic;
+    check(cursor.GetSemanticParent(semantic.put()), "GetSemanticParent");
+    if (!is_null_cursor(semantic.get())) {
+        if (auto key = parent_key(*semantic.get())) {
+            return key;
+        }
+    }
+    ComPtr<IDxcCursor> lexical;
+    check(cursor.GetLexicalParent(lexical.put()), "GetLexicalParent");
+    if (!is_null_cursor(lexical.get())) {
+        return parent_key(*lexical.get());
+    }
+    return std::nullopt;
 }
 
 [[nodiscard]] std::string trim(std::string_view value) {
@@ -1778,36 +1821,57 @@ auto TranslationUnit::signatures_at(std::string_view path, std::uint32_t line,
     return result;
 }
 
-auto TranslationUnit::inlay_hints(std::string_view path, std::uint32_t start_offset,
-                                  std::uint32_t end_offset, const std::vector<InlayCall>& calls,
-                                  const InlayHintOptions& options) const -> std::vector<InlayHint> {
-    constexpr std::size_t max_hints = 256;
-    constexpr std::size_t max_layout_probes = 32;
-
+auto TranslationUnit::inlay_hints(std::string_view path,
+                                  const std::vector<SourceOffsetRange>& ranges,
+                                  const std::vector<InlayCall>& calls,
+                                  const InlayHintOptions& options, InlayHintWork* work,
+                                  const std::function<void()>& cancellation_checkpoint) const
+    -> std::vector<InlayHint> {
+    constexpr std::uint32_t token_overlap = 1024;
     const std::string owned_path{path};
     const auto source = std::ranges::find(implementation_->sources, owned_path, &SourceFile::path);
-    if (source == implementation_->sources.end() || start_offset >= end_offset ||
-        start_offset >= source->text.size()) {
+    if (source == implementation_->sources.end() || ranges.empty()) {
         return {};
     }
-    end_offset = static_cast<std::uint32_t>(
-        (std::min)(source->text.size(), static_cast<std::size_t>(end_offset)));
-
-    std::vector<InlayHint> result;
-    result.reserve((std::min)(max_hints, static_cast<std::size_t>(64)));
-    const auto add_hint = [&](std::uint32_t offset, std::string label, InlayHintCategory category) {
-        if (offset < start_offset || offset > end_offset || label.empty() ||
-            result.size() >= max_hints) {
-            return;
+    const auto checkpoint = [&] {
+        if (cancellation_checkpoint) {
+            cancellation_checkpoint();
         }
-        result.push_back({.offset = offset, .label = std::move(label), .category = category});
+    };
+    const auto requested = [&](std::uint32_t offset) {
+        return std::ranges::any_of(ranges, [offset](const auto& range) {
+            return offset >= range.start && offset < range.end;
+        });
     };
 
+    std::vector<InlayHint> result;
+    const auto add_hint = [&](std::uint32_t offset, std::string label, InlayHintCategory category) {
+        if (requested(offset) && !label.empty()) {
+            result.push_back({.offset = offset, .label = std::move(label), .category = category});
+        }
+    };
+
+    ComPtr<IDxcFile> file;
+    check(implementation_->translation_unit->GetFile(owned_path.c_str(), file.put()), "GetFile");
+
     if (options.parameters) {
-        for (const auto& call : calls) {
-            if (result.size() >= max_hints) {
-                break;
+        for (std::size_t call_index = 0; call_index < calls.size(); ++call_index) {
+            if (call_index % 32 == 0) {
+                checkpoint();
             }
+            const auto& call = calls[call_index];
+            ComPtr<IDxcSourceLocation> location;
+            check(implementation_->translation_unit->GetLocation(file.get(), call.line, call.column,
+                                                                 location.put()),
+                  "GetLocation");
+            ComPtr<IDxcCursor> cursor;
+            check(implementation_->translation_unit->GetCursorForLocation(location.get(),
+                                                                          cursor.put()),
+                  "GetCursorForLocation");
+            if (is_null_cursor(cursor.get()) || !expression_cursor(cursor_kind(*cursor.get()))) {
+                continue;
+            }
+
             const auto signatures = signatures_at(path, call.line, call.column);
             std::vector<const Signature*> viable;
             for (const auto& signature : signatures) {
@@ -1839,108 +1903,141 @@ auto TranslationUnit::inlay_hints(std::string_view path, std::uint32_t start_off
         }
     }
 
+    std::unordered_map<std::string, std::optional<MemoryLayout>> layout_cache;
     if (options.types || options.matrix_orientation || options.packed_offsets ||
         options.array_strides) {
-        ComPtr<IDxcFile> file;
-        check(implementation_->translation_unit->GetFile(owned_path.c_str(), file.put()),
-              "GetFile");
-        ComPtr<IDxcSourceLocation> start;
-        ComPtr<IDxcSourceLocation> end;
-        check(implementation_->translation_unit->GetLocationForOffset(file.get(), start_offset,
-                                                                      start.put()),
-              "GetLocationForOffset");
-        check(implementation_->translation_unit->GetLocationForOffset(file.get(), end_offset,
-                                                                      end.put()),
-              "GetLocationForOffset");
-        ComPtr<IDxcSourceRange> range;
-        check(implementation_->owner->intellisense->GetRange(start.get(), end.get(), range.put()),
-              "GetRange");
-
-        IDxcToken** raw_tokens{};
-        unsigned token_count{};
-        check(implementation_->translation_unit->Tokenize(range.get(), &raw_tokens, &token_count),
-              "Tokenize");
-        TaskTokens tokens{raw_tokens, token_count};
-        std::size_t layout_probes{};
-
-        for (unsigned index = 0; index < token_count && result.size() < max_hints; ++index) {
-            auto* token = tokens[index];
-            DxcTokenKind token_kind{DxcTokenKind_Unknown};
-            check(token->GetKind(&token_kind), "GetKind");
-            if (token_kind != DxcTokenKind_Identifier) {
+        for (const auto& requested_range : ranges) {
+            checkpoint();
+            if (requested_range.start >= requested_range.end ||
+                requested_range.start >= source->text.size()) {
                 continue;
             }
-            ComPtr<IDxcSourceRange> extent;
-            check(token->GetExtent(extent.put()), "GetExtent");
-            unsigned token_start{};
-            unsigned token_end{};
-            check(extent->GetOffsets(&token_start, &token_end), "GetOffsets");
-            ComPtr<IDxcSourceLocation> location;
-            check(token->GetLocation(location.put()), "GetLocation");
-            ComPtr<IDxcCursor> cursor;
-            check(implementation_->translation_unit->GetCursorForLocation(location.get(),
-                                                                          cursor.put()),
-                  "GetCursorForLocation");
-            if (is_null_cursor(cursor.get())) {
-                continue;
-            }
-            const auto kind = cursor_kind(*cursor.get());
+            const auto query_start =
+                requested_range.start > token_overlap ? requested_range.start - token_overlap : 0;
+            const auto query_end = static_cast<std::uint32_t>(
+                (std::min)(source->text.size(),
+                           static_cast<std::size_t>(requested_range.end) + token_overlap));
+            ComPtr<IDxcSourceLocation> start;
+            ComPtr<IDxcSourceLocation> end;
+            check(implementation_->translation_unit->GetLocationForOffset(file.get(), query_start,
+                                                                          start.put()),
+                  "GetLocationForOffset");
+            check(implementation_->translation_unit->GetLocationForOffset(file.get(), query_end,
+                                                                          end.put()),
+                  "GetLocationForOffset");
+            ComPtr<IDxcSourceRange> range;
+            check(
+                implementation_->owner->intellisense->GetRange(start.get(), end.get(), range.put()),
+                "GetRange");
 
-            if (options.types && kind == DxcCursor_VarDecl) {
-                auto before = static_cast<std::size_t>(token_start);
-                while (before > 0 &&
-                       std::isspace(static_cast<unsigned char>(source->text[before - 1])) != 0) {
-                    --before;
+            IDxcToken** raw_tokens{};
+            unsigned token_count{};
+            check(
+                implementation_->translation_unit->Tokenize(range.get(), &raw_tokens, &token_count),
+                "Tokenize");
+            TaskTokens tokens{raw_tokens, token_count};
+            for (unsigned index = 0; index < token_count; ++index) {
+                if (index % 256 == 0) {
+                    checkpoint();
                 }
-                auto word_start = before;
-                while (word_start > 0 && is_identifier_character(source->text[word_start - 1])) {
-                    --word_start;
+                auto* token = tokens[index];
+                DxcTokenKind token_kind{DxcTokenKind_Unknown};
+                check(token->GetKind(&token_kind), "GetKind");
+                if (token_kind != DxcTokenKind_Identifier) {
+                    continue;
                 }
-                if (std::string_view{source->text}.substr(word_start, before - word_start) ==
-                    "auto") {
-                    const auto type = inferred_cursor_type(*cursor.get());
-                    if (!type.empty()) {
-                        add_hint(token_end, ": " + type, InlayHintCategory::type);
+                ComPtr<IDxcSourceRange> extent;
+                check(token->GetExtent(extent.put()), "GetExtent");
+                unsigned token_start{};
+                unsigned token_end{};
+                check(extent->GetOffsets(&token_start, &token_end), "GetOffsets");
+                ComPtr<IDxcSourceLocation> location;
+                check(token->GetLocation(location.put()), "GetLocation");
+                ComPtr<IDxcCursor> cursor;
+                check(implementation_->translation_unit->GetCursorForLocation(location.get(),
+                                                                              cursor.put()),
+                      "GetCursorForLocation");
+                if (is_null_cursor(cursor.get())) {
+                    continue;
+                }
+                const auto kind = cursor_kind(*cursor.get());
+
+                if (options.types && kind == DxcCursor_VarDecl) {
+                    auto before = static_cast<std::size_t>(token_start);
+                    while (before > 0 && std::isspace(static_cast<unsigned char>(
+                                             source->text[before - 1])) != 0) {
+                        --before;
+                    }
+                    auto word_start = before;
+                    while (word_start > 0 &&
+                           is_identifier_character(source->text[word_start - 1])) {
+                        --word_start;
+                    }
+                    if (std::string_view{source->text}.substr(word_start, before - word_start) ==
+                        "auto") {
+                        const auto type = inferred_cursor_type(*cursor.get());
+                        if (!type.empty()) {
+                            add_hint(token_end, ": " + type, InlayHintCategory::type);
+                        }
                     }
                 }
-            }
 
-            if ((options.matrix_orientation || options.packed_offsets || options.array_strides) &&
-                (kind == DxcCursor_FieldDecl || kind == DxcCursor_VarDecl) &&
-                layout_probes < max_layout_probes) {
-                ++layout_probes;
-                const auto source_location = make_source_location(*location.get());
-                const auto layout =
-                    memory_layout_at(path, source_location.line, source_location.column);
-                if (!layout || !layout->supported) {
-                    continue;
-                }
-                const auto member = std::ranges::find(layout->members, layout->selected_name,
-                                                      &MemoryLayoutElement::name);
-                if (member == layout->members.end()) {
-                    continue;
-                }
-                auto* matrix = &*member;
-                while (matrix->kind == MemoryLayoutElementKind::array && !matrix->members.empty()) {
-                    matrix = &matrix->members.front();
-                }
-                if (options.matrix_orientation && matrix->kind == MemoryLayoutElementKind::matrix) {
-                    add_hint(token_end, matrix->row_major ? " row-major" : " column-major",
-                             InlayHintCategory::matrix_orientation);
-                }
-                if (options.packed_offsets && layout->packed_offset.has_value()) {
-                    add_hint(token_end, " offset " + std::to_string(*layout->packed_offset),
-                             InlayHintCategory::packed_offset);
-                }
-                if (options.array_strides && member->array_stride != 0) {
-                    add_hint(token_end, " stride " + std::to_string(member->array_stride),
-                             InlayHintCategory::array_stride);
+                if ((options.matrix_orientation || options.packed_offsets ||
+                     options.array_strides) &&
+                    (kind == DxcCursor_FieldDecl || kind == DxcCursor_VarDecl)) {
+                    const auto key = layout_container_key(*cursor.get());
+                    if (!key) {
+                        continue;
+                    }
+                    auto [cached, inserted] = layout_cache.try_emplace(*key);
+                    if (inserted) {
+                        checkpoint();
+                        if (work != nullptr) {
+                            ++work->layout_probes;
+                        }
+                        const auto source_location = make_source_location(*location.get());
+                        cached->second =
+                            memory_layout_at(path, source_location.line, source_location.column);
+                    }
+                    const auto& layout = cached->second;
+                    if (!layout || !layout->supported) {
+                        continue;
+                    }
+                    const auto name = cursor_spelling(*cursor.get());
+                    const auto member =
+                        std::ranges::find(layout->members, name, &MemoryLayoutElement::name);
+                    if (member == layout->members.end()) {
+                        continue;
+                    }
+                    auto* matrix = &*member;
+                    while (matrix->kind == MemoryLayoutElementKind::array &&
+                           !matrix->members.empty()) {
+                        matrix = &matrix->members.front();
+                    }
+                    if (options.matrix_orientation &&
+                        matrix->kind == MemoryLayoutElementKind::matrix) {
+                        add_hint(token_end, matrix->row_major ? " row-major" : " column-major",
+                                 InlayHintCategory::matrix_orientation);
+                    }
+                    if (options.packed_offsets &&
+                        layout->kind == MemoryLayoutKind::constant_buffer) {
+                        add_hint(token_end, " offset " + std::to_string(member->offset),
+                                 InlayHintCategory::packed_offset);
+                    }
+                    if (options.array_strides && member->array_stride != 0) {
+                        add_hint(token_end, " stride " + std::to_string(member->array_stride),
+                                 InlayHintCategory::array_stride);
+                    }
                 }
             }
         }
     }
 
-    if (options.registers && result.size() < max_hints) {
+    if (options.registers) {
+        checkpoint();
+        if (work != nullptr) {
+            ++work->reflection_compilations;
+        }
         const auto info = compilation_info();
         if (info.reflection && info.reflection->available) {
             const auto register_prefix = [](ResourceRegisterClass value) -> std::string_view {
@@ -1986,6 +2083,14 @@ auto TranslationUnit::inlay_hints(std::string_view path, std::uint32_t start_off
                                            : static_cast<std::uint8_t>(left.category) <
                                                  static_cast<std::uint8_t>(right.category);
     });
+    result.erase(std::unique(result.begin(), result.end(),
+                             [](const auto& left, const auto& right) {
+                                 return left.offset == right.offset &&
+                                        left.category == right.category &&
+                                        left.label == right.label;
+                             }),
+                 result.end());
+    checkpoint();
     return result;
 }
 
