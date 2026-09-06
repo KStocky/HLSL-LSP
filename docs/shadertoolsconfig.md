@@ -146,6 +146,9 @@ active one instead of hand-editing settings. The active variant is applied when
 analyzing each document it applies to, and changing it reanalyzes open
 documents.
 
+For a complete shader/configuration walkthrough in both editors, see the
+[Shader variants tutorial](tutorials/shader-variants.md).
+
 ```jsonc
 {
   "root": true,

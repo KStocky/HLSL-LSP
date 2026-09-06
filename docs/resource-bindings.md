@@ -9,6 +9,8 @@ deliberately separate from the
 unsaved) document, but Resource Bindings focuses on a single, denser concern
 (bindings, collisions, root-signature state, and compatibility) that would
 make the Shader Compilation view unreadable if merged into it.
+For a runnable shader and guided interpretation, see the
+[Resource Bindings tutorial](tutorials/resource-bindings.md).
 
 In Visual Studio, run **Tools > HLSL Resource Bindings**. In Visual Studio
 Code, run **HLSL: Show Resource Bindings** from the Command Palette. Both
