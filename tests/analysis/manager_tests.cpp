@@ -312,6 +312,52 @@ TEST_CASE("Memory layout queries preserve cancellation and stale-version safety"
                     json_rpc::HandlerError);
 }
 
+TEST_CASE("Inlay hint queries preserve cancellation and stale-version safety",
+          "[analysis][inlay-hints][cancellation]") {
+    TestDirectory directory;
+    const auto uri = workspace::DocumentUri::from_path((directory.path() / "root.hlsl").string());
+    const std::string source = "float shade(float value) { return value; }\n"
+                               "float4 main() : SV_Target { return shade(1.0).xxxx; }\n";
+    auto hooks = std::make_shared<analysis::AnalysisHooks>();
+    Gate interactive;
+    hooks->before_interactive = [&](std::string_view) {
+        interactive.enter();
+        interactive.wait_until_released();
+    };
+    analysis::Manager manager{[](const auto&, const auto&, std::uint64_t) {}, test_options(),
+                              hooks};
+    manager.analyze(input(uri, 1, source));
+    manager.wait_idle();
+
+    json_rpc::CancellationToken cancellation;
+    auto request = std::async(std::launch::async, [&] {
+        return manager.inlay_hints(
+            uri.identity(), 1, uri.path(),
+            {{.start = 0, .end = static_cast<std::uint32_t>(source.size())}},
+            {{.line = 2,
+              .column = 36,
+              .argument_offsets = {static_cast<std::uint32_t>(source.find("1.0"))}}},
+            {}, cancellation);
+    });
+    interactive.wait_until_entered();
+    cancellation.cancel();
+    try {
+        static_cast<void>(request.get());
+        FAIL("Cancelled inlay hint request unexpectedly returned");
+    } catch (const json_rpc::HandlerError& error) {
+        CHECK(error.code() == json_rpc::request_cancelled_code);
+    }
+    interactive.release();
+    manager.wait_idle();
+
+    json_rpc::CancellationToken current;
+    CHECK_THROWS_AS(
+        manager.inlay_hints(uri.identity(), 2, uri.path(),
+                            {{.start = 0, .end = static_cast<std::uint32_t>(source.size())}}, {},
+                            {}, current),
+        json_rpc::HandlerError);
+}
+
 TEST_CASE("Compilation info queries (root signature, binding analysis, compatibility) preserve "
           "cancellation and stale-version safety",
           "[analysis][compilation-info][cancellation]") {

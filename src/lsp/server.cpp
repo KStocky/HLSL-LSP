@@ -11,6 +11,7 @@
 #include <cctype>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdio>
 #include <deque>
 #include <exception>
 #include <filesystem>
@@ -1262,6 +1263,227 @@ callee_at(std::string_view text, const std::vector<bool>& code, std::size_t open
     return CallContext{.callee_offset = *call->callee, .active_parameter = call->active_parameter};
 }
 
+struct InlayCallSite {
+    std::size_t callee_offset{};
+    std::vector<std::uint32_t> argument_offsets;
+};
+
+[[nodiscard]] std::vector<InlayCallSite> inlay_call_sites(std::string_view text,
+                                                          std::size_t range_start,
+                                                          std::size_t range_end,
+                                                          const std::function<void()>& checkpoint) {
+    constexpr std::size_t chunk_bytes = std::size_t{256} * 1024U;
+
+    struct Delimiter {
+        char value{};
+        std::optional<std::size_t> callee;
+        std::vector<std::uint32_t> arguments;
+        bool awaiting_argument{};
+    };
+    std::vector<Delimiter> delimiters;
+    std::vector<InlayCallSite> result;
+    LexicalState lexical_state = LexicalState::code;
+    std::optional<std::size_t> last_identifier;
+    const auto identifier = [](char value) {
+        return std::isalnum(static_cast<unsigned char>(value)) != 0 || value == '_';
+    };
+    const auto callable_identifier = [&](std::size_t start) -> std::optional<std::size_t> {
+        auto end = start;
+        while (end < text.size() && identifier(text[end])) {
+            ++end;
+        }
+        const auto name = text.substr(start, end - start);
+        static constexpr std::string_view non_call_keywords[] = {
+            "if", "for", "while", "switch", "sizeof", "alignof", "return"};
+        return std::ranges::find(non_call_keywords, name) == std::ranges::end(non_call_keywords)
+                   ? std::optional{start}
+                   : std::nullopt;
+    };
+    const auto template_call_open = [&](std::size_t open) {
+        auto state = LexicalState::code;
+        std::size_t depth = 1;
+        for (auto offset = open + 1; offset < text.size(); ++offset) {
+            if ((offset - open) % chunk_bytes == 0) {
+                checkpoint();
+            }
+            const auto character = text[offset];
+            if (state == LexicalState::line_comment) {
+                if (character == '\r' || character == '\n') {
+                    state = LexicalState::code;
+                }
+                continue;
+            }
+            if (state == LexicalState::block_comment) {
+                if (character == '*' && offset + 1 < text.size() && text[offset + 1] == '/') {
+                    state = LexicalState::code;
+                    ++offset;
+                }
+                continue;
+            }
+            if (state == LexicalState::string || state == LexicalState::character) {
+                const auto quote = state == LexicalState::string ? '"' : '\'';
+                if (character == '\\' && offset + 1 < text.size()) {
+                    ++offset;
+                } else if (character == quote) {
+                    state = LexicalState::code;
+                }
+                continue;
+            }
+            if (character == '/' && offset + 1 < text.size() && text[offset + 1] == '/') {
+                state = LexicalState::line_comment;
+                ++offset;
+            } else if (character == '/' && offset + 1 < text.size() && text[offset + 1] == '*') {
+                state = LexicalState::block_comment;
+                ++offset;
+            } else if (character == '"' || character == '\'') {
+                state = character == '"' ? LexicalState::string : LexicalState::character;
+            } else if (character == '<') {
+                ++depth;
+            } else if (character == '>') {
+                if (--depth == 0) {
+                    while (++offset < text.size()) {
+                        if (std::isspace(static_cast<unsigned char>(text[offset])) != 0) {
+                            continue;
+                        }
+                        return text[offset] == '(';
+                    }
+                    return false;
+                }
+            } else if (depth == 1 && (character == ';' || character == ')' || character == ']' ||
+                                      character == '}')) {
+                return false;
+            }
+        }
+        return false;
+    };
+    const auto begin_argument = [&](std::size_t offset) {
+        if (!delimiters.empty() && delimiters.back().callee &&
+            delimiters.back().awaiting_argument && text[offset] != ')') {
+            if (offset <= std::numeric_limits<std::uint32_t>::max()) {
+                delimiters.back().arguments.push_back(static_cast<std::uint32_t>(offset));
+            }
+            delimiters.back().awaiting_argument = false;
+        }
+    };
+
+    std::size_t next_checkpoint{};
+    for (std::size_t offset = 0; offset < text.size();) {
+        if (offset >= next_checkpoint) {
+            checkpoint();
+            next_checkpoint = offset + chunk_bytes;
+        }
+        const auto character = text[offset];
+        if (lexical_state == LexicalState::line_comment) {
+            if (character == '\r' || character == '\n') {
+                lexical_state = LexicalState::code;
+            }
+            ++offset;
+            continue;
+        }
+        if (lexical_state == LexicalState::block_comment) {
+            if (character == '*' && offset + 1 < text.size() && text[offset + 1] == '/') {
+                lexical_state = LexicalState::code;
+                offset += 2;
+            } else {
+                ++offset;
+            }
+            continue;
+        }
+        if (lexical_state == LexicalState::string || lexical_state == LexicalState::character) {
+            const auto quote = lexical_state == LexicalState::string ? '"' : '\'';
+            if (character == '\\' && offset + 1 < text.size()) {
+                offset += 2;
+            } else {
+                ++offset;
+                if (character == quote) {
+                    lexical_state = LexicalState::code;
+                }
+            }
+            continue;
+        }
+        if (character == '/' && offset + 1 < text.size() && text[offset + 1] == '/') {
+            lexical_state = LexicalState::line_comment;
+            offset += 2;
+            continue;
+        }
+        if (character == '/' && offset + 1 < text.size() && text[offset + 1] == '*') {
+            lexical_state = LexicalState::block_comment;
+            offset += 2;
+            continue;
+        }
+        if (std::isspace(static_cast<unsigned char>(character)) != 0) {
+            ++offset;
+            continue;
+        }
+        begin_argument(offset);
+        if (identifier(character)) {
+            last_identifier = offset;
+            do {
+                ++offset;
+                if (offset >= next_checkpoint) {
+                    checkpoint();
+                    next_checkpoint = offset + chunk_bytes;
+                }
+            } while (offset < text.size() && identifier(text[offset]));
+            continue;
+        }
+        if (character == '"' || character == '\'') {
+            lexical_state = character == '"' ? LexicalState::string : LexicalState::character;
+            last_identifier.reset();
+            ++offset;
+            continue;
+        }
+        if (character == '(') {
+            const auto callee =
+                last_identifier ? callable_identifier(*last_identifier) : std::nullopt;
+            delimiters.push_back(
+                {.value = character, .callee = callee, .arguments = {}, .awaiting_argument = true});
+            last_identifier.reset();
+        } else if (character == '[' || character == '{' ||
+                   (character == '<' && last_identifier && template_call_open(offset))) {
+            delimiters.push_back({.value = character,
+                                  .callee = character == '<' ? last_identifier : std::nullopt,
+                                  .arguments = {},
+                                  .awaiting_argument = false});
+            last_identifier.reset();
+        } else if (character == ',' && !delimiters.empty() && delimiters.back().value == '(' &&
+                   delimiters.back().callee) {
+            delimiters.back().awaiting_argument = true;
+            last_identifier.reset();
+        } else if (character == ')' || character == ']' || character == '}' || character == '>') {
+            const auto expected =
+                character == ')' ? '(' : (character == ']' ? '[' : (character == '}' ? '{' : '<'));
+            const auto matching = std::ranges::find(delimiters.rbegin(), delimiters.rend(),
+                                                    expected, &Delimiter::value);
+            if (matching == delimiters.rend()) {
+                last_identifier.reset();
+                ++offset;
+                continue;
+            }
+            const auto index =
+                static_cast<std::size_t>(std::distance(delimiters.begin(), matching.base() - 1));
+            if (character == ')' && delimiters[index].callee) {
+                auto arguments = std::move(delimiters[index].arguments);
+                const auto relevant = std::ranges::any_of(arguments, [&](std::uint32_t argument) {
+                    return argument >= range_start && argument < range_end;
+                });
+                if (relevant) {
+                    result.push_back({.callee_offset = *delimiters[index].callee,
+                                      .argument_offsets = std::move(arguments)});
+                }
+            }
+            const auto template_callee = character == '>' ? delimiters[index].callee : std::nullopt;
+            delimiters.erase(delimiters.begin() + static_cast<std::ptrdiff_t>(index),
+                             delimiters.end());
+            last_identifier = template_callee;
+        } else {
+            last_identifier.reset();
+        }
+        ++offset;
+    }
+    return result;
+}
+
 [[nodiscard]] workspace::Range diagnostic_range(const workspace::SourceSnapshot& snapshot,
                                                 const dxc::Diagnostic& diagnostic) {
     if (diagnostic.location.line == 0 || diagnostic.location.column == 0) {
@@ -1398,6 +1620,65 @@ optional_string_setting(const Json& settings, const Json* hlsl, std::string_view
         invalid_params("hlsl." + std::string{name} + " must be a string or null");
     }
     return std::optional<std::optional<std::string>>{std::in_place, value->get<std::string>()};
+}
+
+[[nodiscard]] InlayHintSettings inlay_hint_settings(const Json& settings) {
+    if (!settings.is_object()) {
+        invalid_params("settings must be an object");
+    }
+    const Json* hlsl = nullptr;
+    if (const auto nested = settings.find("hlsl"); nested != settings.end()) {
+        if (!nested->is_object()) {
+            invalid_params("hlsl settings must be an object");
+        }
+        hlsl = &*nested;
+    }
+    const Json* nested_hints = nullptr;
+    if (hlsl != nullptr) {
+        if (const auto hints = hlsl->find("inlayHints"); hints != hlsl->end()) {
+            if (!hints->is_object()) {
+                invalid_params("hlsl.inlayHints must be an object");
+            }
+            nested_hints = &*hints;
+        }
+    }
+
+    const auto boolean = [&](std::string_view name, bool fallback) {
+        const Json* value = nullptr;
+        if (nested_hints != nullptr) {
+            const auto found = nested_hints->find(name);
+            if (found != nested_hints->end()) {
+                value = &*found;
+            }
+        }
+        if (value == nullptr && hlsl != nullptr) {
+            const auto found = hlsl->find("inlayHints." + std::string{name});
+            if (found != hlsl->end()) {
+                value = &*found;
+            }
+        }
+        if (value == nullptr) {
+            const auto found = settings.find("hlsl.inlayHints." + std::string{name});
+            if (found != settings.end()) {
+                value = &*found;
+            }
+        }
+        if (value == nullptr) {
+            return fallback;
+        }
+        if (!value->is_boolean()) {
+            invalid_params("hlsl.inlayHints." + std::string{name} + " must be a boolean");
+        }
+        return value->get<bool>();
+    };
+
+    return {.types = boolean("types", true),
+            .parameters = boolean("parameters", true),
+            .matrix_orientation = boolean("matrixOrientation", false),
+            .registers = boolean("registers", false),
+            .packed_offsets = boolean("packedOffsets", false),
+            .array_strides = boolean("arrayStrides", false),
+            .active_variant = boolean("activeVariant", true)};
 }
 
 // Produces a stable comparison key for a runtime directory. The key is the
@@ -1658,8 +1939,10 @@ struct Server::ReferenceResult final {
     std::vector<dxc::Reference> references;
 };
 
-Server::Server(NotificationSender sender, Logger logger, ServerOptions options)
-    : sender_{std::move(sender)}, logger_{std::move(logger)}, options_{std::move(options)},
+Server::Server(NotificationSender sender, Logger logger, ServerOptions options,
+               RequestSender request_sender)
+    : sender_{std::move(sender)}, request_sender_{std::move(request_sender)},
+      logger_{std::move(logger)}, options_{std::move(options)},
       analysis_{[this](const auto& snapshot, const auto& diagnostics, std::uint64_t generation) {
                     analysis_completed(snapshot, diagnostics, generation);
                 },
@@ -1715,6 +1998,9 @@ void Server::register_handlers() {
                                          [this](const auto& params, const auto& context) {
                                              return signature_help(params, context);
                                          });
+    dispatcher_.register_request_handler(
+        "textDocument/inlayHint",
+        [this](const auto& params, const auto& context) { return inlay_hints(params, context); });
     dispatcher_.register_request_handler("textDocument/documentSymbol",
                                          [this](const auto& params, const auto& context) {
                                              return document_symbols(params, context);
@@ -1840,10 +2126,26 @@ Json Server::initialize(const std::optional<Json>& params) {
     const auto& value = object_params(params);
     std::optional<std::string> client_default_language_version;
     std::optional<std::string> initial_active_variant;
+    InlayHintSettings initial_inlay_hints;
     bool client_command_links = false;
+    bool client_inlay_hint_refresh = false;
+    if (const auto capabilities = value.find("capabilities");
+        capabilities != value.end() && capabilities->is_object()) {
+        if (const auto workspace = capabilities->find("workspace");
+            workspace != capabilities->end() && workspace->is_object()) {
+            if (const auto hints = workspace->find("inlayHint");
+                hints != workspace->end() && hints->is_object()) {
+                if (const auto refresh = hints->find("refreshSupport");
+                    refresh != hints->end() && refresh->is_boolean()) {
+                    client_inlay_hint_refresh = refresh->get<bool>();
+                }
+            }
+        }
+    }
     if (const auto initialization_options = value.find("initializationOptions");
         initialization_options != value.end() && !initialization_options->is_null()) {
         const auto defaults = configuration_overrides(*initialization_options);
+        initial_inlay_hints = inlay_hint_settings(*initialization_options);
         if (defaults.language_version) {
             client_default_language_version = *defaults.language_version;
         }
@@ -1885,7 +2187,9 @@ Json Server::initialize(const std::optional<Json>& params) {
     workspace_folders_ = std::move(workspace_folders);
     client_default_language_version_ = std::move(client_default_language_version);
     active_variant_ = std::move(initial_active_variant);
+    inlay_hint_settings_ = initial_inlay_hints;
     command_links_ = client_command_links;
+    client_inlay_hint_refresh_ = client_inlay_hint_refresh;
     state_ = State::awaiting_initialized;
     Json capabilities = {
         {"positionEncoding", "utf-16"},
@@ -1899,6 +2203,7 @@ Json Server::initialize(const std::optional<Json>& params) {
         {"signatureHelpProvider",
          {{"triggerCharacters", Json::array({"(", ","})},
           {"retriggerCharacters", Json::array({")"})}}},
+        {"inlayHintProvider", true},
         {"documentSymbolProvider", true},
         {"workspaceSymbolProvider", true},
         {"codeActionProvider", {{"codeActionKinds", Json::array({"quickfix"})}}},
@@ -2789,6 +3094,135 @@ Json Server::signature_help(const std::optional<Json>& params,
     return result;
 }
 
+Json Server::inlay_hints(const std::optional<Json>& params,
+                         const json_rpc::RequestContext& context) {
+    require_running();
+    constexpr std::size_t chunk_bytes = std::size_t{256} * 1024U;
+    const auto& value = object_params(params);
+    const auto uri = string_member(object_member(value, "textDocument"), "uri");
+    const auto requested_range = range(object_member(value, "range"));
+
+    workspace::SourceSnapshot snapshot = [&] {
+        std::scoped_lock state_lock{state_mutex_};
+        try {
+            const auto& state = documents_.document(uri);
+            if (!state.open) {
+                invalid_params("Inlay hints require an open document");
+            }
+            return documents_.snapshot(uri);
+        } catch (const workspace::DocumentError& error) {
+            invalid_params(error.what());
+        }
+    }();
+
+    std::size_t start_offset{};
+    std::size_t end_offset{};
+    try {
+        start_offset = workspace::utf8_offset_at(snapshot.text(), requested_range.start);
+        end_offset = workspace::utf8_offset_at(snapshot.text(), requested_range.end);
+    } catch (const workspace::DocumentError& error) {
+        invalid_params(error.what());
+    }
+    if (end_offset < start_offset) {
+        invalid_params("Inlay hint range end must not precede its start");
+    }
+    if (start_offset > std::numeric_limits<std::uint32_t>::max() ||
+        end_offset > std::numeric_limits<std::uint32_t>::max()) {
+        invalid_params("Inlay hint range is too large");
+    }
+
+    InlayHintSettings settings;
+    ConfigurationState configuration_state;
+    std::uint64_t hint_generation{};
+    {
+        std::scoped_lock state_lock{state_mutex_};
+        settings = inlay_hint_settings_;
+        configuration_state =
+            ConfigurationState{.editor_settings = editor_settings_,
+                               .client_default_language_version = client_default_language_version_,
+                               .active_variant = active_variant_,
+                               .workspace_folders = workspace_folders_};
+        hint_generation = inlay_hint_generation_;
+    }
+
+    analyze_and_publish(snapshot.uri());
+    const auto require_current_generation = [&] {
+        std::scoped_lock state_lock{state_mutex_};
+        if (!documents_.contains(snapshot.uri()) ||
+            documents_.snapshot(snapshot.uri()).version() != snapshot.version() ||
+            inlay_hint_generation_ != hint_generation) {
+            throw HandlerError{json_rpc::content_modified_code, "Inlay hints were superseded"};
+        }
+    };
+
+    Json result = Json::array();
+    auto variant_selection = workspace::VariantSelection::undefined;
+    if (settings.active_variant && configuration_state.active_variant &&
+        !configuration_state.active_variant->empty() && start_offset == 0 && end_offset > 0) {
+        static_cast<void>(configuration_for(snapshot, configuration_state, &variant_selection));
+    }
+    if (settings.active_variant && configuration_state.active_variant &&
+        !configuration_state.active_variant->empty() &&
+        variant_selection == workspace::VariantSelection::applied && start_offset == 0 &&
+        end_offset > 0) {
+        result.push_back({{"position", lsp_position(workspace::Position{})},
+                          {"label", "variant: " + *configuration_state.active_variant}});
+    }
+
+    std::vector<dxc::SourceOffsetRange> ranges;
+    std::vector<dxc::InlayCall> calls;
+    for (auto chunk_start = start_offset; chunk_start < end_offset;) {
+        context.cancellation.throw_if_cancellation_requested();
+        require_current_generation();
+        const auto chunk_end = (std::min)(end_offset, chunk_start + chunk_bytes);
+        ranges.push_back({.start = static_cast<std::uint32_t>(chunk_start),
+                          .end = static_cast<std::uint32_t>(chunk_end)});
+        chunk_start = chunk_end;
+    }
+    if (settings.parameters && start_offset < end_offset) {
+        for (auto& call : inlay_call_sites(snapshot.text(), start_offset, end_offset, [&] {
+                 context.cancellation.throw_if_cancellation_requested();
+                 require_current_generation();
+             })) {
+            const auto position = workspace::lsp_position_at(snapshot.text(), call.callee_offset);
+            const auto [line, column] = dxc_position(snapshot.text(), position);
+            calls.push_back({.line = line,
+                             .column = column,
+                             .argument_offsets = std::move(call.argument_offsets)});
+        }
+    }
+
+    std::vector<dxc::InlayHint> hints;
+    try {
+        hints = analysis_.inlay_hints(snapshot.document_uri().identity(), snapshot.version(),
+                                      snapshot.path(), std::move(ranges), std::move(calls),
+                                      {.types = settings.types,
+                                       .parameters = settings.parameters,
+                                       .matrix_orientation = settings.matrix_orientation,
+                                       .registers = settings.registers,
+                                       .packed_offsets = settings.packed_offsets,
+                                       .array_strides = settings.array_strides},
+                                      context.cancellation);
+    } catch (const HandlerError&) {
+        require_current_generation();
+        throw;
+    }
+    require_current_generation();
+    for (const auto& hint : hints) {
+        Json item{
+            {"position", lsp_position(workspace::lsp_position_at(snapshot.text(), hint.offset))},
+            {"label", hint.label}};
+        if (hint.category == dxc::InlayHintCategory::type) {
+            item["kind"] = 1;
+        } else if (hint.category == dxc::InlayHintCategory::parameter) {
+            item["kind"] = 2;
+            item["paddingRight"] = true;
+        }
+        result.push_back(std::move(item));
+    }
+    return result;
+}
+
 Json Server::document_symbols(const std::optional<Json>& params,
                               const json_rpc::RequestContext& context) {
     require_running();
@@ -2929,6 +3363,7 @@ void Server::initialized(const std::optional<Json>& params) {
 }
 
 void Server::did_open(const std::optional<Json>& params) {
+    bool refresh_inlay_hints{};
     try {
         require_running();
         const auto& document = object_member(object_params(params), "textDocument");
@@ -2939,15 +3374,21 @@ void Server::did_open(const std::optional<Json>& params) {
                                 integer_member(document, "version"),
                                 string_member(document, "text"));
         }
+        invalidate_inlay_hints(false);
+        refresh_inlay_hints = true;
         analyze_affected(uri);
         reevaluate_runtime_selection();
         reevaluate_variant_selection();
     } catch (const std::exception& error) {
         log(error.what());
     }
+    if (refresh_inlay_hints) {
+        finalize_inlay_hint_refresh();
+    }
 }
 
 void Server::did_change(const std::optional<Json>& params) {
+    bool refresh_inlay_hints{};
     try {
         require_running();
         const auto& value = object_params(params);
@@ -2986,13 +3427,19 @@ void Server::did_change(const std::optional<Json>& params) {
             std::scoped_lock state_lock{state_mutex_};
             documents_.did_change(uri, integer_member(document, "version"), changes);
         }
+        invalidate_inlay_hints(false);
+        refresh_inlay_hints = true;
         analyze_affected(uri);
     } catch (const std::exception& error) {
         log(error.what());
     }
+    if (refresh_inlay_hints) {
+        finalize_inlay_hint_refresh();
+    }
 }
 
 void Server::did_save(const std::optional<Json>& params) {
+    bool refresh_inlay_hints{};
     try {
         require_running();
         const auto& value = object_params(params);
@@ -3008,13 +3455,19 @@ void Server::did_save(const std::optional<Json>& params) {
             std::scoped_lock state_lock{state_mutex_};
             documents_.did_save(uri, std::move(text));
         }
+        invalidate_inlay_hints(false);
+        refresh_inlay_hints = true;
         analyze_affected(uri);
     } catch (const std::exception& error) {
         log(error.what());
     }
+    if (refresh_inlay_hints) {
+        finalize_inlay_hint_refresh();
+    }
 }
 
 void Server::did_close(const std::optional<Json>& params) {
+    bool refresh_inlay_hints{};
     try {
         require_running();
         const auto uri = string_member(object_member(object_params(params), "textDocument"), "uri");
@@ -3031,6 +3484,8 @@ void Server::did_close(const std::optional<Json>& params) {
             ++analysis_generations_[snapshot.document_uri().identity()];
             diagnostics_by_identity_.erase(snapshot.document_uri().identity());
         }
+        invalidate_inlay_hints(false);
+        refresh_inlay_hints = true;
         analysis_.erase(snapshot.document_uri().identity());
         for (const auto& root_uri : affected_roots) {
             analyze_and_publish(root_uri);
@@ -3043,19 +3498,32 @@ void Server::did_close(const std::optional<Json>& params) {
     } catch (const std::exception& error) {
         log(error.what());
     }
+    if (refresh_inlay_hints) {
+        finalize_inlay_hint_refresh();
+    }
 }
 
 void Server::did_change_configuration(const std::optional<Json>& params) {
+    bool refresh_inlay_hints{};
     try {
         require_running();
-        const auto candidate =
-            configuration_overrides(object_member(object_params(params), "settings"));
+        const auto& settings = object_member(object_params(params), "settings");
+        const auto candidate = configuration_overrides(settings);
+        const auto candidate_inlay_hints = inlay_hint_settings(settings);
+        bool inlay_inputs_changed{};
         {
             std::scoped_lock state_lock{state_mutex_};
             for (const auto& document : documents_.open_snapshots()) {
                 static_cast<void>(configuration_for(document, candidate));
             }
+            inlay_inputs_changed =
+                editor_settings_ != candidate || inlay_hint_settings_ != candidate_inlay_hints;
             editor_settings_ = candidate;
+            inlay_hint_settings_ = candidate_inlay_hints;
+        }
+        if (inlay_inputs_changed) {
+            invalidate_inlay_hints(false);
+            refresh_inlay_hints = true;
         }
         reanalyze_all();
         reevaluate_runtime_selection();
@@ -3063,26 +3531,40 @@ void Server::did_change_configuration(const std::optional<Json>& params) {
     } catch (const std::exception& error) {
         log(error.what());
     }
+    if (refresh_inlay_hints) {
+        finalize_inlay_hint_refresh();
+    }
 }
 
 void Server::did_change_client_defaults(const std::optional<Json>& params) {
+    bool refresh_inlay_hints{};
     try {
         require_running();
         const auto defaults = configuration_overrides(object_params(params));
         if (!defaults.language_version) {
             invalid_params("hlsl.languageVersion must be provided");
         }
+        bool changed{};
         {
             std::scoped_lock state_lock{state_mutex_};
+            changed = client_default_language_version_ != *defaults.language_version;
             client_default_language_version_ = *defaults.language_version;
+        }
+        if (changed) {
+            invalidate_inlay_hints(false);
+            refresh_inlay_hints = true;
         }
         reanalyze_all();
     } catch (const std::exception& error) {
         log(error.what());
     }
+    if (refresh_inlay_hints) {
+        finalize_inlay_hint_refresh();
+    }
 }
 
 void Server::did_change_active_variant(const std::optional<Json>& params) {
+    bool refresh_inlay_hints{};
     try {
         require_running();
         const auto& value = object_params(params);
@@ -3106,6 +3588,8 @@ void Server::did_change_active_variant(const std::optional<Json>& params) {
             }
         }
         if (changed) {
+            invalidate_inlay_hints(false);
+            refresh_inlay_hints = true;
             // A variant change reanalyzes open documents; only a differing runtime
             // selection escalates to the controlled restart shared with issue #14.
             reanalyze_all();
@@ -3115,9 +3599,51 @@ void Server::did_change_active_variant(const std::optional<Json>& params) {
     } catch (const std::exception& error) {
         log(error.what());
     }
+    if (refresh_inlay_hints) {
+        finalize_inlay_hint_refresh();
+    }
+}
+
+void Server::invalidate_inlay_hints(bool refresh) {
+    {
+        std::scoped_lock state_lock{state_mutex_};
+        ++inlay_hint_generation_;
+    }
+    if (refresh) {
+        request_inlay_hint_refresh();
+    }
+}
+
+void Server::request_inlay_hint_refresh() {
+    {
+        std::scoped_lock state_lock{state_mutex_};
+        if (!client_inlay_hint_refresh_ || !request_sender_ || state_ != State::running) {
+            return;
+        }
+    }
+    request_sender_(
+        json_rpc::Request{.id = next_outbound_request_id_.fetch_add(1, std::memory_order_relaxed),
+                          .method = "workspace/inlayHint/refresh",
+                          .params = std::nullopt});
+}
+
+void Server::finalize_inlay_hint_refresh() noexcept {
+    try {
+        request_inlay_hint_refresh();
+    } catch (const std::exception& error) {
+        try {
+            log(error.what());
+        } catch (...) {
+            static_cast<void>(
+                std::fputs("HLSL-LSP: failed to log inlay-hint refresh error\n", stderr));
+        }
+    } catch (...) {
+        static_cast<void>(std::fputs("HLSL-LSP: inlay-hint refresh failed\n", stderr));
+    }
 }
 
 void Server::did_change_workspace_folders(const std::optional<Json>& params) {
+    bool refresh_inlay_hints{};
     try {
         require_running();
         const auto& event = object_member(object_params(params), "event");
@@ -3138,9 +3664,15 @@ void Server::did_change_workspace_folders(const std::optional<Json>& params) {
             const auto [identity, path] = workspace_folder(folder);
             workspace_folders.insert_or_assign(identity, path);
         }
+        bool changed{};
         {
             std::scoped_lock state_lock{state_mutex_};
+            changed = workspace_folders_ != workspace_folders;
             workspace_folders_ = std::move(workspace_folders);
+        }
+        if (changed) {
+            invalidate_inlay_hints(false);
+            refresh_inlay_hints = true;
         }
         reanalyze_all();
         reevaluate_runtime_selection();
@@ -3148,9 +3680,13 @@ void Server::did_change_workspace_folders(const std::optional<Json>& params) {
     } catch (const std::exception& error) {
         log(error.what());
     }
+    if (refresh_inlay_hints) {
+        finalize_inlay_hint_refresh();
+    }
 }
 
 void Server::did_change_watched_files(const std::optional<Json>& params) {
+    bool refresh_inlay_hints{};
     try {
         require_running();
         const auto& changes = member(object_params(params), "changes");
@@ -3179,6 +3715,11 @@ void Server::did_change_watched_files(const std::optional<Json>& params) {
             } catch (const workspace::DocumentError& error) {
                 invalid_params(error.what());
             }
+        }
+        const bool hints_changed = !changes.empty();
+        if (hints_changed) {
+            invalidate_inlay_hints(false);
+            refresh_inlay_hints = true;
         }
 
         analysis_.invalidate_include_metadata(changed_identities);
@@ -3229,6 +3770,9 @@ void Server::did_change_watched_files(const std::optional<Json>& params) {
         reevaluate_variant_selection();
     } catch (const std::exception& error) {
         log(error.what());
+    }
+    if (refresh_inlay_hints) {
+        finalize_inlay_hint_refresh();
     }
 }
 
@@ -3313,14 +3857,18 @@ Server::configuration_for(const workspace::SourceSnapshot& snapshot,
 
 workspace::WorkspaceConfiguration
 Server::configuration_for(const workspace::SourceSnapshot& snapshot,
-                          const ConfigurationState& state) {
+                          const ConfigurationState& state,
+                          workspace::VariantSelection* active_variant_selection) {
     auto configuration = base_configuration_for(snapshot, state.client_default_language_version);
     // The active variant is applied on top of the file-derived configuration but
     // below editor overrides, so a selected variant beats client defaults while an
     // explicit editor setting still wins. Unknown or inapplicable selections are
     // reported by reevaluate_variant_selection rather than throwing here.
     if (state.active_variant) {
-        static_cast<void>(workspace::apply_variant(configuration, *state.active_variant));
+        const auto selection = workspace::apply_variant(configuration, *state.active_variant);
+        if (active_variant_selection != nullptr) {
+            *active_variant_selection = selection;
+        }
     }
     return workspace::apply_configuration_overrides(
         std::move(configuration), state.editor_settings,
@@ -4274,7 +4822,10 @@ int run(std::istream& input, std::ostream& output, std::ostream& errors, ServerO
                           std::scoped_lock lock{error_mutex};
                           errors << "HLSL-LSP: " << message << '\n';
                       },
-                      options};
+                      options,
+                      [&write_payload](const json_rpc::Request& request) {
+                          write_payload(json_rpc::serialize(json_rpc::Message{request}));
+                      }};
         RequestExecutor requests{options.request_worker_count, options.request_queue_capacity};
         json_rpc::FrameReader reader{input};
 

@@ -33,6 +33,48 @@
       "title": "DXC runtime directory",
       "description": "Directory containing a compatible DXC runtime (dxcompiler.dll and dxil.dll) to load instead of the bundled one. An explicit value overrides shadertoolsconfig.json. Empty uses the bundled runtime. Changing it restarts the language server.",
       "default": ""
+    },
+    "hlslLsp.general.inlayHintTypes": {
+      "type": "boolean",
+      "title": "Inferred type hints",
+      "description": "Show compiler-inferred type hints.",
+      "default": true
+    },
+    "hlslLsp.general.inlayHintParameters": {
+      "type": "boolean",
+      "title": "Parameter-name hints",
+      "description": "Show unambiguous overload parameter-name hints at call sites.",
+      "default": true
+    },
+    "hlslLsp.general.inlayHintMatrixOrientation": {
+      "type": "boolean",
+      "title": "Matrix orientation hints",
+      "description": "Show compiler-derived row-major or column-major matrix orientation hints.",
+      "default": false
+    },
+    "hlslLsp.general.inlayHintRegisters": {
+      "type": "boolean",
+      "title": "Resource register hints",
+      "description": "Show reflected resource register and space hints.",
+      "default": false
+    },
+    "hlslLsp.general.inlayHintPackedOffsets": {
+      "type": "boolean",
+      "title": "Packed-offset hints",
+      "description": "Show compiler-derived constant-buffer packed-offset hints.",
+      "default": false
+    },
+    "hlslLsp.general.inlayHintArrayStrides": {
+      "type": "boolean",
+      "title": "Array-stride hints",
+      "description": "Show compiler-derived array-stride hints.",
+      "default": false
+    },
+    "hlslLsp.general.inlayHintActiveVariant": {
+      "type": "boolean",
+      "title": "Active variant hints",
+      "description": "Show the selected compilation variant where it affects the current shader.",
+      "default": true
     }
   },
   "categories": {

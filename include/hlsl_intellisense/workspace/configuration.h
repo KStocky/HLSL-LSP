@@ -120,6 +120,8 @@ struct ConfigurationOverrides {
     std::optional<std::optional<std::string>> entry_point;
     std::optional<std::vector<std::string>> additional_arguments;
     std::optional<std::optional<std::filesystem::path>> dxc_runtime_directory;
+
+    bool operator==(const ConfigurationOverrides&) const = default;
 };
 
 [[nodiscard]] std::vector<std::filesystem::path>

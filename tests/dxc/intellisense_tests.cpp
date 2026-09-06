@@ -99,6 +99,112 @@ TEST_CASE("DXC IntelliSense analyzes HLSL 2021", "[dxc][integration]") {
     }));
 }
 
+TEST_CASE("DXC inlay hints use inferred cursor types and unambiguous signatures",
+          "[dxc][inlay-hints]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.language_version = "202x";
+    const std::string source =
+        "float shade(float value, float bias) { return value + bias; }\n"
+        "float4 main() : SV_Target { auto result = shade(1.0, 2.0); return result.xxxx; }\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+    CHECK(translation_unit.diagnostics().empty());
+
+    const auto first_argument = static_cast<std::uint32_t>(source.find("1.0"));
+    const auto second_argument = static_cast<std::uint32_t>(source.find("2.0"));
+    const auto declaration_argument = static_cast<std::uint32_t>(source.find("float value"));
+    const auto hints = translation_unit.inlay_hints(
+        shader_path, {{.start = 0, .end = static_cast<std::uint32_t>(source.size())}},
+        {{.line = 1, .column = 7, .argument_offsets = {declaration_argument}},
+         {.line = 2, .column = 43, .argument_offsets = {first_argument, second_argument}}},
+        {});
+
+    CHECK(std::ranges::any_of(hints, [](const auto& hint) {
+        return hint.category == hlsl_intellisense::dxc::InlayHintCategory::type &&
+               hint.label == ": float";
+    }));
+    CHECK(std::ranges::any_of(hints, [](const auto& hint) {
+        return hint.category == hlsl_intellisense::dxc::InlayHintCategory::parameter &&
+               hint.label == "value:";
+    }));
+    CHECK(std::ranges::any_of(hints, [](const auto& hint) {
+        return hint.category == hlsl_intellisense::dxc::InlayHintCategory::parameter &&
+               hint.label == "bias:";
+    }));
+    CHECK_FALSE(std::ranges::any_of(hints, [declaration_argument](const auto& hint) {
+        return hint.category == hlsl_intellisense::dxc::InlayHintCategory::parameter &&
+               hint.offset == declaration_argument;
+    }));
+    const auto exclusive_end = translation_unit.inlay_hints(
+        shader_path, {{.start = 0, .end = first_argument}},
+        {{.line = 2, .column = 43, .argument_offsets = {first_argument, second_argument}}},
+        {.types = false, .parameters = true});
+    CHECK(exclusive_end.empty());
+
+    const std::string overloaded = "float shade(float value) { return value; }\n"
+                                   "float shade(int count) { return count; }\n"
+                                   "float4 main() : SV_Target { return shade(1).xxxx; }\n";
+    auto overloaded_unit = intellisense.parse(shader_path, {{shader_path, overloaded}}, options);
+    const auto argument = static_cast<std::uint32_t>(overloaded.find("1)"));
+    const auto ambiguous = overloaded_unit.inlay_hints(
+        shader_path, {{.start = 0, .end = static_cast<std::uint32_t>(overloaded.size())}},
+        {{.line = 3, .column = 36, .argument_offsets = {argument}}},
+        {.types = false, .parameters = true});
+    CHECK(ambiguous.empty());
+}
+
+TEST_CASE("DXC inlay hints expose compiler-reflected layout and register data",
+          "[dxc][inlay-hints][reflection]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.target_profile = "ps_6_6";
+    options.entry_point = "main";
+    const std::string source =
+        "Texture2D<float4> SourceTexture;\n"
+        "SamplerState SourceSampler;\n"
+        "cbuffer Constants { row_major float2x2 transform; float values[2]; };\n"
+        "float4 main(float2 uv : TEXCOORD) : SV_Target {\n"
+        "  return SourceTexture.Sample(SourceSampler, uv) + values[0] + transform[0][0];\n"
+        "}\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+    hlsl_intellisense::dxc::InlayHintOptions hint_options{.types = false,
+                                                          .parameters = false,
+                                                          .matrix_orientation = true,
+                                                          .registers = true,
+                                                          .packed_offsets = true,
+                                                          .array_strides = true};
+    hlsl_intellisense::dxc::InlayHintWork work;
+    const auto split = static_cast<std::uint32_t>(source.find("values"));
+    const auto hints = translation_unit.inlay_hints(
+        shader_path,
+        {{.start = 0, .end = split},
+         {.start = split, .end = static_cast<std::uint32_t>(source.size())}},
+        {}, hint_options, &work);
+
+    CHECK(std::ranges::any_of(hints, [](const auto& hint) {
+        return hint.category == hlsl_intellisense::dxc::InlayHintCategory::matrix_orientation &&
+               hint.label == " row-major";
+    }));
+    CHECK(std::ranges::any_of(hints, [](const auto& hint) {
+        return hint.category == hlsl_intellisense::dxc::InlayHintCategory::packed_offset &&
+               hint.label == " offset 0";
+    }));
+    CHECK(std::ranges::any_of(hints, [](const auto& hint) {
+        return hint.category == hlsl_intellisense::dxc::InlayHintCategory::array_stride &&
+               hint.label == " stride 16";
+    }));
+    CHECK(std::ranges::any_of(hints, [](const auto& hint) {
+        return hint.category == hlsl_intellisense::dxc::InlayHintCategory::register_binding &&
+               hint.label.starts_with(" register(");
+    }));
+    CHECK(work.reflection_compilations == 1);
+    CHECK(work.layout_probes == 1);
+    CHECK(std::adjacent_find(hints.begin(), hints.end(), [](const auto& left, const auto& right) {
+              return left.offset == right.offset && left.category == right.category &&
+                     left.label == right.label;
+          }) == hints.end());
+}
+
 TEST_CASE("DXC IntelliSense computes natural HLSL record layouts", "[dxc][memory-layout]") {
     hlsl_intellisense::dxc::Intellisense intellisense;
     const std::string source = "struct Nested {\n"

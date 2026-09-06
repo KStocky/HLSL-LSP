@@ -2,6 +2,7 @@ using System;
 using System.Threading;
 using System.Threading.Tasks;
 using Nerdbank.Streams;
+using Newtonsoft.Json.Linq;
 using StreamJsonRpc;
 using Xunit;
 
@@ -37,6 +38,32 @@ public sealed class HlslLanguageClientCustomMessageTests : IDisposable
         var completed = await Task.WhenAny(signal, Task.Delay(TimeSpan.FromSeconds(5)))
             .ConfigureAwait(false);
         return completed == signal;
+    }
+
+    [Fact]
+    public void InitializationOptions_IncludeEveryInlayHintCategory()
+    {
+        var hints = new HlslLsp.VisualStudio.Bootstrap.InlayHintOptionsSnapshot(
+            true, false, true, false, true, false, true);
+        var client = new HlslLanguageClient(
+            "2021",
+            string.Empty,
+            string.Empty,
+            hints,
+            (_, _) => Task.CompletedTask,
+            _ => Task.CompletedTask);
+
+        var options = JObject.FromObject(client.InitializationOptions);
+        var actual = options["hlsl"]?["inlayHints"];
+
+        Assert.NotNull(actual);
+        Assert.True(actual.Value<bool>("types"));
+        Assert.False(actual.Value<bool>("parameters"));
+        Assert.True(actual.Value<bool>("matrixOrientation"));
+        Assert.False(actual.Value<bool>("registers"));
+        Assert.True(actual.Value<bool>("packedOffsets"));
+        Assert.False(actual.Value<bool>("arrayStrides"));
+        Assert.True(actual.Value<bool>("activeVariant"));
     }
 
     [Fact]

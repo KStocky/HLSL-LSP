@@ -34,7 +34,17 @@ void test("schema defaults are client defaults, not editor overrides", () => {
   reader.inspections.set("additionalIncludeDirectories", {});
 
   assert.equal(readDefaultLanguageVersion(reader), "2021");
-  assert.deepEqual(readServerSettings(reader), {});
+  assert.deepEqual(readServerSettings(reader), {
+    inlayHints: {
+      types: false,
+      parameters: false,
+      matrixOrientation: false,
+      registers: false,
+      packedOffsets: false,
+      arrayStrides: false,
+      activeVariant: false,
+    },
+  });
 });
 
 void test("explicit empty editor values are preserved to clear inherited settings", () => {
@@ -49,6 +59,15 @@ void test("explicit empty editor values are preserved to clear inherited setting
     preprocessorDefinitions: {},
     additionalIncludeDirectories: [],
     additionalArguments: [],
+    inlayHints: {
+      types: false,
+      parameters: false,
+      matrixOrientation: false,
+      registers: false,
+      packedOffsets: false,
+      arrayStrides: false,
+      activeVariant: false,
+    },
   });
 });
 
@@ -62,6 +81,36 @@ void test("resource and language-specific settings follow VS Code precedence", (
 
   assert.deepEqual(readServerSettings(reader), {
     targetProfile: "cs_6_8",
+    inlayHints: {
+      types: false,
+      parameters: false,
+      matrixOrientation: false,
+      registers: false,
+      packedOffsets: false,
+      arrayStrides: false,
+      activeVariant: false,
+    },
+  });
+});
+
+void test("inlay hint defaults are forwarded as explicit editor settings", () => {
+  const reader = new FakeConfiguration();
+  reader.values.set("inlayHints.types", true);
+  reader.values.set("inlayHints.parameters", true);
+  reader.values.set("inlayHints.matrixOrientation", false);
+  reader.values.set("inlayHints.registers", false);
+  reader.values.set("inlayHints.packedOffsets", false);
+  reader.values.set("inlayHints.arrayStrides", false);
+  reader.values.set("inlayHints.activeVariant", true);
+
+  assert.deepEqual(readServerSettings(reader).inlayHints, {
+    types: true,
+    parameters: true,
+    matrixOrientation: false,
+    registers: false,
+    packedOffsets: false,
+    arrayStrides: false,
+    activeVariant: true,
   });
 });
 
