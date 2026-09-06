@@ -9,8 +9,11 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.VisualStudio;
+using Microsoft.VisualStudio.ComponentModelHost;
+using Microsoft.VisualStudio.Editor;
 using Microsoft.VisualStudio.Shell;
 using Microsoft.VisualStudio.Shell.Interop;
+using Microsoft.VisualStudio.Text;
 using Microsoft.VisualStudio.TextManager.Interop;
 
 namespace HlslLsp.VisualStudio.Bootstrap;
@@ -23,6 +26,8 @@ namespace HlslLsp.VisualStudio.Bootstrap;
 [ProvideToolWindow(typeof(CompilationInfoToolWindow))]
 [ProvideToolWindow(typeof(ResourceBindingsToolWindow))]
 [ProvideToolWindow(typeof(PreprocessorExplorerToolWindow))]
+[ProvideToolWindow(typeof(EntryPointDataFlowToolWindow))]
+[ProvideToolWindow(typeof(CallHierarchyExplorerToolWindow))]
 [ProvideOptionPage(
     typeof(HlslOptionsPage),
     "HLSL-LSP",
@@ -43,6 +48,23 @@ public sealed class HlslBootstrapPackage : AsyncPackage
     private int explicitResourceBindingsRequests;
     private long preprocessorExplorerRequestGeneration;
     private int explicitPreprocessorExplorerRequests;
+    private long entryPointDataFlowRequestGeneration;
+    private readonly EntryPointDataFlowRefreshGate entryPointDataFlowRefreshGate = new();
+    private readonly CoalescingBackgroundRefreshCancellation entryPointDataFlowBackgroundRefreshCancellation =
+        new(TimeSpan.FromSeconds(30));
+    private long callHierarchyRequestGeneration;
+    private readonly EntryPointDataFlowRefreshGate callHierarchyRefreshGate = new();
+    private readonly CoalescingBackgroundRefreshCancellation callHierarchyBackgroundRefreshCancellation =
+        new(TimeSpan.FromSeconds(30));
+    // Resolved lazily, on the UI thread, the first time a call-hierarchy
+    // root position needs to be anchored/re-resolved against a live text
+    // buffer (see EnsureCallHierarchyEditorServicesAsync). Never touched by
+    // any LSP-dependent code path -- these are plain VS editor services,
+    // kept isolated from HlslLanguageClient/StreamJsonRpc exactly like the
+    // rest of this bootstrap package.
+    private IComponentModel callHierarchyComponentModel;
+    private IVsEditorAdaptersFactoryService callHierarchyEditorAdapters;
+    private IVsRunningDocumentTable callHierarchyRunningDocuments;
     public const string PackageGuidString = "5ac7fbe7-1b9f-45eb-bca6-ffb9ae1ab67f";
 
     private static readonly object Gate = new();
@@ -143,6 +165,18 @@ public sealed class HlslBootstrapPackage : AsyncPackage
                         () => ShowPreprocessorExplorerAsync(DisposalToken))
                     .FileAndForget("HlslLsp/ShowPreprocessorExplorer"),
                 new CommandID(commandSet, 0x0104)));
+        commands.AddCommand(
+            new OleMenuCommand(
+                (_, _) => JoinableTaskFactory.RunAsync(
+                        () => ShowEntryPointDataFlowAsync(DisposalToken))
+                    .FileAndForget("HlslLsp/ShowEntryPointDataFlow"),
+                new CommandID(commandSet, 0x0105)));
+        commands.AddCommand(
+            new OleMenuCommand(
+                (_, _) => JoinableTaskFactory.RunAsync(
+                        () => ShowCallHierarchyAsync(DisposalToken))
+                    .FileAndForget("HlslLsp/ShowCallHierarchy"),
+                new CommandID(commandSet, 0x0106)));
     }
 
     private async Task ShowMemoryLayoutAsync(CancellationToken cancellationToken)
@@ -635,6 +669,987 @@ public sealed class HlslBootstrapPackage : AsyncPackage
             cancellationToken,
             window,
             cancellationToken);
+    }
+
+    private async Task ShowEntryPointDataFlowAsync(CancellationToken cancellationToken)
+    {
+        var uri = await GetActiveDocumentUriAsync(cancellationToken);
+        if (uri == null)
+        {
+            await ShowInformationAsync(
+                "Open an HLSL document, then run Tools > HLSL Entry-Point Data Flow.",
+                cancellationToken);
+            return;
+        }
+        entryPointDataFlowRefreshGate.EnterExplicitRequest();
+        try
+        {
+            using (var requestCancellation =
+                   CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+            {
+                requestCancellation.CancelAfter(TimeSpan.FromSeconds(30));
+                await ShowEntryPointDataFlowAsync(
+                    uri,
+                    requestCancellation.Token,
+                    null,
+                    cancellationToken);
+            }
+        }
+        finally
+        {
+            if (entryPointDataFlowRefreshGate.ExitExplicitRequest())
+            {
+                // A save/variant/edit refresh arrived while the explicit
+                // request above was in flight and was deferred rather than
+                // silently dropped (see RefreshEntryPointDataFlowIfOpenAsync
+                // below). Replay it once, now that the explicit request this
+                // deferral protected has finished, so the window can never
+                // be left stale just because a refresh trigger happened to
+                // overlap with an explicit command.
+                await RefreshEntryPointDataFlowIfOpenAsync(null, cancellationToken);
+            }
+        }
+    }
+
+    // Mirrors ShowCompilationInfoAsync/ShowPreprocessorExplorerAsync: the
+    // generation guard ensures a stale response (e.g. from a superseded
+    // variant change or an earlier command invocation) can never overwrite
+    // a newer one. A failed or cancelled request never regresses the window
+    // to the "open a document" placeholder or leaves it stuck: it keeps the
+    // last successful content when one exists, and otherwise shows an
+    // explicit error. Issues its own hlsl/entryPointDataFlow request through
+    // EntryPointDataFlowBridge -- a distinct protocol request, not a
+    // different presentation of an existing one.
+    private async Task ShowEntryPointDataFlowAsync(
+        Uri uri,
+        CancellationToken cancellationToken,
+        EntryPointDataFlowToolWindow existingWindow = null,
+        CancellationToken ambientCancellationToken = default)
+    {
+        var generation = Interlocked.Increment(ref entryPointDataFlowRequestGeneration);
+        // Captured before the request starts, independent of whether the
+        // caller already held a window reference: the explicit Tools command
+        // below always passes existingWindow: null, even when the window is
+        // already open and already showing good content for this exact
+        // document, so using existingWindow's null-ness alone to decide
+        // whether to preserve that content on failure (as a prior version of
+        // this method did) incorrectly erased it on every failed manual
+        // retry. This performs a non-creating lookup only -- it must never
+        // itself create or show the window, which stays governed solely by
+        // ShowToolWindowAsync below, exactly as before.
+        var priorWindow = existingWindow;
+        if (priorWindow == null)
+        {
+            await JoinableTaskFactory.SwitchToMainThreadAsync(ambientCancellationToken);
+            priorWindow = await FindToolWindowAsync(
+                typeof(EntryPointDataFlowToolWindow),
+                0,
+                false,
+                ambientCancellationToken) as EntryPointDataFlowToolWindow;
+        }
+        var hadMatchingDocument = EntryPointDataFlowRefreshLogic.ShouldPreserveContentOnFailure(
+            priorWindow?.DocumentUri,
+            uri);
+        EntryPointDataFlowModel report = null;
+        string failureMessage = null;
+        try
+        {
+            report = await EntryPointDataFlowBridge.RequestAsync(uri, cancellationToken);
+        }
+        catch (OperationCanceledException) when (ambientCancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (OperationCanceledException)
+        {
+            failureMessage = "The entry-point data flow request was cancelled.";
+        }
+        catch (Exception error)
+        {
+            failureMessage =
+                "Could not retrieve entry-point data flow information: " + error.Message;
+        }
+        if (generation != Interlocked.Read(ref entryPointDataFlowRequestGeneration))
+        {
+            return;
+        }
+        // The request token may represent the bounded RPC timeout. Once a
+        // result or failure message is ready, use only the ambient package
+        // token for presentation so a timeout can still be shown to the user.
+        await JoinableTaskFactory.SwitchToMainThreadAsync(ambientCancellationToken);
+        // priorWindow above is used only for the preserve-on-failure
+        // decision, never substituted in here: when existingWindow is null
+        // (the explicit Tools-command path), ShowToolWindowAsync must
+        // always run so an existing-but-hidden pane is revealed. Using
+        // priorWindow as a stand-in for window would let ShowToolWindowAsync
+        // be skipped whenever FindToolWindowAsync above happened to find an
+        // already-constructed (but not necessarily visible/foregrounded)
+        // pane instance, silently leaving a hidden window hidden. A
+        // background refresh (which always passes its own existingWindow)
+        // is unaffected and still never shows/forces focus.
+        var window = existingWindow;
+        if (EntryPointDataFlowRefreshLogic.ShouldRevealToolWindow(existingWindow != null))
+        {
+            window = await ShowToolWindowAsync(
+                typeof(EntryPointDataFlowToolWindow),
+                0,
+                true,
+                ambientCancellationToken) as EntryPointDataFlowToolWindow;
+        }
+        if (generation != Interlocked.Read(ref entryPointDataFlowRequestGeneration))
+        {
+            return;
+        }
+        if (failureMessage != null)
+        {
+            window?.SetError(uri, failureMessage, hadMatchingDocument);
+            return;
+        }
+        if (report == null)
+        {
+            window?.SetError(
+                uri,
+                "The HLSL language server is not ready to provide entry-point data flow information.",
+                hadMatchingDocument);
+            return;
+        }
+        window?.SetReport(uri, report);
+    }
+
+    // Invoked after an active-variant selection, a debounced unsaved edit to
+    // any open HLSL/header buffer or shadertoolsconfig.json, or a document
+    // save. Only refreshes an already-open window. A save is treated as
+    // relevant conservatively, by file type (a configured HLSL/header
+    // extension, or shadertoolsconfig.json by name) rather than requiring an
+    // exact match against the window's own root document: an #include'd
+    // file's declarations/global accesses are reported against their own
+    // uri, and a shadertoolsconfig.json change can change the active
+    // variant's entry point/defines/include paths entirely, so restricting
+    // this to the root document alone would leave the window stale after
+    // exactly the changes that matter most. savedFilePath is null for a
+    // variant change or a debounced edit refresh, which are always treated
+    // as relevant once the window is open.
+    public async Task RefreshEntryPointDataFlowIfOpenAsync(
+        string savedFilePath,
+        CancellationToken cancellationToken)
+    {
+        // A background save/variant/edit refresh must never supersede an
+        // explicit Tools command the user is waiting for, but it must also
+        // never be silently discarded: record it so ShowEntryPointDataFlowAsync's
+        // explicit-command overload can replay a single bounded refresh once
+        // that command completes, ensuring the window can never be left
+        // stale immediately after an explicit request finishes.
+        if (!entryPointDataFlowRefreshGate.TryBeginBackgroundRefresh())
+        {
+            // A background save/variant/edit refresh must never supersede
+            // an explicit Tools command the user is waiting for; the gate
+            // above records this refresh as pending rather than dropping it
+            // (see ShowEntryPointDataFlowAsync's explicit-command overload,
+            // which replays it once the explicit request finishes).
+            return;
+        }
+        await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+        if (await FindToolWindowAsync(
+                    typeof(EntryPointDataFlowToolWindow),
+                    0,
+                    false,
+                    cancellationToken)
+                is not EntryPointDataFlowToolWindow window ||
+            window.DocumentUri == null)
+        {
+            return;
+        }
+        if (savedFilePath != null && !IsHlslOrConfigRelevantPath(savedFilePath))
+        {
+            return;
+        }
+        // Re-check after the asynchronous UI/tool-window lookup. An explicit
+        // command may have started while this background refresh was
+        // yielding; defer to it exactly as above rather than dropping this
+        // refresh outright.
+        if (!entryPointDataFlowRefreshGate.TryBeginBackgroundRefresh())
+        {
+            return;
+        }
+        // Bounds this refresh to a fixed timeout and coalesces it with any
+        // earlier still-in-flight background refresh for this same window
+        // (a burst of triggers -- e.g. a save arriving while a debounced
+        // unsaved-edit refresh is still outstanding -- must not let
+        // superseded requests accumulate; see CoalescingBackgroundRefreshCancellation).
+        // The ambient cancellationToken is preserved separately below so a
+        // timeout/coalescing cancellation still allows presentation logic
+        // to run against the real package-lifetime token.
+        var refreshCancellation =
+            entryPointDataFlowBackgroundRefreshCancellation.BeginNext(cancellationToken);
+        await ShowEntryPointDataFlowAsync(
+            window.DocumentUri,
+            refreshCancellation.Token,
+            window,
+            cancellationToken);
+    }
+
+    // Conservative relevance test for a saved file path used by
+    // RefreshEntryPointDataFlowIfOpenAsync above: a configured HLSL/header
+    // extension, or a file literally named shadertoolsconfig.json regardless
+    // of its folder, both of which can change the reported data flow for the
+    // currently shown document even though neither is that document itself.
+    // Delegates to EntryPointDataFlowRefreshLogic (a pure, unit-tested
+    // helper) for the actual decision; this wrapper only supplies the
+    // UI-thread-affine configured-extensions lookup.
+    private bool IsHlslOrConfigRelevantPath(string path)
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        return EntryPointDataFlowRefreshLogic.IsHlslOrConfigRelevantPath(
+            path,
+            ParseExtensions(GetOptions().FileExtensions));
+    }
+
+    // Lazily resolves the plain VS editor services needed to anchor/re-
+    // resolve a call-hierarchy root position against a live text buffer
+    // (see TryGetOpenCallHierarchyBuffer/CreateRootTrackingPoint below).
+    // Resolved at most once per package instance; a failure to resolve any
+    // of them is never fatal -- callers simply fall back to a less precise
+    // root position source (see CallHierarchyRootPositionResolver). These
+    // are plain VS editor services already bundled by Microsoft.VisualStudio.SDK
+    // (no new package reference), kept entirely isolated from
+    // HlslLanguageClient/StreamJsonRpc, exactly like the rest of this
+    // bootstrap package.
+    private async Task EnsureCallHierarchyEditorServicesAsync(CancellationToken cancellationToken)
+    {
+        await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+        callHierarchyComponentModel ??=
+            await GetServiceAsync(typeof(SComponentModel)) as IComponentModel;
+        callHierarchyEditorAdapters ??=
+            callHierarchyComponentModel?.GetService<IVsEditorAdaptersFactoryService>();
+        callHierarchyRunningDocuments ??=
+            await GetServiceAsync(typeof(SVsRunningDocumentTable)) as IVsRunningDocumentTable;
+    }
+
+    // Looks up the ITextBuffer currently backing an open document by its
+    // file path, independent of which view (if any) is active -- the
+    // call-hierarchy root document need not still be the focused editor
+    // when a background refresh runs. Returns null (never throws) when the
+    // document is not open, or the editor services above could not be
+    // resolved; both are treated identically to "no live buffer to anchor
+    // against" by callers.
+    private ITextBuffer TryGetOpenCallHierarchyBuffer(Uri documentUri)
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        if (callHierarchyRunningDocuments == null || callHierarchyEditorAdapters == null)
+        {
+            return null;
+        }
+        string filePath;
+        try
+        {
+            filePath = documentUri.LocalPath;
+        }
+        catch (InvalidOperationException)
+        {
+            return null;
+        }
+        if (ErrorHandler.Failed(
+                callHierarchyRunningDocuments.FindAndLockDocument(
+                    (uint)_VSRDTFLAGS.RDT_NoLock,
+                    filePath,
+                    out _,
+                    out _,
+                    out var docData,
+                    out _)) ||
+            docData == IntPtr.Zero)
+        {
+            return null;
+        }
+        try
+        {
+            return Marshal.GetObjectForIUnknown(docData) is IVsTextBuffer adapter
+                ? callHierarchyEditorAdapters.GetDocumentBuffer(adapter)
+                : null;
+        }
+        finally
+        {
+            Marshal.Release(docData);
+        }
+    }
+
+    // Creates a live anchor for (line, character) in buffer, tracking
+    // edits made anywhere before it so a later background refresh can
+    // re-resolve the *same* logical position rather than a stale raw
+    // line/character (see CallHierarchyRootPositionResolver/
+    // CallHierarchyExplorerToolWindow.RootTrackingPoint).
+    // PointTrackingMode.Positive mirrors how the editor's own caret tracks
+    // a position of interest: text inserted exactly at the anchored offset
+    // shifts the anchor forward with it, rather than leaving it stranded
+    // before newly typed content. Returns null (never throws) when
+    // line/character do not correspond to a valid position in buffer's
+    // current snapshot.
+    private static ITrackingPoint CreateRootTrackingPoint(ITextBuffer buffer, int line, int character)
+    {
+        var snapshot = buffer.CurrentSnapshot;
+        if (line < 0 || line >= snapshot.LineCount)
+        {
+            return null;
+        }
+        var snapshotLine = snapshot.GetLineFromLineNumber(line);
+        if (character < 0 || character > snapshotLine.LengthIncludingLineBreak)
+        {
+            return null;
+        }
+        var position = snapshotLine.Start.Position + character;
+        if (position > snapshot.Length)
+        {
+            return null;
+        }
+        return snapshot.CreateTrackingPoint(position, PointTrackingMode.Positive);
+    }
+
+    // Translates trackingPoint to a (line, character) tuple against its
+    // buffer's CURRENT snapshot -- the whole point of anchoring with an
+    // ITrackingPoint is that this reflects any inserts/deletes made
+    // anywhere before it since it was created. Returns null (never throws)
+    // when trackingPoint is null.
+    private static (int Line, int Character)? ResolveTrackedPosition(ITrackingPoint trackingPoint)
+    {
+        if (trackingPoint == null)
+        {
+            return null;
+        }
+        var snapshot = trackingPoint.TextBuffer.CurrentSnapshot;
+        var point = trackingPoint.GetPoint(snapshot);
+        var containingLine = point.GetContainingLine();
+        return (containingLine.LineNumber, point.Position - containingLine.Start.Position);
+    }
+
+    // The custom Call Hierarchy surface (Tools > HLSL Call Hierarchy):
+    // Visual Studio 17.14's generic ILanguageClient infrastructure does not
+    // route the editor's built-in View Call Hierarchy command to any
+    // language client, regardless of the callHierarchyProvider capability
+    // it advertises -- there is no bespoke call-hierarchy hookup in that
+    // SDK the way there is for hover/signature-help/go-to-definition. This
+    // command, its tool window, and the three requests below
+    // (textDocument/prepareCallHierarchy, then callHierarchy/incomingCalls
+    // and callHierarchy/outgoingCalls -- see docs/call-hierarchy.md) are
+    // the custom replacement.
+    private async Task ShowCallHierarchyAsync(CancellationToken cancellationToken)
+    {
+        await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+        var textManager = await GetServiceAsync(typeof(SVsTextManager)) as IVsTextManager;
+        if (textManager == null ||
+            ErrorHandler.Failed(textManager.GetActiveView(1, null, out var view)) ||
+            view == null ||
+            ErrorHandler.Failed(view.GetCaretPos(out var line, out var character)) ||
+            ErrorHandler.Failed(view.GetBuffer(out var lines)) ||
+            lines is not IVsUserData userData)
+        {
+            await ShowInformationAsync(
+                "Open an HLSL document, place the caret on a function, then run " +
+                "Tools > HLSL Call Hierarchy.",
+                cancellationToken);
+            return;
+        }
+        var monikerKey = VSConstants.VsTextBufferUserDataGuid.VsBufferMoniker_guid;
+        if (ErrorHandler.Failed(userData.GetData(ref monikerKey, out var value)) ||
+            value is not string moniker)
+        {
+            await ShowInformationAsync(
+                "Open an HLSL document, place the caret on a function, then run " +
+                "Tools > HLSL Call Hierarchy.",
+                cancellationToken);
+            return;
+        }
+        var uri = new Uri(Path.GetFullPath(moniker));
+
+        // Anchors the explicit request's caret position in the live
+        // buffer so later background refreshes can re-resolve the same
+        // logical position even after unsaved edits made anywhere before
+        // it (see CreateRootTrackingPoint/CallHierarchyRootPositionResolver).
+        // A null tracking point (editor services unavailable, or the
+        // position somehow out of range) is always safe: refreshes simply
+        // fall back to the root item's own SelectionRange, or the raw
+        // caret position captured here.
+        await EnsureCallHierarchyEditorServicesAsync(cancellationToken);
+        var buffer = lines is IVsTextBuffer bufferAdapter
+            ? callHierarchyEditorAdapters?.GetDocumentBuffer(bufferAdapter)
+            : null;
+        var rootTrackingPoint = buffer != null
+            ? CreateRootTrackingPoint(buffer, line, character)
+            : null;
+
+        callHierarchyRefreshGate.EnterExplicitRequest();
+        try
+        {
+            using (var requestCancellation =
+                   CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+            {
+                requestCancellation.CancelAfter(TimeSpan.FromSeconds(30));
+                await EstablishCallHierarchyRootAsync(
+                    uri,
+                    line,
+                    character,
+                    rootTrackingPoint,
+                    requestCancellation.Token,
+                    cancellationToken);
+            }
+        }
+        finally
+        {
+            if (callHierarchyRefreshGate.ExitExplicitRequest())
+            {
+                // Mirrors ShowEntryPointDataFlowAsync: a refresh trigger that
+                // arrived while this explicit request was in flight was
+                // deferred, not dropped -- replay it once now.
+                await RefreshCallHierarchyIfOpenAsync(null, cancellationToken);
+            }
+        }
+    }
+
+    // Resolves the callable at (uri, line, character) via
+    // textDocument/prepareCallHierarchy, then fetches its incoming and
+    // outgoing calls, and always shows/reveals the tool window (an explicit
+    // Tools-command invocation must never leave an existing-but-hidden pane
+    // hidden -- there is no "existing window" preservation concern here the
+    // way ShowEntryPointDataFlowAsync has, since establishing a *new* root
+    // always intentionally replaces whatever was shown before).
+    private async Task EstablishCallHierarchyRootAsync(
+        Uri uri,
+        int line,
+        int character,
+        ITrackingPoint rootTrackingPoint,
+        CancellationToken cancellationToken,
+        CancellationToken ambientCancellationToken)
+    {
+        var generation = Interlocked.Increment(ref callHierarchyRequestGeneration);
+        IReadOnlyList<CallHierarchyItemModel> prepared = null;
+        string failureMessage = null;
+        try
+        {
+            prepared = await CallHierarchyBridge.PrepareAsync(uri, line, character, cancellationToken);
+        }
+        catch (OperationCanceledException) when (ambientCancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (OperationCanceledException)
+        {
+            failureMessage = "The call hierarchy request was cancelled.";
+        }
+        catch (CallHierarchyContentModifiedException)
+        {
+            failureMessage = CallHierarchyExplorerDisplay.StaleItemMessage();
+        }
+        catch (Exception error)
+        {
+            failureMessage = CallHierarchyExplorerDisplay.RequestFailedMessage(error.Message);
+        }
+        if (generation != Interlocked.Read(ref callHierarchyRequestGeneration))
+        {
+            return;
+        }
+
+        // The server guarantees at most one element (see
+        // docs/call-hierarchy.md), so "the first item, or not-callable" is
+        // never actually ambiguous.
+        var item = failureMessage == null && prepared != null && prepared.Count > 0
+            ? prepared[0]
+            : null;
+        CallHierarchyFrame frame = null;
+        if (failureMessage == null && item != null)
+        {
+            (frame, failureMessage) = await FetchCallHierarchyFrameAsync(
+                item,
+                cancellationToken,
+                ambientCancellationToken);
+        }
+        if (generation != Interlocked.Read(ref callHierarchyRequestGeneration))
+        {
+            return;
+        }
+
+        await JoinableTaskFactory.SwitchToMainThreadAsync(ambientCancellationToken);
+        var window = await ShowToolWindowAsync(
+            typeof(CallHierarchyExplorerToolWindow),
+            0,
+            true,
+            ambientCancellationToken) as CallHierarchyExplorerToolWindow;
+        WireCallHierarchyWindow(window, ambientCancellationToken);
+        if (generation != Interlocked.Read(ref callHierarchyRequestGeneration))
+        {
+            return;
+        }
+        if (failureMessage == null && item == null)
+        {
+            // An authoritative "no callable symbol here" result, not a
+            // transient failure -- always overwrites, mirroring
+            // EntryPointDataFlowToolWindow's found:false handling.
+            window?.SetNotCallable();
+            return;
+        }
+        if (failureMessage != null)
+        {
+            if (window?.CurrentItem != null)
+            {
+                window.SetBannerOnCurrent(failureMessage);
+            }
+            else
+            {
+                window?.SetGlobalError(failureMessage);
+            }
+            return;
+        }
+        window?.SetRoot(uri, line, character, frame, rootTrackingPoint);
+    }
+
+    // Invoked when the user clicks "Explore calls" on a caller/callee row:
+    // re-centers the tool window on that item by fetching its own
+    // incoming/outgoing calls. The item's opaque `data` (identity envelope)
+    // is already known from the previous response, so no new
+    // prepareCallHierarchy call is needed -- see docs/call-hierarchy.md.
+    // Treated as an explicit, gated, timeout-bounded operation exactly like
+    // the Tools command itself, since a concurrent background refresh must
+    // not silently drop or be dropped by it. A failed drill-in never
+    // mutates the tool window's persisted state (unlike a failed
+    // root/refresh): the currently displayed frame is left exactly as-is
+    // and the failure is surfaced through a one-off message box, so a bad
+    // drill-in attempt can never corrupt or blank out an otherwise good
+    // view.
+    internal async Task PerformCallHierarchyDrillInAsync(
+        CallHierarchyItemModel item,
+        CallHierarchySection section,
+        CancellationToken cancellationToken)
+    {
+        if (item == null)
+        {
+            return;
+        }
+        // Captured before the network round-trip below so a concurrent
+        // Back click (or another drill-in/refresh) that changes the stack
+        // while this is in flight can be detected and rejected once the
+        // frame is ready to push (see the NavigationRevision check before
+        // PushFrame). Uses a non-creating lookup, mirroring
+        // RefreshCallHierarchyIfOpenAsync -- a drill-in only ever
+        // originates from a row click within an already-open window, so
+        // windowBeforeFetch is null only in the defensive/unreachable case
+        // of the window having been closed between the click and here; ??
+        // 0 matches a freshly (re-)created window's own starting
+        // revision, so that edge case still pushes correctly rather than
+        // spuriously rejecting the very first drill-in.
+        await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+        var windowBeforeFetch = await FindToolWindowAsync(
+                typeof(CallHierarchyExplorerToolWindow),
+                0,
+                false,
+                cancellationToken)
+            as CallHierarchyExplorerToolWindow;
+        var revisionAtStart = windowBeforeFetch?.NavigationRevision ?? 0;
+        callHierarchyRefreshGate.EnterExplicitRequest();
+        try
+        {
+            using (var requestCancellation =
+                   CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+            {
+                requestCancellation.CancelAfter(TimeSpan.FromSeconds(30));
+                var generation = Interlocked.Increment(ref callHierarchyRequestGeneration);
+                var (frame, failureMessage) = await FetchCallHierarchyFrameAsync(
+                    item,
+                    requestCancellation.Token,
+                    cancellationToken);
+                if (generation != Interlocked.Read(ref callHierarchyRequestGeneration))
+                {
+                    return;
+                }
+                await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+                if (generation != Interlocked.Read(ref callHierarchyRequestGeneration))
+                {
+                    return;
+                }
+                if (failureMessage != null)
+                {
+                    VsShellUtilities.ShowMessageBox(
+                        this,
+                        failureMessage,
+                        "HLSL Call Hierarchy",
+                        OLEMSGICON.OLEMSGICON_WARNING,
+                        OLEMSGBUTTON.OLEMSGBUTTON_OK,
+                        OLEMSGDEFBUTTON.OLEMSGDEFBUTTON_FIRST);
+                    return;
+                }
+                var window = await ShowToolWindowAsync(
+                    typeof(CallHierarchyExplorerToolWindow),
+                    0,
+                    true,
+                    cancellationToken) as CallHierarchyExplorerToolWindow;
+                WireCallHierarchyWindow(window, cancellationToken);
+                if (generation != Interlocked.Read(ref callHierarchyRequestGeneration))
+                {
+                    return;
+                }
+                if (window != null && window.NavigationRevision != revisionAtStart)
+                {
+                    // The user navigated (most importantly, pressed Back)
+                    // while this drill-in's network round-trip was in
+                    // flight: pushing this frame now would land on top of
+                    // a stack the user has already moved away from,
+                    // silently overriding their navigation. Discard it
+                    // rather than applying a decision made against an
+                    // outdated stack.
+                    return;
+                }
+                window?.PushFrame(item, section, frame);
+            }
+        }
+        finally
+        {
+            if (callHierarchyRefreshGate.ExitExplicitRequest())
+            {
+                await RefreshCallHierarchyIfOpenAsync(null, cancellationToken);
+            }
+        }
+    }
+
+    // Invoked after an active-variant selection, a document save, or a
+    // debounced unsaved edit to any open HLSL/header buffer or
+    // shadertoolsconfig.json (see RefreshVariantDependentWindows/
+    // OnAfterSave/DebounceUnsavedHlslBufferRefreshAsync in
+    // HlslLspActivator). Every one of those triggers is exactly the kind of
+    // change that bumps the root item's own generation (see
+    // docs/call-hierarchy.md), so simply round-tripping the previously
+    // resolved CallHierarchyItem's opaque `data` back into incomingCalls/
+    // outgoingCalls (as an earlier version of this method did) would be
+    // guaranteed to fail with ContentModified every single time this
+    // refresh actually runs -- it could never succeed once triggered. This
+    // re-runs textDocument/prepareCallHierarchy at the originally captured
+    // root position to obtain a genuinely fresh item, confirms it is still
+    // the *same* declaration as the currently displayed root (see
+    // CallHierarchyItemIdentity.IsSameCallable -- a tracking point can land
+    // on a different callable after the original was deleted/replaced, or
+    // after the document was closed and reopened with different content),
+    // then, if the user had drilled deeper than the root, attempts to
+    // relocate each drilled item within its parent's freshly fetched list
+    // by stable cross-generation identity (see CallHierarchyItemIdentity).
+    // The rebuild is all-or-nothing: on full success the entire stack is
+    // replaced in place (preserving depth); if the root itself is no
+    // longer callable, an authoritative not-callable result is shown; if
+    // the root's identity cannot be confirmed, or on any other failure,
+    // the last successful content is preserved with a banner; if only the
+    // drilled path can't be relocated, the view resets to the fresh root
+    // with an explanatory banner rather than showing a partially-rebuilt or
+    // possibly-wrong path. Only refreshes an already-open window with an
+    // established root; never creates or shows one. Uses the same broad,
+    // conservative relevance test as RefreshEntryPointDataFlowIfOpenAsync (a
+    // configured HLSL/header extension, or shadertoolsconfig.json by name)
+    // since an #include'd dependency or a variant/config change can change
+    // the current item's own callers/callees or generation without the
+    // currently displayed item's own document changing.
+    public async Task RefreshCallHierarchyIfOpenAsync(
+        string savedFilePath,
+        CancellationToken cancellationToken)
+    {
+        if (!callHierarchyRefreshGate.TryBeginBackgroundRefresh())
+        {
+            return;
+        }
+        await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+        if (await FindToolWindowAsync(
+                    typeof(CallHierarchyExplorerToolWindow),
+                    0,
+                    false,
+                    cancellationToken)
+                is not CallHierarchyExplorerToolWindow window ||
+            window.RootDocumentUri == null)
+        {
+            return;
+        }
+        if (savedFilePath != null && !IsHlslOrConfigRelevantPath(savedFilePath))
+        {
+            return;
+        }
+        // Re-check after the asynchronous UI/tool-window lookup, matching
+        // RefreshEntryPointDataFlowIfOpenAsync's own double-check.
+        if (!callHierarchyRefreshGate.TryBeginBackgroundRefresh())
+        {
+            return;
+        }
+
+        // Captured before any request is (re-)issued: the raw root
+        // position/document/drill-in path last established, and the
+        // navigation revision at that exact moment (see
+        // CallHierarchyExplorerState.Revision). If the user navigates
+        // (most importantly, presses Back) before this refresh finishes,
+        // the revision will have moved on by the time this method is ready
+        // to apply its result, and that result must then be discarded
+        // rather than silently overwriting/undoing the user's navigation
+        // (checked just before committing, below).
+        var rootUri = window.RootDocumentUri;
+        var rootLine = window.RootLine;
+        var rootCharacter = window.RootCharacter;
+        var path = window.CapturePathSteps();
+        var revisionAtStart = window.NavigationRevision;
+
+        // Resolve the position to re-run prepareCallHierarchy at: prefer a
+        // live tracking-point translation, which alone correctly follows
+        // unsaved inserts/deletes made anywhere before the root since it
+        // was established; fall back to the last resolved root item's own
+        // compiler-supplied SelectionRange when the tracking point's
+        // buffer is no longer the live buffer for this document (closed
+        // and reopened, or externally reloaded -- a new buffer identity
+        // the old tracking point cannot follow); finally fall back to the
+        // raw position captured at root establishment (see
+        // CallHierarchyRootPositionResolver).
+        await EnsureCallHierarchyEditorServicesAsync(cancellationToken);
+        var liveBuffer = TryGetOpenCallHierarchyBuffer(rootUri);
+        var trackedPosition =
+            liveBuffer != null &&
+            window.RootTrackingPoint != null &&
+            ReferenceEquals(liveBuffer, window.RootTrackingPoint.TextBuffer)
+                ? ResolveTrackedPosition(window.RootTrackingPoint)
+                : null;
+        (int Line, int Character)? fallbackSelectionStart = null;
+        var rootItemSelectionStart = window.RootItem?.SelectionRange?.Start;
+        if (rootItemSelectionStart != null)
+        {
+            fallbackSelectionStart = ((int)rootItemSelectionStart.Line, (int)rootItemSelectionStart.Character);
+        }
+        var (resolvedLine, resolvedCharacter) = CallHierarchyRootPositionResolver.ResolveRefreshPosition(
+            trackedPosition,
+            fallbackSelectionStart,
+            rootLine,
+            rootCharacter);
+
+        // Bounds this refresh to a fixed timeout and coalesces it with any
+        // earlier still-in-flight background refresh for this window (see
+        // CoalescingBackgroundRefreshCancellation) so a burst of triggers
+        // cannot accumulate unboundedly in-flight requests.
+        var refreshCancellation =
+            callHierarchyBackgroundRefreshCancellation.BeginNext(cancellationToken);
+        var token = refreshCancellation.Token;
+        var generation = Interlocked.Increment(ref callHierarchyRequestGeneration);
+
+        IReadOnlyList<CallHierarchyItemModel> prepared = null;
+        string failureMessage = null;
+        try
+        {
+            prepared = await CallHierarchyBridge.PrepareAsync(rootUri, resolvedLine, resolvedCharacter, token);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (OperationCanceledException)
+        {
+            failureMessage = "The call hierarchy request was cancelled.";
+        }
+        catch (CallHierarchyContentModifiedException)
+        {
+            failureMessage = CallHierarchyExplorerDisplay.StaleItemMessage();
+        }
+        catch (Exception error)
+        {
+            failureMessage = CallHierarchyExplorerDisplay.RequestFailedMessage(error.Message);
+        }
+        if (generation != Interlocked.Read(ref callHierarchyRequestGeneration))
+        {
+            // Never treat a guaranteed-stale, superseded response as
+            // successful: a newer request (explicit or background) has
+            // already taken over, so this one must simply stop without
+            // touching the window at all.
+            return;
+        }
+
+        // The server guarantees at most one element (see
+        // docs/call-hierarchy.md).
+        var rootItem = failureMessage == null && prepared != null && prepared.Count > 0
+            ? prepared[0]
+            : null;
+
+        // Before trusting this freshly re-prepared item as a continuation
+        // of the currently displayed root, confirm it is actually the
+        // *same* declaration (see CallHierarchyItemIdentity.IsSameCallable)
+        // -- a tracking point (or its fallbacks) can land on an unrelated
+        // callable after the original was deleted, replaced by a
+        // differently-named-or-typed declaration, or the document was
+        // closed and reopened with different content at that position.
+        // Reusing failureMessage here deliberately routes this into the
+        // exact same "preserve last successful content, show a banner"
+        // handling as any other transient failure below -- this is not a
+        // transient error, but the safe behavior (never silently switch
+        // roots) is identical.
+        if (failureMessage == null &&
+            rootItem != null &&
+            !CallHierarchyItemIdentity.IsSameCallable(window.RootItem, rootItem))
+        {
+            failureMessage = CallHierarchyExplorerDisplay.RootIdentityChangedMessage();
+        }
+
+        CallHierarchyFrame rootFrame = null;
+        if (failureMessage == null && rootItem != null)
+        {
+            (rootFrame, failureMessage) = await FetchCallHierarchyFrameAsync(rootItem, token, cancellationToken);
+        }
+        if (generation != Interlocked.Read(ref callHierarchyRequestGeneration))
+        {
+            return;
+        }
+
+        // A fresh anchor for the root actually resolved above, used to
+        // update the window's tracked position going forward (a stale
+        // caret-derived resolvedLine/resolvedCharacter should not linger
+        // as the anchor once a compiler-verified SelectionRange for the
+        // same declaration is available). liveBuffer above is still the
+        // correct buffer to anchor against: rootUri itself never changes
+        // across a refresh, only the position within it might.
+        var anchorLine = rootItem?.SelectionRange?.Start != null
+            ? (int)rootItem.SelectionRange.Start.Line
+            : resolvedLine;
+        var anchorCharacter = rootItem?.SelectionRange?.Start != null
+            ? (int)rootItem.SelectionRange.Start.Character
+            : resolvedCharacter;
+        var freshTrackingPoint = liveBuffer != null
+            ? CreateRootTrackingPoint(liveBuffer, anchorLine, anchorCharacter)
+            : null;
+
+        // Attempt to rebuild the user's drill-in path (if any) underneath
+        // the freshly fetched root, one step at a time. All-or-nothing: any
+        // step that cannot be relocated (removed/renamed declaration) or
+        // whose own frame cannot be fetched abandons the rebuild in favor
+        // of resetting to the fresh root with an explanation.
+        List<CallHierarchyFrame> rebuiltFrames = null;
+        List<CallHierarchyPathStep> rebuiltSteps = null;
+        string rebuildFailureMessage = null;
+        if (failureMessage == null && rootFrame != null && path.Count > 0)
+        {
+            rebuiltFrames = new List<CallHierarchyFrame> { rootFrame };
+            rebuiltSteps = new List<CallHierarchyPathStep>();
+            var parentFrame = rootFrame;
+            foreach (var step in path)
+            {
+                var matched = CallHierarchyItemIdentity.FindMatch(parentFrame, step);
+                if (matched == null)
+                {
+                    rebuiltFrames = null;
+                    rebuildFailureMessage = CallHierarchyExplorerDisplay.PathNotRelocatedMessage();
+                    break;
+                }
+                var (stepFrame, stepFailureMessage) =
+                    await FetchCallHierarchyFrameAsync(matched, token, cancellationToken);
+                if (generation != Interlocked.Read(ref callHierarchyRequestGeneration))
+                {
+                    return;
+                }
+                if (stepFrame == null)
+                {
+                    rebuiltFrames = null;
+                    rebuildFailureMessage = stepFailureMessage
+                        ?? CallHierarchyExplorerDisplay.PathNotRelocatedMessage();
+                    break;
+                }
+                rebuiltFrames.Add(stepFrame);
+                rebuiltSteps.Add(step);
+                parentFrame = stepFrame;
+            }
+        }
+
+        await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+        if (generation != Interlocked.Read(ref callHierarchyRequestGeneration))
+        {
+            return;
+        }
+        if (window.NavigationRevision != revisionAtStart)
+        {
+            // The user navigated (most importantly, pressed Back) while
+            // this refresh was in flight: applying its result now --
+            // whatever it is -- would silently overwrite or undo that
+            // navigation. Discard it outright rather than reconciling a
+            // now-outdated result with a since-changed stack; the next
+            // refresh trigger (or a manual Tools command) will re-capture
+            // a correct revision and path from the user's actual current
+            // position.
+            return;
+        }
+        if (failureMessage == null && rootItem == null)
+        {
+            // The previously callable root no longer resolves to anything
+            // callable (e.g. the function was deleted or renamed) -- an
+            // authoritative result, not a transient failure, exactly like
+            // EstablishCallHierarchyRootAsync's own not-callable handling.
+            window.SetNotCallable();
+            return;
+        }
+        if (failureMessage != null)
+        {
+            // Preserve the last successful content on a transient
+            // failure/stale response -- only overlay a banner, matching the
+            // "preserve last successful content on transient errors"
+            // contract established for entry-point data flow.
+            window.SetBannerOnCurrent(failureMessage);
+            return;
+        }
+        if (rebuiltFrames != null)
+        {
+            // The full drilled path was successfully relocated underneath
+            // the fresh root: replace the entire stack in one step,
+            // preserving the user's drill-in depth and clearing any earlier
+            // banner, since this is a fully fresh, successful result. The
+            // root anchor is refreshed too, so a *future* refresh tracks
+            // forward from here rather than the now-outdated position.
+            window.UpdateRootAnchor(rootUri, anchorLine, anchorCharacter, freshTrackingPoint);
+            window.ReplaceAllFrames(rebuiltFrames, rebuiltSteps);
+            return;
+        }
+        // Either there was no drill-in path to rebuild (a root-only refresh
+        // fully succeeds with the fresh root alone) or the path could not be
+        // relocated: reset to the fresh root either way, but only attach an
+        // explanatory banner when a path actually failed to relocate.
+        window.SetRoot(rootUri, anchorLine, anchorCharacter, rootFrame, freshTrackingPoint);
+        if (rebuildFailureMessage != null)
+        {
+            window.SetBannerOnCurrent(rebuildFailureMessage);
+        }
+    }
+
+    private static async Task<(CallHierarchyFrame Frame, string FailureMessage)> FetchCallHierarchyFrameAsync(
+        CallHierarchyItemModel item,
+        CancellationToken cancellationToken,
+        CancellationToken ambientCancellationToken)
+    {
+        try
+        {
+            var incomingCalls =
+                await CallHierarchyBridge.RequestIncomingCallsAsync(item, cancellationToken);
+            var outgoingCalls =
+                await CallHierarchyBridge.RequestOutgoingCallsAsync(item, cancellationToken);
+            return (new CallHierarchyFrame(item, incomingCalls, outgoingCalls), null);
+        }
+        catch (OperationCanceledException) when (ambientCancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (OperationCanceledException)
+        {
+            return (null, "The call hierarchy request was cancelled.");
+        }
+        catch (CallHierarchyContentModifiedException)
+        {
+            return (null, CallHierarchyExplorerDisplay.StaleItemMessage());
+        }
+        catch (Exception error)
+        {
+            return (null, CallHierarchyExplorerDisplay.RequestFailedMessage(error.Message));
+        }
+    }
+
+    // Wires the tool window's Back/"Explore calls" interactions to this
+    // package exactly once per window instance (EnsureWired itself is
+    // idempotent, since ShowToolWindowAsync/FindToolWindowAsync return the
+    // same singleton pane across every invocation).
+    private void WireCallHierarchyWindow(
+        CallHierarchyExplorerToolWindow window,
+        CancellationToken cancellationToken)
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        window?.EnsureWired(
+            (item, section) => JoinableTaskFactory.RunAsync(
+                    () => PerformCallHierarchyDrillInAsync(item, section, cancellationToken))
+                .FileAndForget("HlslLsp/CallHierarchyDrillIn"));
     }
 
     private async Task SelectVariantAsync(CancellationToken cancellationToken)

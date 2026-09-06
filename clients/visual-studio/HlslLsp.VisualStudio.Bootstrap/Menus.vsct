@@ -39,6 +39,18 @@
           <ButtonText>HLSL Preprocessor Explorer</ButtonText>
         </Strings>
       </Button>
+      <Button guid="guidHlslLspCommands" id="ShowEntryPointDataFlow" priority="0x0105" type="Button">
+        <Parent guid="guidHlslLspCommands" id="HlslLspGroup"/>
+        <Strings>
+          <ButtonText>HLSL Entry-Point Data Flow</ButtonText>
+        </Strings>
+      </Button>
+      <Button guid="guidHlslLspCommands" id="ShowCallHierarchy" priority="0x0106" type="Button">
+        <Parent guid="guidHlslLspCommands" id="HlslLspGroup"/>
+        <Strings>
+          <ButtonText>HLSL Call Hierarchy</ButtonText>
+        </Strings>
+      </Button>
     </Buttons>
   </Commands>
   <Symbols>
@@ -50,6 +62,8 @@
       <IDSymbol name="ShowCompilationInfo" value="0x0102"/>
       <IDSymbol name="ShowResourceBindings" value="0x0103"/>
       <IDSymbol name="ShowPreprocessorExplorer" value="0x0104"/>
+      <IDSymbol name="ShowEntryPointDataFlow" value="0x0105"/>
+      <IDSymbol name="ShowCallHierarchy" value="0x0106"/>
     </GuidSymbol>
   </Symbols>
 </CommandTable>

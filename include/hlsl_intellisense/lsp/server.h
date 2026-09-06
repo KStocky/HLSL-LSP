@@ -70,6 +70,76 @@ class Server final {
   private:
     struct ReferenceResult;
 
+    // The canonical identity/version envelope round-tripped through
+    // CallHierarchyItem.data: `root_uri`/`root_identity`/`root_version`/
+    // `generation` pin the exact compiled analysis this item's callable was
+    // resolved from (the translation unit whose body/definitions the item
+    // remains valid against -- `generation` additionally catches an
+    // included-file edit or a configuration/active-variant change that
+    // reparsed this root without changing `root_version`, see
+    // `analysis::Manager::content_generation`), and
+    // `path`/`line`/`column`/`cursor_kind`/`start_offset`/`name` identify
+    // the callable itself within that translation unit -- the same (path,
+    // start_offset, cursor_kind) triple `dxc::CallableSymbol` already uses
+    // for identity, so an overloaded function's item can never be confused
+    // with a sibling overload at the same name. A later
+    // incomingCalls/outgoingCalls request is rejected with ContentModified
+    // (rather than silently resolving whatever now happens to be at that
+    // position) whenever the named root document is no longer open at
+    // exactly `root_version`, whenever the root's current content
+    // generation no longer matches `generation`, or whenever re-resolving
+    // `path`/`line`/`column` in the current analysis no longer yields a
+    // callable whose own identity (start offset, cursor kind, name)
+    // matches what was captured here.
+    struct CallHierarchyItemData {
+        std::string root_uri;
+        std::string root_identity;
+        std::int64_t root_version{};
+        std::uint64_t generation{};
+        std::string path;
+        std::uint32_t line{};
+        std::uint32_t column{};
+        std::uint32_t start_offset{};
+        std::uint32_t cursor_kind{};
+        std::string name;
+    };
+    [[nodiscard]] static CallHierarchyItemData
+    parse_call_hierarchy_item_data(const json_rpc::Json& item);
+    [[nodiscard]] json_rpc::Json call_hierarchy_item(const dxc::CallableSymbol& callable,
+                                                     const std::string& root_uri,
+                                                     const std::string& root_identity,
+                                                     std::int64_t root_version,
+                                                     std::uint64_t root_generation) const;
+    // Re-validates a previously built CallHierarchyItemData against the
+    // *current* analysis of its own root: throws
+    // json_rpc::HandlerError{content_modified_code, ...} when the root is
+    // no longer open at `data.root_version`, when the root's current
+    // content generation no longer matches `data.generation`, or when
+    // re-resolving `data.path`/`data.line`/`data.column` no longer yields a
+    // callable matching `data.start_offset`/`data.cursor_kind`/`data.name`
+    // -- otherwise returns the confirmed-current generation (identical to
+    // `data.generation` when this passes, returned so callers building
+    // further CallHierarchyItems for the *same* root do not need a second
+    // round trip to fetch it again).
+    [[nodiscard]] std::uint64_t
+    validate_call_hierarchy_item(const CallHierarchyItemData& data,
+                                 const json_rpc::CancellationToken& cancellation);
+    // Fetches `path`'s current text: the open document's own in-memory
+    // snapshot when it is open (reflecting unsaved edits), otherwise its
+    // on-disk content, mirroring how `definition()` already resolves a
+    // cross-file target's text.
+    [[nodiscard]] std::string text_for_path(std::string_view path) const;
+    // A navigation-ready {name, kind, uri, range, selectionRange} JSON
+    // object shared by hlsl/entryPointDataFlow's function and
+    // global/resource entries (which, unlike CallHierarchyItem, carry no
+    // round-trippable `data`: entry-point data flow is a single, self
+    // contained snapshot of the whole reachability graph, not a node the
+    // client is expected to expand incrementally).
+    [[nodiscard]] json_rpc::Json navigable_json(std::string_view name, std::uint32_t cursor_kind,
+                                                const dxc::SourceLocation& location,
+                                                std::uint32_t start_offset,
+                                                std::uint32_t end_offset) const;
+
     // The diagnostics last published for a document, alongside the exact
     // snapshot version and analysis generation they were computed from.
     // textDocument/codeAction requires an exact match against the requesting
@@ -93,6 +163,16 @@ class Server final {
                                             const json_rpc::RequestContext& context);
     [[nodiscard]] json_rpc::Json references(const std::optional<json_rpc::Json>& params,
                                             const json_rpc::RequestContext& context);
+    [[nodiscard]] json_rpc::Json prepare_call_hierarchy(const std::optional<json_rpc::Json>& params,
+                                                        const json_rpc::RequestContext& context);
+    [[nodiscard]] json_rpc::Json
+    call_hierarchy_incoming_calls(const std::optional<json_rpc::Json>& params,
+                                  const json_rpc::RequestContext& context);
+    [[nodiscard]] json_rpc::Json
+    call_hierarchy_outgoing_calls(const std::optional<json_rpc::Json>& params,
+                                  const json_rpc::RequestContext& context);
+    [[nodiscard]] json_rpc::Json entry_point_data_flow(const std::optional<json_rpc::Json>& params,
+                                                       const json_rpc::RequestContext& context);
     [[nodiscard]] json_rpc::Json prepare_rename(const std::optional<json_rpc::Json>& params,
                                                 const json_rpc::RequestContext& context);
     [[nodiscard]] json_rpc::Json rename(const std::optional<json_rpc::Json>& params,

@@ -391,6 +391,204 @@ internal sealed class HlslLanguageClient :
             .ConfigureAwait(false);
     }
 
+    // Mirrors GetCompilationInfoAsync/GetPreprocessorExplorerAsync: the
+    // server reuses the document's already-configured entry point and the
+    // exact compiler arguments hlsl/compilationInfo already resolved, so no
+    // position/entry-point/profile override is sent here (see
+    // docs/call-hierarchy.md, "no client-supplied entry point or duplicate
+    // compiler config"). This is a distinct protocol request
+    // (hlsl/entryPointDataFlow).
+    internal async Task<EntryPointDataFlowModel> GetEntryPointDataFlowAsync(
+        Uri documentUri,
+        CancellationToken cancellationToken)
+    {
+        var currentRpc = Volatile.Read(ref rpc);
+        if (currentRpc == null)
+        {
+            await rpcAttached.WaitAsync(cancellationToken).ConfigureAwait(false);
+            currentRpc = Volatile.Read(ref rpc);
+            if (currentRpc == null)
+            {
+                throw new InvalidOperationException(
+                    "The HLSL language server connection is unavailable.");
+            }
+        }
+        return await currentRpc.InvokeWithParameterObjectAsync<EntryPointDataFlowModel>(
+                "hlsl/entryPointDataFlow",
+                new
+                {
+                    textDocument = new
+                    {
+                        uri = documentUri.AbsoluteUri,
+                    },
+                },
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    // The standard LSP error code the server uses to reject a stale
+    // CallHierarchyItem (see docs/call-hierarchy.md,
+    // "CallHierarchyItem.data: stable identity envelope") -- the item's
+    // opaque data.generation no longer matches the root's current
+    // generation because the root, an #include'd dependency, or the active
+    // variant changed since the item was produced. Translated into
+    // CallHierarchyContentModifiedException (a plain, LSP-agnostic
+    // exception type defined in the Bootstrap assembly) so the tool window
+    // can detect and render this specific, expected condition without
+    // itself depending on StreamJsonRpc/RemoteInvocationException, keeping
+    // the Bootstrap assembly isolated from LSP wire-protocol dependencies.
+    private const int CallHierarchyContentModifiedErrorCode = -32801;
+
+    // Standard TextDocumentPositionParams; the document must already be
+    // open (its unsaved content is what gets analyzed), matching every
+    // other position-based request this client issues.
+    internal async Task<IReadOnlyList<CallHierarchyItemModel>> PrepareCallHierarchyAsync(
+        Uri documentUri,
+        int line,
+        int character,
+        CancellationToken cancellationToken)
+    {
+        var currentRpc = Volatile.Read(ref rpc);
+        if (currentRpc == null)
+        {
+            await rpcAttached.WaitAsync(cancellationToken).ConfigureAwait(false);
+            currentRpc = Volatile.Read(ref rpc);
+            if (currentRpc == null)
+            {
+                throw new InvalidOperationException(
+                    "The HLSL language server connection is unavailable.");
+            }
+        }
+        try
+        {
+            return await currentRpc.InvokeWithParameterObjectAsync<IReadOnlyList<CallHierarchyItemModel>>(
+                    "textDocument/prepareCallHierarchy",
+                    new
+                    {
+                        textDocument = new
+                        {
+                            uri = documentUri.AbsoluteUri,
+                        },
+                        position = new
+                        {
+                            line,
+                            character,
+                        },
+                    },
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (RemoteInvocationException error)
+            when (error.ErrorCode == CallHierarchyContentModifiedErrorCode)
+        {
+            throw new CallHierarchyContentModifiedException(error.Message);
+        }
+    }
+
+    // Accepts a CallHierarchyItemModel previously returned by
+    // PrepareCallHierarchyAsync/GetIncomingCallsAsync/GetOutgoingCallsAsync
+    // and round-trips its opaque `data` envelope unmodified -- ToWireCallHierarchyItem
+    // never inspects or reconstructs it, only forwards the exact JToken this
+    // client received. Every field is written with its literal lowercase
+    // wire name (matching every other custom request in this client),
+    // since a plain C# object's PascalCase property names are not
+    // automatically recased by this JsonRpc connection's formatter.
+    internal async Task<IReadOnlyList<CallHierarchyIncomingCallModel>> GetIncomingCallsAsync(
+        CallHierarchyItemModel item,
+        CancellationToken cancellationToken)
+    {
+        var currentRpc = Volatile.Read(ref rpc);
+        if (currentRpc == null)
+        {
+            await rpcAttached.WaitAsync(cancellationToken).ConfigureAwait(false);
+            currentRpc = Volatile.Read(ref rpc);
+            if (currentRpc == null)
+            {
+                throw new InvalidOperationException(
+                    "The HLSL language server connection is unavailable.");
+            }
+        }
+        try
+        {
+            return await currentRpc.InvokeWithParameterObjectAsync<IReadOnlyList<CallHierarchyIncomingCallModel>>(
+                    "callHierarchy/incomingCalls",
+                    new
+                    {
+                        item = ToWireCallHierarchyItem(item),
+                    },
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (RemoteInvocationException error)
+            when (error.ErrorCode == CallHierarchyContentModifiedErrorCode)
+        {
+            throw new CallHierarchyContentModifiedException(error.Message);
+        }
+    }
+
+    // Mirrors GetIncomingCallsAsync exactly, for the distinct
+    // callHierarchy/outgoingCalls request.
+    internal async Task<IReadOnlyList<CallHierarchyOutgoingCallModel>> GetOutgoingCallsAsync(
+        CallHierarchyItemModel item,
+        CancellationToken cancellationToken)
+    {
+        var currentRpc = Volatile.Read(ref rpc);
+        if (currentRpc == null)
+        {
+            await rpcAttached.WaitAsync(cancellationToken).ConfigureAwait(false);
+            currentRpc = Volatile.Read(ref rpc);
+            if (currentRpc == null)
+            {
+                throw new InvalidOperationException(
+                    "The HLSL language server connection is unavailable.");
+            }
+        }
+        try
+        {
+            return await currentRpc.InvokeWithParameterObjectAsync<IReadOnlyList<CallHierarchyOutgoingCallModel>>(
+                    "callHierarchy/outgoingCalls",
+                    new
+                    {
+                        item = ToWireCallHierarchyItem(item),
+                    },
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (RemoteInvocationException error)
+            when (error.ErrorCode == CallHierarchyContentModifiedErrorCode)
+        {
+            throw new CallHierarchyContentModifiedException(error.Message);
+        }
+    }
+
+    private static object ToWireCallHierarchyItem(CallHierarchyItemModel item) => new
+    {
+        name = item?.Name,
+        kind = item?.Kind ?? 0,
+        detail = item?.Detail,
+        uri = item?.Uri,
+        range = ToWireRange(item?.Range),
+        selectionRange = ToWireRange(item?.SelectionRange),
+        data = item?.Data,
+    };
+
+    private static object ToWireRange(CompilationSourceRangeModel range)
+        => range == null
+            ? null
+            : new
+            {
+                start = new
+                {
+                    line = range.Start?.Line ?? 0,
+                    character = range.Start?.Character ?? 0,
+                },
+                end = new
+                {
+                    line = range.End?.Line ?? 0,
+                    character = range.End?.Character ?? 0,
+                },
+            };
+
     public async Task OnLoadedAsync()
     {
         if (StartAsync != null)

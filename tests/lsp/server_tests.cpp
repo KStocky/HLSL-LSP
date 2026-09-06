@@ -12,11 +12,13 @@
 #include <atomic>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <future>
 #include <memory>
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -4205,4 +4207,1510 @@ TEST_CASE("hlsl/didChangeActiveVariant from the client does not echo "
     CHECK(std::ranges::none_of(notifications, [](const auto& notification) {
         return notification.method == "hlsl/activeVariantChanged";
     }));
+}
+
+namespace {
+
+[[nodiscard]] std::string call_hierarchy_shader() {
+    return "float square(float x) { return x * x; }\n"
+           "int square(int x) { return x * x; }\n"
+           "\n"
+           "float recurse(float x) {\n"
+           "    if (x <= 0.0) {\n"
+           "        return 0.0;\n"
+           "    }\n"
+           "    return recurse(x - 1.0) + square(x);\n"
+           "}\n"
+           "\n"
+           "float4 main() : SV_Target {\n"
+           "    return square(recurse(2.0)).xxxx;\n"
+           "}\n";
+}
+
+[[nodiscard]] hlsl_intellisense::json_rpc::Request
+prepare_call_hierarchy_request(std::int64_t id, std::string_view uri, Json position) {
+    return hlsl_intellisense::json_rpc::Request{
+        .id = id,
+        .method = "textDocument/prepareCallHierarchy",
+        .params =
+            Json{{"textDocument", {{"uri", std::string{uri}}}}, {"position", std::move(position)}}};
+}
+
+[[nodiscard]] Json call_hierarchy_result(hlsl_intellisense::lsp::Server& server,
+                                         const hlsl_intellisense::json_rpc::Request& request) {
+    const auto result = server.handle(request);
+    REQUIRE(result.has_value());
+    if (const auto* error = std::get_if<hlsl_intellisense::json_rpc::ErrorResponse>(&*result)) {
+        INFO("code=" << error->error.code << " message=" << error->error.message);
+        FAIL("Expected a successful response");
+    }
+    const auto* response = std::get_if<hlsl_intellisense::json_rpc::Response>(&*result);
+    REQUIRE(response != nullptr);
+    return response->result;
+}
+
+} // namespace
+
+TEST_CASE("Call hierarchy prepares an item and reports outgoing calls with overload identity and "
+          "recursion",
+          "[lsp][call-hierarchy]") {
+    const auto uri = shader_uri();
+    const auto source = call_hierarchy_shader();
+    hlsl_intellisense::lsp::Server server{[](const auto&) {}};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params =
+            Json{{"textDocument",
+                  {{"uri", uri}, {"languageId", "hlsl"}, {"version", 1}, {"text", source}}}}}));
+
+    const auto main_offset = source.find("main(");
+    const auto prepare_main = call_hierarchy_result(
+        server, prepare_call_hierarchy_request(2, uri, position_at(source, main_offset)));
+    REQUIRE(prepare_main.is_array());
+    REQUIRE(prepare_main.size() == 1);
+    const auto& main_item = prepare_main[0];
+    CHECK(main_item["name"] == "main");
+
+    const auto outgoing_from_main = call_hierarchy_result(
+        server, hlsl_intellisense::json_rpc::Request{.id = std::int64_t{3},
+                                                     .method = "callHierarchy/outgoingCalls",
+                                                     .params = Json{{"item", main_item}}});
+    REQUIRE(outgoing_from_main.is_array());
+    REQUIRE(outgoing_from_main.size() == 2);
+    const auto find_callee = [&](std::string_view detail_contains) {
+        return std::ranges::find_if(outgoing_from_main, [&](const Json& call) {
+            const std::string detail = call["to"]["detail"].get<std::string>();
+            return detail.find(detail_contains) != std::string::npos;
+        });
+    };
+    const auto to_recurse = find_callee("recurse");
+    const auto to_square_float = find_callee("float square");
+    REQUIRE(to_recurse != outgoing_from_main.end());
+    REQUIRE(to_square_float != outgoing_from_main.end());
+    CHECK((*to_recurse)["fromRanges"].size() == 1);
+    CHECK((*to_square_float)["fromRanges"].size() == 1);
+
+    // Overload identity: `square(int)` is a distinct callable from
+    // `square(float)` despite sharing a name; preparing at its own
+    // declaration must resolve the int overload specifically, and it must
+    // report no callers/callees (it is dead code, called by nobody).
+    const auto square_int_offset = source.find("int square");
+    const auto square_int_name_offset = source.find("square", square_int_offset);
+    const auto prepare_square_int = call_hierarchy_result(
+        server,
+        prepare_call_hierarchy_request(4, uri, position_at(source, square_int_name_offset)));
+    REQUIRE(prepare_square_int.is_array());
+    REQUIRE(prepare_square_int.size() == 1);
+    const auto& square_int_item = prepare_square_int[0];
+    CHECK(square_int_item["detail"] == "int square(int x)");
+
+    const auto square_int_outgoing = call_hierarchy_result(
+        server, hlsl_intellisense::json_rpc::Request{.id = std::int64_t{5},
+                                                     .method = "callHierarchy/outgoingCalls",
+                                                     .params = Json{{"item", square_int_item}}});
+    CHECK(square_int_outgoing.empty());
+    const auto square_int_incoming = call_hierarchy_result(
+        server, hlsl_intellisense::json_rpc::Request{.id = std::int64_t{6},
+                                                     .method = "callHierarchy/incomingCalls",
+                                                     .params = Json{{"item", square_int_item}}});
+    CHECK(square_int_incoming.empty());
+
+    // The float overload, in contrast, is called from both `main` and
+    // `recurse` -- incomingCalls must report both callers.
+    const auto square_float_item = (*to_square_float)["to"];
+    const auto square_float_incoming = call_hierarchy_result(
+        server, hlsl_intellisense::json_rpc::Request{.id = std::int64_t{7},
+                                                     .method = "callHierarchy/incomingCalls",
+                                                     .params = Json{{"item", square_float_item}}});
+    REQUIRE(square_float_incoming.is_array());
+    CHECK(square_float_incoming.size() == 2);
+    CHECK(std::ranges::any_of(square_float_incoming,
+                              [](const Json& call) { return call["from"]["name"] == "main"; }));
+    CHECK(std::ranges::any_of(square_float_incoming,
+                              [](const Json& call) { return call["from"]["name"] == "recurse"; }));
+
+    // Recursion must terminate and be represented rather than dropped: the
+    // `recurse` node's own outgoing/incoming calls both include itself.
+    const auto recurse_item = (*to_recurse)["to"];
+    const auto recurse_outgoing = call_hierarchy_result(
+        server, hlsl_intellisense::json_rpc::Request{.id = std::int64_t{8},
+                                                     .method = "callHierarchy/outgoingCalls",
+                                                     .params = Json{{"item", recurse_item}}});
+    REQUIRE(recurse_outgoing.is_array());
+    CHECK(std::ranges::any_of(recurse_outgoing,
+                              [](const Json& call) { return call["to"]["name"] == "recurse"; }));
+    const auto recurse_incoming = call_hierarchy_result(
+        server, hlsl_intellisense::json_rpc::Request{.id = std::int64_t{9},
+                                                     .method = "callHierarchy/incomingCalls",
+                                                     .params = Json{{"item", recurse_item}}});
+    REQUIRE(recurse_incoming.is_array());
+    CHECK(std::ranges::any_of(recurse_incoming,
+                              [](const Json& call) { return call["from"]["name"] == "main"; }));
+    CHECK(std::ranges::any_of(recurse_incoming,
+                              [](const Json& call) { return call["from"]["name"] == "recurse"; }));
+}
+
+TEST_CASE("Call hierarchy returns null for non-callable positions and rejects stale items with "
+          "ContentModified",
+          "[lsp][call-hierarchy][safety]") {
+    const auto uri = shader_uri();
+    const auto source = call_hierarchy_shader();
+    hlsl_intellisense::lsp::Server server{[](const auto&) {}};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params =
+            Json{{"textDocument",
+                  {{"uri", uri}, {"languageId", "hlsl"}, {"version", 1}, {"text", source}}}}}));
+
+    // Whitespace between statements is not a callable cursor.
+    const auto blank_offset = source.find("\n\n") + 1;
+    const auto blank_result =
+        server.handle(prepare_call_hierarchy_request(2, uri, position_at(source, blank_offset)));
+    REQUIRE(blank_result.has_value());
+    if (const auto* error =
+            std::get_if<hlsl_intellisense::json_rpc::ErrorResponse>(&*blank_result)) {
+        INFO("code=" << error->error.code << " message=" << error->error.message);
+        FAIL("Expected a successful response");
+    }
+    const auto* blank_response = std::get_if<hlsl_intellisense::json_rpc::Response>(&*blank_result);
+    REQUIRE(blank_response != nullptr);
+    CHECK(blank_response->result.is_null());
+
+    const auto main_offset = source.find("main(");
+    const auto main_item = call_hierarchy_result(
+        server, prepare_call_hierarchy_request(3, uri, position_at(source, main_offset)))[0];
+
+    // A concurrent edit bumps the document version; the previously prepared
+    // item's `data.rootVersion` is now stale and must be rejected rather
+    // than silently resolved against whatever is currently at that
+    // position.
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didChange",
+        .params = Json{{"textDocument", {{"uri", uri}, {"version", 2}}},
+                       {"contentChanges", Json::array({Json{{"text", source}}})}}}));
+
+    const auto stale_outgoing =
+        server.handle(hlsl_intellisense::json_rpc::Request{.id = std::int64_t{4},
+                                                           .method = "callHierarchy/outgoingCalls",
+                                                           .params = Json{{"item", main_item}}});
+    REQUIRE(stale_outgoing.has_value());
+    const auto* stale_outgoing_error =
+        std::get_if<hlsl_intellisense::json_rpc::ErrorResponse>(&*stale_outgoing);
+    REQUIRE(stale_outgoing_error != nullptr);
+    CHECK(stale_outgoing_error->error.code == hlsl_intellisense::json_rpc::content_modified_code);
+
+    const auto stale_incoming =
+        server.handle(hlsl_intellisense::json_rpc::Request{.id = std::int64_t{5},
+                                                           .method = "callHierarchy/incomingCalls",
+                                                           .params = Json{{"item", main_item}}});
+    REQUIRE(stale_incoming.has_value());
+    const auto* stale_incoming_error =
+        std::get_if<hlsl_intellisense::json_rpc::ErrorResponse>(&*stale_incoming);
+    REQUIRE(stale_incoming_error != nullptr);
+    CHECK(stale_incoming_error->error.code == hlsl_intellisense::json_rpc::content_modified_code);
+}
+
+TEST_CASE("Call hierarchy rejects a prepared item as stale after an open include is edited, even "
+          "though the root document's own version and the callee's own text are both unchanged",
+          "[lsp][call-hierarchy][safety][cross-file]") {
+    TestDirectory directory;
+    const auto include_path = directory.path() / "shared.hlsli";
+    const std::string include_text = "float helper(float x) { return x * 2.0; }\n";
+    {
+        std::ofstream include{include_path};
+        REQUIRE(include);
+        include << include_text;
+    }
+    const auto include_uri =
+        hlsl_intellisense::workspace::DocumentUri::from_path(include_path.string());
+    const auto root = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "a.hlsl").string());
+    const std::string root_text = "#include \"shared.hlsli\"\n"
+                                  "float4 main() : SV_Target { return helper(1.0).xxxx; }\n";
+
+    hlsl_intellisense::lsp::Server server{[](const auto&) {}};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(
+        hlsl_intellisense::json_rpc::Notification{.method = "textDocument/didOpen",
+                                                  .params = Json{{"textDocument",
+                                                                  {{"uri", include_uri.uri()},
+                                                                   {"languageId", "hlsl"},
+                                                                   {"version", 1},
+                                                                   {"text", include_text}}}}}));
+    static_cast<void>(server.handle(
+        hlsl_intellisense::json_rpc::Notification{.method = "textDocument/didOpen",
+                                                  .params = Json{{"textDocument",
+                                                                  {{"uri", root.uri()},
+                                                                   {"languageId", "hlsl"},
+                                                                   {"version", 1},
+                                                                   {"text", root_text}}}}}));
+
+    const auto call_offset = root_text.find("helper(1.0)");
+    const auto helper_item = call_hierarchy_result(
+        server,
+        prepare_call_hierarchy_request(2, root.uri(), position_at(root_text, call_offset)))[0];
+    CHECK(helper_item["name"] == "helper");
+
+    // Only the included file is edited (appending a new, unrelated function
+    // after `helper`, so `helper`'s own text/offsets are byte-for-byte
+    // identical to what was captured above); the root document's own
+    // `didOpen`/`didChange` version is never touched. A staleness check
+    // that only compares `data.rootVersion` against the root document's
+    // current version, or that only re-validates `helper`'s own stored
+    // identity fields (unaffected here since `helper` did not move), would
+    // both wrongly treat this item as still valid.
+    const std::string edited_include_text =
+        include_text + "float unrelatedTrailing(float x) { return x + 1.0; }\n";
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didChange",
+        .params = Json{{"textDocument", {{"uri", include_uri.uri()}, {"version", 2}}},
+                       {"contentChanges", Json::array({Json{{"text", edited_include_text}}})}}}));
+
+    const auto stale_outgoing =
+        server.handle(hlsl_intellisense::json_rpc::Request{.id = std::int64_t{3},
+                                                           .method = "callHierarchy/outgoingCalls",
+                                                           .params = Json{{"item", helper_item}}});
+    REQUIRE(stale_outgoing.has_value());
+    const auto* stale_outgoing_error =
+        std::get_if<hlsl_intellisense::json_rpc::ErrorResponse>(&*stale_outgoing);
+    REQUIRE(stale_outgoing_error != nullptr);
+    CHECK(stale_outgoing_error->error.code == hlsl_intellisense::json_rpc::content_modified_code);
+
+    const auto stale_incoming =
+        server.handle(hlsl_intellisense::json_rpc::Request{.id = std::int64_t{4},
+                                                           .method = "callHierarchy/incomingCalls",
+                                                           .params = Json{{"item", helper_item}}});
+    REQUIRE(stale_incoming.has_value());
+    const auto* stale_incoming_error =
+        std::get_if<hlsl_intellisense::json_rpc::ErrorResponse>(&*stale_incoming);
+    REQUIRE(stale_incoming_error != nullptr);
+    CHECK(stale_incoming_error->error.code == hlsl_intellisense::json_rpc::content_modified_code);
+}
+
+TEST_CASE("Call hierarchy rejects a prepared item as stale after the active variant changes the "
+          "effective compiler configuration, even though the document text is unchanged",
+          "[lsp][call-hierarchy][safety]") {
+    TestDirectory directory;
+    {
+        std::ofstream config{directory.path() / "shadertoolsconfig.json"};
+        REQUIRE(config);
+        config << R"({
+            "root": true,
+            "hlsl.targetProfile": "ps_6_6",
+            "hlsl.variantsVersion": 1,
+            "hlsl.variants": [
+                { "name": "First", "hlsl.entryPoint": "PSMain" },
+                { "name": "Second", "hlsl.entryPoint": "PSMainAlt" }
+            ]
+        })";
+        REQUIRE(config);
+    }
+    const auto document = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "shader.hlsl").string());
+    const std::string source = "float helper(float x) { return x * 2.0; }\n"
+                               "float4 PSMain(float4 position : SV_Position) : SV_Target {\n"
+                               "    return helper(position.x).xxxx;\n"
+                               "}\n"
+                               "float4 PSMainAlt(float4 position : SV_Position) : SV_Target {\n"
+                               "    return helper(position.x * 2.0).xxxx;\n"
+                               "}\n";
+
+    hlsl_intellisense::lsp::Server server{[](const auto&) {}};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(
+        hlsl_intellisense::json_rpc::Notification{.method = "textDocument/didOpen",
+                                                  .params = Json{{"textDocument",
+                                                                  {{"uri", document.uri()},
+                                                                   {"languageId", "hlsl"},
+                                                                   {"version", 1},
+                                                                   {"text", source}}}}}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "hlsl/didChangeActiveVariant", .params = Json{{"variant", "First"}}}));
+
+    const auto call_offset = source.find("helper(position.x)");
+    const auto helper_item = call_hierarchy_result(
+        server,
+        prepare_call_hierarchy_request(2, document.uri(), position_at(source, call_offset)))[0];
+    CHECK(helper_item["name"] == "helper");
+
+    // Switching the active variant changes the effective `-E` compiler
+    // argument (PSMain -> PSMainAlt) and therefore the translation unit
+    // that gets recompiled, without touching the document's own text or
+    // LSP version at all: `helper`'s own stored identity fields (path,
+    // start offset, cursor kind, name) are unaffected, since the source
+    // text is byte-for-byte identical either way.
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "hlsl/didChangeActiveVariant", .params = Json{{"variant", "Second"}}}));
+
+    const auto stale_outgoing =
+        server.handle(hlsl_intellisense::json_rpc::Request{.id = std::int64_t{3},
+                                                           .method = "callHierarchy/outgoingCalls",
+                                                           .params = Json{{"item", helper_item}}});
+    REQUIRE(stale_outgoing.has_value());
+    const auto* stale_outgoing_error =
+        std::get_if<hlsl_intellisense::json_rpc::ErrorResponse>(&*stale_outgoing);
+    REQUIRE(stale_outgoing_error != nullptr);
+    CHECK(stale_outgoing_error->error.code == hlsl_intellisense::json_rpc::content_modified_code);
+}
+
+TEST_CASE("Incoming calls expand across every open root that includes the callee, covering "
+          "unsaved edits",
+          "[lsp][call-hierarchy][cross-file]") {
+    TestDirectory directory;
+    const auto include_path = directory.path() / "shared.hlsli";
+    {
+        std::ofstream include{include_path};
+        REQUIRE(include);
+        include << "float helper(float x) { return x * 2.0; }\n";
+    }
+    const auto first = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "a.hlsl").string());
+    const auto second = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "b.hlsl").string());
+    const std::string first_text = "#include \"shared.hlsli\"\n"
+                                   "float4 main() : SV_Target { return helper(1.0).xxxx; }\n";
+    const std::string second_text = "#include \"shared.hlsli\"\n"
+                                    "float4 alt() : SV_Target { return helper(2.0).xxxx; }\n";
+
+    hlsl_intellisense::lsp::Server server{[](const auto&) {}};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    for (const auto& [uri, text] :
+         std::array{std::pair{first.uri(), first_text}, std::pair{second.uri(), second_text}}) {
+        static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+            .method = "textDocument/didOpen",
+            .params =
+                Json{{"textDocument",
+                      {{"uri", uri}, {"languageId", "hlsl"}, {"version", 1}, {"text", text}}}}}));
+    }
+
+    const auto call_offset = first_text.find("helper(1.0)");
+    const auto helper_item = call_hierarchy_result(
+        server,
+        prepare_call_hierarchy_request(2, first.uri(), position_at(first_text, call_offset)))[0];
+    CHECK(helper_item["name"] == "helper");
+
+    const auto incoming = call_hierarchy_result(
+        server, hlsl_intellisense::json_rpc::Request{.id = std::int64_t{3},
+                                                     .method = "callHierarchy/incomingCalls",
+                                                     .params = Json{{"item", helper_item}}});
+    REQUIRE(incoming.is_array());
+    CHECK(incoming.size() == 2);
+    CHECK(std::ranges::any_of(incoming,
+                              [](const Json& call) { return call["from"]["name"] == "main"; }));
+    CHECK(std::ranges::any_of(incoming,
+                              [](const Json& call) { return call["from"]["name"] == "alt"; }));
+}
+
+TEST_CASE("Incoming calls keep two roots' results for the very same caller location distinct, "
+          "each with its own root metadata and without duplicating call-site ranges",
+          "[lsp][call-hierarchy][cross-file]") {
+    // Regression: `caller` is defined exactly once, in a header included by
+    // two different roots, so its own (path, start offset) is identical no
+    // matter which root's translation unit resolved it. Two different
+    // roots (different translation-unit/compiler contexts, and therefore
+    // different `rootIdentity`/`generation` pairs even though `caller`'s
+    // text never moves) both legitimately report `caller` as an incoming
+    // caller of `helper` -- keying accumulation only by (path, offset)
+    // would wrongly fold these into a single entry, silently keeping just
+    // the first root's metadata while splicing in call sites resolved
+    // under the *other* root's context, and -- since `caller`'s own call to
+    // `helper` is at an identical offset from both roots' perspective --
+    // duplicating what should be a single range within that one merged
+    // entry. Each root's contribution must instead survive as its own
+    // distinct entry, and neither entry may show a duplicated range.
+    TestDirectory directory;
+    const auto include_path = directory.path() / "shared.hlsli";
+    const std::string include_text = "float helper(float x) { return x * 2.0; }\n"
+                                     "float caller(float x) { return helper(x) + 1.0; }\n";
+    {
+        std::ofstream include{include_path};
+        REQUIRE(include);
+        include << include_text;
+    }
+    const auto first = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "a.hlsl").string());
+    const auto second = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "b.hlsl").string());
+    const std::string first_text =
+        "#include \"shared.hlsli\"\n"
+        "float4 main() : SV_Target { return (caller(1.0) + helper(3.0)).xxxx; }\n";
+    const std::string second_text =
+        "#include \"shared.hlsli\"\n"
+        "float4 main() : SV_Target { return (caller(2.0) + helper(4.0)).xxxx; }\n";
+
+    hlsl_intellisense::lsp::Server server{[](const auto&) {}};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    for (const auto& [uri, text] :
+         std::array{std::pair{first.uri(), first_text}, std::pair{second.uri(), second_text}}) {
+        static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+            .method = "textDocument/didOpen",
+            .params =
+                Json{{"textDocument",
+                      {{"uri", uri}, {"languageId", "hlsl"}, {"version", 1}, {"text", text}}}}}));
+    }
+
+    const auto call_offset = first_text.find("helper(3.0)");
+    const auto helper_item = call_hierarchy_result(
+        server,
+        prepare_call_hierarchy_request(2, first.uri(), position_at(first_text, call_offset)))[0];
+    CHECK(helper_item["name"] == "helper");
+
+    const auto incoming = call_hierarchy_result(
+        server, hlsl_intellisense::json_rpc::Request{.id = std::int64_t{3},
+                                                     .method = "callHierarchy/incomingCalls",
+                                                     .params = Json{{"item", helper_item}}});
+    REQUIRE(incoming.is_array());
+    // `caller` (once per root, kept distinct) plus `main` (once per root,
+    // always distinct since each root's own `main` is a different file).
+    CHECK(incoming.size() == 4);
+
+    std::vector<Json> caller_entries;
+    for (const auto& call : incoming) {
+        if (call["from"]["name"] == "caller") {
+            caller_entries.push_back(call);
+        }
+    }
+    REQUIRE(caller_entries.size() == 2);
+    // Each root's `caller` entry must carry *that root's own* metadata, not
+    // a metadata field copied from whichever root happened to be processed
+    // first.
+    const auto& first_root_identity = caller_entries[0]["from"]["data"]["rootIdentity"];
+    const auto& second_root_identity = caller_entries[1]["from"]["data"]["rootIdentity"];
+    CHECK(first_root_identity != second_root_identity);
+    CHECK(std::ranges::any_of(caller_entries, [&](const Json& call) {
+        return call["from"]["data"]["rootUri"] == first.uri();
+    }));
+    CHECK(std::ranges::any_of(caller_entries, [&](const Json& call) {
+        return call["from"]["data"]["rootUri"] == second.uri();
+    }));
+    // Neither root's entry may show `caller`'s single call to `helper`
+    // duplicated, even though that call site's own offset is identical
+    // across both roots (it is the very same physical text).
+    for (const auto& call : caller_entries) {
+        REQUIRE(call["fromRanges"].is_array());
+        CHECK(call["fromRanges"].size() == 1);
+    }
+
+    CHECK(std::ranges::count_if(
+              incoming, [](const Json& call) { return call["from"]["name"] == "main"; }) == 2);
+}
+
+TEST_CASE("Incoming calls reject a candidate root's contribution when that root is reanalyzed "
+          "strictly between the item's staleness check and its own query, even though the "
+          "document's own version never changes",
+          "[lsp][call-hierarchy][safety][concurrency]") {
+    // Regression for a generation-based TOCTOU: `call_hierarchy_incoming_calls` validates
+    // `data` once up front (capturing the generation the item was built against) and then,
+    // per candidate root, issues a *separately timed* `incoming_calls` query. For the
+    // candidate root that *is* the item's own root, nothing previously checked that this
+    // second query's own generation still matched what validation confirmed -- an
+    // included-file edit reanalyzing that root in between (without bumping its own document
+    // version) could silently serve results computed against a newer analysis than the one
+    // `data` was validated against. This reproduces that window deterministically: an
+    // unrelated other root ("aaaOther", sorted first by `Manager::roots()`) is paused via
+    // `AnalysisHooks::before_interactive` while the loop is still processing it, and only
+    // then is the target root's own private include edited and its reanalysis awaited (via a
+    // second, ordinary interactive query, which the scheduler guarantees runs after any
+    // already-queued/running work for that same root) -- so the target root's generation has
+    // provably already changed by the time the loop reaches its own branch.
+    TestDirectory directory;
+    const auto shared_include_path = directory.path() / "shared.hlsli";
+    {
+        std::ofstream include{shared_include_path};
+        REQUIRE(include);
+        include << "float helper(float x) { return x * 2.0; }\n";
+    }
+    const auto target_only_include_path = directory.path() / "targetOnly.hlsli";
+    {
+        std::ofstream include{target_only_include_path};
+        REQUIRE(include);
+        include << "static const float targetOnlyValue = 1.0;\n";
+    }
+    // Named so its identity sorts before the target root's identity in
+    // `Manager::roots()` (sorted by `root_identity`), guaranteeing it is
+    // processed first in the incoming-calls candidate-root loop.
+    const auto other_root = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "aaaOther.hlsl").string());
+    const auto target_root = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "zzzTarget.hlsl").string());
+    const auto target_only_include =
+        hlsl_intellisense::workspace::DocumentUri::from_path(target_only_include_path.string());
+    const std::string other_text =
+        "#include \"shared.hlsli\"\nfloat4 main() : SV_Target { return helper(2.0).xxxx; }\n";
+    const std::string target_text = "#include \"shared.hlsli\"\n"
+                                    "#include \"targetOnly.hlsli\"\n"
+                                    "float4 main() : SV_Target { "
+                                    "return helper(1.0 + targetOnlyValue).xxxx; }\n";
+    const std::string target_only_include_text = "static const float targetOnlyValue = 1.0;\n";
+
+    // The scheduler pins ALL work (both background reanalysis and interactive
+    // queries) for a given root to a single worker, chosen by hashing
+    // `root_identity` with the very same FNV-1a function `Scheduler::owner_for`
+    // uses. If the two roots below happened to hash to the same worker, the
+    // paused "other" root's task would block the *target* root's own queue
+    // (they'd share a worker), deadlocking this test's later steps. Replicate
+    // that hash locally and pick a worker count that provably separates the
+    // two roots' identities (any count that does not evenly divide the
+    // difference of their hashes works), rather than hoping a fixed count
+    // avoids a collision.
+    const auto fnv1a_hash = [](std::string_view text) {
+        std::uint64_t hash{14695981039346656037ULL};
+        for (const auto character : text) {
+            hash ^= static_cast<unsigned char>(character);
+            hash *= 1099511628211ULL;
+        }
+        return hash;
+    };
+    const auto other_identity = other_root.identity();
+    const auto target_identity = target_root.identity();
+    const auto other_hash = fnv1a_hash(other_identity);
+    const auto target_hash = fnv1a_hash(target_identity);
+    std::size_t worker_count{2};
+    while (other_hash % worker_count == target_hash % worker_count) {
+        ++worker_count;
+        REQUIRE(worker_count < 4096);
+    }
+
+    auto hooks = std::make_shared<hlsl_intellisense::analysis::AnalysisHooks>();
+    std::promise<void> entered;
+    std::promise<void> release;
+    auto released = release.get_future().share();
+    std::atomic<bool> paused_once{false};
+    hooks->before_interactive = [&](std::string_view identity) {
+        if (identity == other_identity && !paused_once.exchange(true)) {
+            entered.set_value();
+            released.wait();
+        }
+    };
+    hlsl_intellisense::lsp::ServerOptions options;
+    options.background_analysis = true;
+    options.analysis_hooks = hooks;
+    options.analysis.scheduler.worker_count = worker_count;
+    options.analysis.scheduler.queue_capacity = std::max<std::size_t>(128, worker_count * 4);
+    hlsl_intellisense::lsp::Server server{[](const auto&) {}, {}, options};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    for (const auto& [uri, text] : std::array{
+             std::pair{other_root.uri(), other_text}, std::pair{target_root.uri(), target_text},
+             std::pair{target_only_include.uri(), target_only_include_text}}) {
+        static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+            .method = "textDocument/didOpen",
+            .params =
+                Json{{"textDocument",
+                      {{"uri", uri}, {"languageId", "hlsl"}, {"version", 1}, {"text", text}}}}}));
+    }
+    server.wait_for_analysis();
+
+    const auto call_offset = target_text.find("helper(1.0");
+    const auto helper_item = call_hierarchy_result(
+        server, prepare_call_hierarchy_request(2, target_root.uri(),
+                                               position_at(target_text, call_offset)))[0];
+    CHECK(helper_item["name"] == "helper");
+    const std::uint64_t original_generation = helper_item["data"]["generation"];
+
+    auto response = std::async(std::launch::async, [&] {
+        return server.handle(
+            hlsl_intellisense::json_rpc::Request{.id = std::int64_t{3},
+                                                 .method = "callHierarchy/incomingCalls",
+                                                 .params = Json{{"item", helper_item}}});
+    });
+    entered.get_future().wait();
+
+    // Edited while the loop is paused on the *other* root: only the target
+    // root depends on this include, so only the target root is reanalyzed,
+    // and its own document version never changes.
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didChange",
+        .params = Json{{"textDocument", {{"uri", target_only_include.uri()}, {"version", 2}}},
+                       {"contentChanges",
+                        Json::array({Json{{"text", "static const float targetOnlyValue = 1.0;\n"
+                                                   "static const float trailing = 2.0;\n"}}})}}}));
+
+    // An ordinary interactive query for the target root is guaranteed by the
+    // scheduler to run only after any already-queued/running work for that
+    // same root (see `Scheduler::submit`'s same-root ordering for
+    // interactive-after-background insertion), so this single call both
+    // waits for the reanalysis above to finish and confirms it actually
+    // changed the target root's generation.
+    const auto reanalyzed_item = call_hierarchy_result(
+        server, prepare_call_hierarchy_request(4, target_root.uri(),
+                                               position_at(target_text, call_offset)))[0];
+    const std::uint64_t reanalyzed_generation = reanalyzed_item["data"]["generation"];
+    REQUIRE(reanalyzed_generation != original_generation);
+
+    release.set_value();
+
+    const auto result = response.get();
+    REQUIRE(result.has_value());
+    const auto* error = std::get_if<hlsl_intellisense::json_rpc::ErrorResponse>(&*result);
+    REQUIRE(error != nullptr);
+    CHECK(error->error.code == hlsl_intellisense::json_rpc::content_modified_code);
+    server.wait_for_analysis();
+}
+
+TEST_CASE("Incoming calls treat a root with pending (placeholder) dependency metadata as a "
+          "candidate instead of silently skipping it",
+          "[lsp][call-hierarchy][safety][concurrency]") {
+    // Regression: `Manager::analyze` publishes a placeholder `RootMetadata`
+    // (empty `dependency_identities`, `has_dynamic_includes = true`) the
+    // instant a reanalysis is *admitted* by the scheduler -- strictly
+    // before that reanalysis actually runs and computes the root's real
+    // dependency set (see `Manager::analyze`'s `admitted` callback and
+    // `Impl::analyze`'s own `before_analysis` hook call at its very start,
+    // before include resolution). `call_hierarchy_incoming_calls`
+    // deliberately queries every currently open root unconditionally (see
+    // that function's own comment on why any dependency-based candidate
+    // filter -- including one that special-cased `has_dynamic_includes` --
+    // was rejected in favor of this), so a root whose reanalysis is merely
+    // *queued*, not yet finished, must still be queried and must still
+    // contribute its caller once analysis catches up. This reproduces that
+    // window deterministically: a reanalysis of the caller root (same
+    // text, only the version bumps, so the call relationship itself never
+    // changes) is queued and paused via `AnalysisHooks::before_analysis` --
+    // which fires at the very start of the real analyze work -- strictly
+    // before the incoming-calls request is even issued, so `Manager::
+    // roots()` is guaranteed to still report the placeholder for that root
+    // when this request queries it.
+    TestDirectory directory;
+    const auto helper_path = directory.path() / "helper.hlsli";
+    const std::string helper_text = "float helper(float x) { return x * 2.0; }\n";
+    {
+        std::ofstream include{helper_path};
+        REQUIRE(include);
+        include << helper_text;
+    }
+    const auto helper = hlsl_intellisense::workspace::DocumentUri::from_path(helper_path.string());
+    const auto caller_root = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "callerRoot.hlsl").string());
+    const std::string caller_text =
+        "#include \"helper.hlsli\"\nfloat callerFn(float x) { return helper(x) + 1.0; }\n";
+
+    // The scheduler pins all work for a root to a single worker (see the
+    // pre-existing "Incoming calls reject a candidate root's contribution"
+    // test above for the full rationale); pick a worker count that
+    // provably separates `helper`'s own root from the caller root, so
+    // pausing the caller root's background analyze() cannot also block
+    // `helper`'s own (already fully analyzed) self-query.
+    const auto fnv1a_hash = [](std::string_view text) {
+        std::uint64_t hash{14695981039346656037ULL};
+        for (const auto character : text) {
+            hash ^= static_cast<unsigned char>(character);
+            hash *= 1099511628211ULL;
+        }
+        return hash;
+    };
+    const auto helper_identity = helper.identity();
+    const auto caller_identity = caller_root.identity();
+    const auto helper_hash = fnv1a_hash(helper_identity);
+    const auto caller_hash = fnv1a_hash(caller_identity);
+    std::size_t worker_count{2};
+    while (helper_hash % worker_count == caller_hash % worker_count) {
+        ++worker_count;
+        REQUIRE(worker_count < 4096);
+    }
+
+    auto hooks = std::make_shared<hlsl_intellisense::analysis::AnalysisHooks>();
+    std::promise<void> entered;
+    std::promise<void> release;
+    auto released = release.get_future().share();
+    std::atomic<bool> paused_once{false};
+    // Guarded by `version == 2`, not merely `identity == caller_identity`:
+    // the caller root's own *initial* analyze (version 1, triggered by
+    // `textDocument/didOpen` + the `wait_for_analysis()` below) would
+    // otherwise also match and pause forever, since nothing releases the
+    // hook until much later in this test.
+    hooks->before_analysis = [&](std::string_view identity, std::int64_t version) {
+        if (identity == caller_identity && version == 2 && !paused_once.exchange(true)) {
+            entered.set_value();
+            released.wait();
+        }
+    };
+    hlsl_intellisense::lsp::ServerOptions options;
+    options.background_analysis = true;
+    options.analysis_hooks = hooks;
+    options.analysis.scheduler.worker_count = worker_count;
+    options.analysis.scheduler.queue_capacity = std::max<std::size_t>(128, worker_count * 4);
+    hlsl_intellisense::lsp::Server server{[](const auto&) {}, {}, options};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    for (const auto& [uri, text] : std::array{std::pair{helper.uri(), helper_text},
+                                              std::pair{caller_root.uri(), caller_text}}) {
+        static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+            .method = "textDocument/didOpen",
+            .params =
+                Json{{"textDocument",
+                      {{"uri", uri}, {"languageId", "hlsl"}, {"version", 1}, {"text", text}}}}}));
+    }
+    server.wait_for_analysis();
+
+    // Prepared from `helper`'s own root/definition (never edited during the
+    // race below), so the item's own root/version staleness check can
+    // never itself be the reason a later assertion fails.
+    const auto helper_item = call_hierarchy_result(
+        server, prepare_call_hierarchy_request(
+                    2, helper.uri(), position_at(helper_text, helper_text.find("helper"))))[0];
+    CHECK(helper_item["name"] == "helper");
+
+    // Queue (and, via the hook above, pause) a reanalysis of the caller
+    // root: identical text, version bump only. `Manager::roots()` reports
+    // the placeholder metadata for this root from this call's return until
+    // `release` is fulfilled below.
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didChange",
+        .params = Json{{"textDocument", {{"uri", caller_root.uri()}, {"version", 2}}},
+                       {"contentChanges", Json::array({Json{{"text", caller_text}}})}}}));
+    entered.get_future().wait();
+
+    auto response = std::async(std::launch::async, [&] {
+        return server.handle(
+            hlsl_intellisense::json_rpc::Request{.id = std::int64_t{3},
+                                                 .method = "callHierarchy/incomingCalls",
+                                                 .params = Json{{"item", helper_item}}});
+    });
+
+    release.set_value();
+
+    const auto result = response.get();
+    REQUIRE(result.has_value());
+    if (const auto* error = std::get_if<hlsl_intellisense::json_rpc::ErrorResponse>(&*result)) {
+        INFO("code=" << error->error.code << " message=" << error->error.message);
+        FAIL("Expected a successful response");
+    }
+    const auto* success = std::get_if<hlsl_intellisense::json_rpc::Response>(&*result);
+    REQUIRE(success != nullptr);
+    const auto& incoming = success->result;
+    REQUIRE(incoming.is_array());
+    // The caller root must have actually been queried and contributed its
+    // caller (there is no filter left to skip it on) once its reanalysis --
+    // awaited via the paused hook above -- caught up with its real
+    // dependency set.
+    CHECK(std::ranges::any_of(incoming,
+                              [](const Json& call) { return call["from"]["name"] == "callerFn"; }));
+    server.wait_for_analysis();
+}
+
+TEST_CASE("Incoming calls final revalidation covers a candidate root that legitimately "
+          "contributed zero callers at query time",
+          "[lsp][call-hierarchy][safety][concurrency]") {
+    // Regression: the final post-construction revalidation pass previously
+    // derived its set of roots to recheck purely from `ordered`/`accumulated`
+    // -- the accumulated *caller* entries -- so a candidate root that was
+    // genuinely queried but returned zero callers was never revalidated at
+    // all. A concurrent edit that adds a brand-new call from that root,
+    // landing strictly between its own (empty) query and the final
+    // revalidation pass, could then have its now-stale "no callers from
+    // this root" silently stand instead of being rejected as
+    // `ContentModified`. This reproduces that window using the existing
+    // `before_call_hierarchy_revalidation` test hook (which fires after the
+    // full response is constructed but before the final revalidation loop):
+    // the candidate root below has zero calls to `helper` when queried, is
+    // then edited (synchronously awaited) to add one while the hook is
+    // paused, and the final revalidation must still catch that this
+    // candidate root's generation has changed.
+    TestDirectory directory;
+    const auto helper_path = directory.path() / "helper.hlsli";
+    const std::string helper_text = "float helper(float x) { return x * 2.0; }\n";
+    {
+        std::ofstream include{helper_path};
+        REQUIRE(include);
+        include << helper_text;
+    }
+    const auto helper = hlsl_intellisense::workspace::DocumentUri::from_path(helper_path.string());
+    const auto candidate_root = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "candidateRoot.hlsl").string());
+    const std::string candidate_text_before =
+        "#include \"helper.hlsli\"\nfloat4 main() : SV_Target { return 1.0.xxxx; }\n";
+    const std::string candidate_text_after = "#include \"helper.hlsli\"\n"
+                                             "float callerFn(float x) { return helper(x); }\n"
+                                             "float4 main() : SV_Target { return 1.0.xxxx; }\n";
+
+    auto hooks = std::make_shared<hlsl_intellisense::analysis::AnalysisHooks>();
+    std::promise<void> entered;
+    std::promise<void> release;
+    auto released = release.get_future().share();
+    std::atomic<bool> paused_once{false};
+    // Not assigned to `hooks->before_call_hierarchy_revalidation` yet: that
+    // hook fires on *every* prepare/outgoing/incoming call this server
+    // handles, including the plain `prepareCallHierarchy` setup call below
+    // used only to obtain `helper_item` -- arming it that early would pause
+    // forever on that unrelated call instead of the incoming-calls request
+    // under test. Armed via `arm_pause()` immediately before that request is
+    // launched instead.
+    const auto arm_pause = [&] {
+        hooks->before_call_hierarchy_revalidation = [&] {
+            if (!paused_once.exchange(true)) {
+                entered.set_value();
+                released.wait();
+            }
+        };
+    };
+    hlsl_intellisense::lsp::ServerOptions options;
+    options.background_analysis = true;
+    options.analysis_hooks = hooks;
+    hlsl_intellisense::lsp::Server server{[](const auto&) {}, {}, options};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    for (const auto& [uri, text] :
+         std::array{std::pair{helper.uri(), helper_text},
+                    std::pair{candidate_root.uri(), candidate_text_before}}) {
+        static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+            .method = "textDocument/didOpen",
+            .params =
+                Json{{"textDocument",
+                      {{"uri", uri}, {"languageId", "hlsl"}, {"version", 1}, {"text", text}}}}}));
+    }
+    server.wait_for_analysis();
+
+    const auto helper_item = call_hierarchy_result(
+        server, prepare_call_hierarchy_request(
+                    2, helper.uri(), position_at(helper_text, helper_text.find("helper"))))[0];
+    CHECK(helper_item["name"] == "helper");
+
+    arm_pause();
+    auto response = std::async(std::launch::async, [&] {
+        return server.handle(
+            hlsl_intellisense::json_rpc::Request{.id = std::int64_t{3},
+                                                 .method = "callHierarchy/incomingCalls",
+                                                 .params = Json{{"item", helper_item}}});
+    });
+    entered.get_future().wait();
+
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didChange",
+        .params = Json{{"textDocument", {{"uri", candidate_root.uri()}, {"version", 2}}},
+                       {"contentChanges", Json::array({Json{{"text", candidate_text_after}}})}}}));
+    server.wait_for_analysis();
+
+    release.set_value();
+
+    const auto result = response.get();
+    REQUIRE(result.has_value());
+    const auto* error = std::get_if<hlsl_intellisense::json_rpc::ErrorResponse>(&*result);
+    REQUIRE(error != nullptr);
+    CHECK(error->error.code == hlsl_intellisense::json_rpc::content_modified_code);
+    server.wait_for_analysis();
+}
+
+TEST_CASE("Incoming calls query a root even though its analysis_.roots() metadata snapshot "
+          "showed it as unrelated to the target, and pick up a caller added to it after that "
+          "snapshot was taken",
+          "[lsp][call-hierarchy][safety][concurrency]") {
+    // Regression: `call_hierarchy_incoming_calls` takes a single, one-shot
+    // `analysis_.roots()` call at the top of its loop -- a point-in-time
+    // *copy* of every root's metadata (`dependency_identities`,
+    // `has_dynamic_includes`). An earlier version of this handler used that
+    // copy to decide, per root, whether to even bother querying it. A root
+    // genuinely unrelated to the target at the moment of that copy (empty
+    // `dependency_identities`, `has_dynamic_includes == false`, e.g. it has
+    // no `#include`s at all yet) can be edited an instant later -- to add
+    // an `#include` of the target's file and a brand-new call to it --
+    // concurrently with, or strictly between, that metadata copy and the
+    // loop reaching this root's own turn. A filter keyed on the stale copy
+    // would skip this root forever, silently omitting a caller that is
+    // genuinely reachable through it under its *current* content. The fix
+    // removes any such filter: every currently open root is queried
+    // unconditionally, and (per-root) against a *freshly re-read* document
+    // snapshot and a fresh `analyze_and_publish`, not against the
+    // `roots()` copy's own point-in-time state. This test reproduces the
+    // race using the `before_call_hierarchy_candidate_root` hook, which
+    // fires at the very top of this root's own loop iteration -- strictly
+    // before its live document snapshot is taken -- to deterministically
+    // land the edit (and await its full reanalysis) inside that window,
+    // then asserts the resulting response still contains the new caller.
+    TestDirectory directory;
+    const auto helper_path = directory.path() / "helper.hlsli";
+    const std::string helper_text = "float helper(float x) { return x * 2.0; }\n";
+    {
+        std::ofstream include{helper_path};
+        REQUIRE(include);
+        include << helper_text;
+    }
+    const auto helper = hlsl_intellisense::workspace::DocumentUri::from_path(helper_path.string());
+    const auto other_root = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "otherRoot.hlsl").string());
+    // No `#include` at all: genuinely not dependent on `helper.hlsli` at
+    // the moment `analysis_.roots()` is snapshotted below -- not merely
+    // "not yet analyzed" (that race is the *other*, already-fixed,
+    // placeholder-metadata regression above).
+    const std::string other_text_before = "float4 main() : SV_Target { return 1.0.xxxx; }\n";
+    const std::string other_text_after = "#include \"helper.hlsli\"\n"
+                                         "float otherCallerFn(float x) { return helper(x); }\n"
+                                         "float4 main() : SV_Target { return 1.0.xxxx; }\n";
+
+    auto hooks = std::make_shared<hlsl_intellisense::analysis::AnalysisHooks>();
+    std::promise<void> entered;
+    std::promise<void> release;
+    auto released = release.get_future().share();
+    std::atomic<bool> paused_once{false};
+    const auto other_identity = other_root.identity();
+    // Guarded to only match `other_root`'s own turn in the loop: this hook
+    // fires once per candidate root (including `helper`'s own root), and
+    // must not pause on any of the others.
+    hooks->before_call_hierarchy_candidate_root = [&](std::string_view identity) {
+        if (identity == other_identity && !paused_once.exchange(true)) {
+            entered.set_value();
+            released.wait();
+        }
+    };
+    hlsl_intellisense::lsp::ServerOptions options;
+    options.background_analysis = true;
+    options.analysis_hooks = hooks;
+    hlsl_intellisense::lsp::Server server{[](const auto&) {}, {}, options};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    for (const auto& [uri, text] : std::array{std::pair{helper.uri(), helper_text},
+                                              std::pair{other_root.uri(), other_text_before}}) {
+        static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+            .method = "textDocument/didOpen",
+            .params =
+                Json{{"textDocument",
+                      {{"uri", uri}, {"languageId", "hlsl"}, {"version", 1}, {"text", text}}}}}));
+    }
+    server.wait_for_analysis();
+
+    const auto helper_item = call_hierarchy_result(
+        server, prepare_call_hierarchy_request(
+                    2, helper.uri(), position_at(helper_text, helper_text.find("helper"))))[0];
+    CHECK(helper_item["name"] == "helper");
+
+    auto response = std::async(std::launch::async, [&] {
+        return server.handle(
+            hlsl_intellisense::json_rpc::Request{.id = std::int64_t{3},
+                                                 .method = "callHierarchy/incomingCalls",
+                                                 .params = Json{{"item", helper_item}}});
+    });
+    entered.get_future().wait();
+
+    // Edit `other_root` to add the include and the new call while the loop
+    // is paused right before it would otherwise take `other_root`'s
+    // document snapshot; fully await this edit's own reanalysis before
+    // releasing, so the paused iteration is guaranteed to observe the
+    // *post-edit* content once it resumes.
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didChange",
+        .params = Json{{"textDocument", {{"uri", other_root.uri()}, {"version", 2}}},
+                       {"contentChanges", Json::array({Json{{"text", other_text_after}}})}}}));
+    server.wait_for_analysis();
+
+    release.set_value();
+
+    const auto result = response.get();
+    REQUIRE(result.has_value());
+    if (const auto* error = std::get_if<hlsl_intellisense::json_rpc::ErrorResponse>(&*result)) {
+        INFO("code=" << error->error.code << " message=" << error->error.message);
+        FAIL("Expected a successful response");
+    }
+    const auto* success = std::get_if<hlsl_intellisense::json_rpc::Response>(&*result);
+    REQUIRE(success != nullptr);
+    const auto& incoming = success->result;
+    REQUIRE(incoming.is_array());
+    CHECK(std::ranges::any_of(
+        incoming, [](const Json& call) { return call["from"]["name"] == "otherCallerFn"; }));
+    server.wait_for_analysis();
+}
+
+TEST_CASE("Incoming-calls accumulation key treats distinct (path, offset, root identity) "
+          "triples as distinct even when they would collide under naive ':'-joined string "
+          "concatenation",
+          "[lsp][call-hierarchy][safety]") {
+    // Regression: `Server::call_hierarchy_incoming_calls` used to key its
+    // per-caller accumulation map on a single delimiter-joined string
+    // (`path + ':' + std::to_string(start_offset) + ':' + root_identity`).
+    // That join is not injective: both `path` and `root_identity` are
+    // arbitrary strings (in production, filesystem paths/identities) that
+    // can themselves contain ':', so two entirely different triples can
+    // produce the identical joined string -- silently merging two
+    // unrelated callers' `call_sites` into a single accumulated entry. The
+    // fix replaces the joined string with a structured
+    // (path, start_offset, root_identity) key compared/hashed field-by-
+    // field, which has no such ambiguity.
+    //
+    // A real, protocol-level collision through `callHierarchy/
+    // incomingCalls` is impractical to construct on this platform: real
+    // document paths are constrained by the filesystem (Windows disallows
+    // ':' anywhere in a path component except the drive-letter separator),
+    // so no two genuine, distinct document paths/identities can be made to
+    // collide this way here. This test instead directly exercises a key
+    // type -- structurally identical to `AccumulatedKey`/
+    // `AccumulatedKeyHash` in `call_hierarchy_incoming_calls` (same fields,
+    // same equality, same hash-combining scheme) -- against a pair of
+    // triples deliberately chosen to collide under the old, rejected
+    // string-concatenation scheme, proving the structured key keeps them
+    // distinct.
+    struct AccumulatedKey {
+        std::string path;
+        std::uint32_t start_offset{};
+        std::string root_identity;
+
+        [[nodiscard]] bool operator==(const AccumulatedKey&) const = default;
+    };
+    struct AccumulatedKeyHash {
+        [[nodiscard]] std::size_t operator()(const AccumulatedKey& key) const noexcept {
+            std::size_t seed = std::hash<std::string>{}(key.path);
+            seed ^= std::hash<std::uint32_t>{}(key.start_offset) + 0x9e3779b9 + (seed << 6) +
+                    (seed >> 2);
+            seed ^= std::hash<std::string>{}(key.root_identity) + 0x9e3779b9 + (seed << 6) +
+                    (seed >> 2);
+            return seed;
+        }
+    };
+
+    // Both triples below produce the identical legacy joined string
+    // "foo:5:bar:6:baz" -- the first via path="foo", offset=5,
+    // root_identity="bar:6:baz"; the second via path="foo:5:bar", offset=6,
+    // root_identity="baz" -- purely because `root_identity` (first triple)
+    // and `path` (second triple) each themselves contain ':'. They are
+    // nonetheless two entirely different triples and must never be treated
+    // as the same accumulation entry.
+    const AccumulatedKey first{.path = "foo", .start_offset = 5, .root_identity = "bar:6:baz"};
+    const AccumulatedKey second{.path = "foo:5:bar", .start_offset = 6, .root_identity = "baz"};
+
+    const auto legacy_joined_key = [](const AccumulatedKey& key) {
+        return key.path + ':' + std::to_string(key.start_offset) + ':' + key.root_identity;
+    };
+    // Confirms the premise: this pair genuinely would have collided under
+    // the rejected scheme.
+    REQUIRE(legacy_joined_key(first) == legacy_joined_key(second));
+    REQUIRE_FALSE(first == second);
+
+    std::unordered_map<AccumulatedKey, int, AccumulatedKeyHash> accumulated;
+    accumulated.emplace(first, 1);
+    accumulated.emplace(second, 2);
+
+    // With the structured key, both triples get their own distinct
+    // accumulation entry instead of the second silently colliding with
+    // (and appearing to merge into) the first.
+    CHECK(accumulated.size() == 2);
+    CHECK(accumulated.at(first) == 1);
+    CHECK(accumulated.at(second) == 2);
+}
+
+namespace {
+
+// Shared setup for the three "revalidate after full response construction"
+// regressions below (prepare/outgoing/incoming): a root that `#include`s a
+// helper definition, calls it from both `caller` (for outgoing/incoming) and
+// again directly (for the prepare-at-a-call-site pattern the rest of this
+// file already uses). Editing the include bumps the root's content
+// generation without ever touching the root document's own version, so a
+// document-version-only check could never observe it -- only the
+// generation-based recheck these three tests target can.
+struct RevalidationFixture {
+    TestDirectory directory;
+    hlsl_intellisense::workspace::DocumentUri root;
+    hlsl_intellisense::workspace::DocumentUri include;
+    std::string root_text;
+    std::shared_ptr<hlsl_intellisense::analysis::AnalysisHooks> hooks;
+    std::promise<void> entered;
+    std::promise<void> release;
+    std::shared_future<void> released;
+    std::atomic<bool> paused_once{false};
+    hlsl_intellisense::lsp::Server server;
+
+    explicit RevalidationFixture(std::shared_ptr<hlsl_intellisense::analysis::AnalysisHooks> hooks_)
+        : root{hlsl_intellisense::workspace::DocumentUri::from_path(
+              (directory.path() / "root.hlsl").string())},
+          include{hlsl_intellisense::workspace::DocumentUri::from_path(
+              (directory.path() / "helper.hlsli").string())},
+          root_text{"#include \"helper.hlsli\"\n"
+                    "float caller(float x) { return helper(x) + 1.0; }\n"
+                    "float4 main() : SV_Target { return caller(1.0).xxxx; }\n"},
+          hooks{std::move(hooks_)}, released{release.get_future().share()},
+          server{[](const auto&) {},
+                 {},
+                 [&] {
+                     hlsl_intellisense::lsp::ServerOptions options;
+                     options.background_analysis = true;
+                     options.analysis_hooks = hooks;
+                     return options;
+                 }()} {
+        // Not armed here: the hook is shared across *every* prepare/
+        // outgoing/incoming call this fixture's `server` ever handles, and
+        // some tests need one or more un-paused calls first (e.g. to
+        // obtain the `CallHierarchyItem` an outgoing/incoming request
+        // needs) before the specific call under test should pause. Call
+        // `arm()` once that setup is done.
+        static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+            .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+        static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+            .method = "initialized", .params = Json::object()}));
+        for (const auto& [uri, text] :
+             std::array{std::pair{root.uri(), root_text},
+                        std::pair{include.uri(),
+                                  std::string{"float helper(float x) { return x * 2.0; }\n"}}}) {
+            static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+                .method = "textDocument/didOpen",
+                .params = Json{
+                    {"textDocument",
+                     {{"uri", uri}, {"languageId", "hlsl"}, {"version", 1}, {"text", text}}}}}));
+        }
+        server.wait_for_analysis();
+    }
+
+    // Arms the pause: the *next* prepare/outgoing/incoming call this
+    // fixture's `server` handles (and only that one) will block inside
+    // `before_call_hierarchy_revalidation` until `release` is fulfilled.
+    void arm() {
+        hooks->before_call_hierarchy_revalidation = [this] {
+            if (!paused_once.exchange(true)) {
+                entered.set_value();
+                released.wait();
+            }
+        };
+    }
+
+    // Edits the include (bumping the root's generation without bumping the
+    // root document's own version) and blocks until that reanalysis has
+    // actually finished, while the paused request above sits inside the
+    // hook -- the hook itself runs on the calling (async) thread, not on
+    // any `Manager` scheduler worker, so it cannot block this reanalysis.
+    void reanalyze_include() {
+        static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+            .method = "textDocument/didChange",
+            .params = Json{{"textDocument", {{"uri", include.uri()}, {"version", 2}}},
+                           {"contentChanges",
+                            Json::array({Json{{"text", "float helper(float x) { return x * 2.0 + "
+                                                       "1.0; }\n"}}})}}}));
+        server.wait_for_analysis();
+    }
+};
+
+} // namespace
+
+TEST_CASE("Prepare call hierarchy rejects a response constructed against an analysis that was "
+          "superseded strictly between item construction and the final revalidation check",
+          "[lsp][call-hierarchy][safety][concurrency]") {
+    auto hooks = std::make_shared<hlsl_intellisense::analysis::AnalysisHooks>();
+    RevalidationFixture fixture{hooks};
+
+    const auto call_offset = fixture.root_text.find("helper(x)");
+    fixture.arm();
+    auto response = std::async(std::launch::async, [&] {
+        return fixture.server.handle(prepare_call_hierarchy_request(
+            2, fixture.root.uri(), position_at(fixture.root_text, call_offset)));
+    });
+    fixture.entered.get_future().wait();
+
+    fixture.reanalyze_include();
+    fixture.release.set_value();
+
+    const auto result = response.get();
+    REQUIRE(result.has_value());
+    const auto* error = std::get_if<hlsl_intellisense::json_rpc::ErrorResponse>(&*result);
+    REQUIRE(error != nullptr);
+    CHECK(error->error.code == hlsl_intellisense::json_rpc::content_modified_code);
+    fixture.server.wait_for_analysis();
+}
+
+TEST_CASE("Outgoing calls reject a response constructed against an analysis that was superseded "
+          "strictly between the query and the final revalidation check",
+          "[lsp][call-hierarchy][safety][concurrency]") {
+    auto hooks = std::make_shared<hlsl_intellisense::analysis::AnalysisHooks>();
+    RevalidationFixture fixture{hooks};
+
+    // Prepare `caller`'s own item first, *before* arming the pause: the
+    // hook fires on every prepare/outgoing/incoming call this fixture's
+    // server handles, so obtaining the item must happen while unarmed or
+    // this synchronous call itself would block forever waiting on
+    // `released`.
+    const auto caller_name_offset = fixture.root_text.find("caller");
+    const auto caller_item = call_hierarchy_result(
+        fixture.server,
+        prepare_call_hierarchy_request(2, fixture.root.uri(),
+                                       position_at(fixture.root_text, caller_name_offset)))[0];
+    REQUIRE(caller_item["name"] == "caller");
+
+    fixture.arm();
+    auto response = std::async(std::launch::async, [&] {
+        return fixture.server.handle(
+            hlsl_intellisense::json_rpc::Request{.id = std::int64_t{3},
+                                                 .method = "callHierarchy/outgoingCalls",
+                                                 .params = Json{{"item", caller_item}}});
+    });
+    fixture.entered.get_future().wait();
+
+    fixture.reanalyze_include();
+    fixture.release.set_value();
+
+    const auto result = response.get();
+    REQUIRE(result.has_value());
+    const auto* error = std::get_if<hlsl_intellisense::json_rpc::ErrorResponse>(&*result);
+    REQUIRE(error != nullptr);
+    CHECK(error->error.code == hlsl_intellisense::json_rpc::content_modified_code);
+    fixture.server.wait_for_analysis();
+}
+
+TEST_CASE("Incoming calls reject a response constructed against an analysis that was superseded "
+          "strictly between the final per-root loop and the final revalidation check",
+          "[lsp][call-hierarchy][safety][concurrency]") {
+    auto hooks = std::make_shared<hlsl_intellisense::analysis::AnalysisHooks>();
+    RevalidationFixture fixture{hooks};
+
+    const auto call_offset = fixture.root_text.find("helper(x)");
+    const auto helper_item = call_hierarchy_result(
+        fixture.server, prepare_call_hierarchy_request(
+                            2, fixture.root.uri(), position_at(fixture.root_text, call_offset)))[0];
+    REQUIRE(helper_item["name"] == "helper");
+
+    fixture.arm();
+    auto response = std::async(std::launch::async, [&] {
+        return fixture.server.handle(
+            hlsl_intellisense::json_rpc::Request{.id = std::int64_t{3},
+                                                 .method = "callHierarchy/incomingCalls",
+                                                 .params = Json{{"item", helper_item}}});
+    });
+    fixture.entered.get_future().wait();
+
+    fixture.reanalyze_include();
+    fixture.release.set_value();
+
+    const auto result = response.get();
+    REQUIRE(result.has_value());
+    const auto* error = std::get_if<hlsl_intellisense::json_rpc::ErrorResponse>(&*result);
+    REQUIRE(error != nullptr);
+    CHECK(error->error.code == hlsl_intellisense::json_rpc::content_modified_code);
+    fixture.server.wait_for_analysis();
+}
+
+namespace {
+
+void write_entry_point_data_flow_config(const TestDirectory& directory) {
+    std::ofstream config{directory.path() / "shadertoolsconfig.json"};
+    REQUIRE(config);
+    config << R"({
+        "root": true,
+        "hlsl.targetProfile": "ps_6_6",
+        "hlsl.variantsVersion": 1,
+        "hlsl.variants": [
+            { "name": "Prod", "description": "Production entry point",
+              "hlsl.entryPoint": "PSMain" }
+        ]
+    })";
+    REQUIRE(config);
+}
+
+[[nodiscard]] std::string entry_point_data_flow_shader() {
+    return "Texture2D<float4> InputTexture : register(t0);\n"
+           "SamplerState InputSampler : register(s0);\n"
+           "static float scratch;\n"
+           "\n"
+           "float square(float x) { return x * x; }\n"
+           "int square(int x) { return x * x; }\n"
+           "\n"
+           "float unusedHelper(float x) { return x + 1.0; }\n"
+           "\n"
+           "float4 PSMain(float4 position : SV_Position) : SV_Target {\n"
+           "    scratch = position.x;\n"
+           "    float useScratch = scratch;\n"
+           "    float4 sampled = InputTexture.Sample(InputSampler, position.xy);\n"
+           "    return sampled * square(useScratch);\n"
+           "}\n";
+}
+
+} // namespace
+
+TEST_CASE("hlsl/entryPointDataFlow reports no configured entry point before a variant is selected",
+          "[lsp][entry-point-data-flow]") {
+    TestDirectory directory;
+    write_entry_point_data_flow_config(directory);
+    const auto document = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "shader.hlsl").string());
+    hlsl_intellisense::lsp::Server server{[](const auto&) {}};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params = Json{{"textDocument",
+                        {{"uri", document.uri()},
+                         {"languageId", "hlsl"},
+                         {"version", 1},
+                         {"text", entry_point_data_flow_shader()}}}}}));
+
+    const auto response = call_hierarchy_result(
+        server, hlsl_intellisense::json_rpc::Request{
+                    .id = std::int64_t{2},
+                    .method = "hlsl/entryPointDataFlow",
+                    .params = Json{{"textDocument", {{"uri", document.uri()}}}}});
+    INFO(response.dump());
+    CHECK(response["found"] == false);
+    CHECK_FALSE(response["explanation"].get<std::string>().empty());
+    CHECK(response["entryPoint"].is_null());
+    CHECK(response["reachableFunctions"].empty());
+    CHECK(response["unreachableFunctions"].empty());
+    CHECK(response["globalAccesses"].empty());
+    CHECK(response["truncated"] == false);
+    CHECK(response["functionsVisitedTruncated"] == false);
+    CHECK(response["globalAccessesTruncated"] == false);
+    CHECK(response["unusedDeclarationsTruncated"] == false);
+}
+
+TEST_CASE("hlsl/entryPointDataFlow traces reachable functions and conservative global/resource "
+          "access for the active variant's entry point",
+          "[lsp][entry-point-data-flow][integration]") {
+    TestDirectory directory;
+    write_entry_point_data_flow_config(directory);
+    const auto document = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "shader.hlsl").string());
+    hlsl_intellisense::lsp::Server server{[](const auto&) {}};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params = Json{{"textDocument",
+                        {{"uri", document.uri()},
+                         {"languageId", "hlsl"},
+                         {"version", 1},
+                         {"text", entry_point_data_flow_shader()}}}}}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "hlsl/didChangeActiveVariant", .params = Json{{"variant", "Prod"}}}));
+
+    const auto response = call_hierarchy_result(
+        server, hlsl_intellisense::json_rpc::Request{
+                    .id = std::int64_t{2},
+                    .method = "hlsl/entryPointDataFlow",
+                    .params = Json{{"textDocument", {{"uri", document.uri()}}}}});
+    INFO(response.dump());
+    REQUIRE(response["found"] == true);
+    REQUIRE(!response["entryPoint"].is_null());
+    CHECK(response["entryPoint"]["name"] == "PSMain");
+    CHECK(response["truncated"] == false);
+    CHECK(response["functionsVisitedTruncated"] == false);
+    CHECK(response["globalAccessesTruncated"] == false);
+    CHECK(response["unusedDeclarationsTruncated"] == false);
+    CHECK(response["functionsVisited"].get<std::size_t>() >= 2);
+
+    const auto& reachable = response["reachableFunctions"];
+    CHECK(std::ranges::any_of(reachable, [](const Json& node) {
+        return node["function"]["name"] == "PSMain" && node["depth"] == 0;
+    }));
+    CHECK(std::ranges::any_of(reachable, [](const Json& node) {
+        const std::string detail = node["function"]["detail"].get<std::string>();
+        return detail.find("float square") != std::string::npos && node["depth"] == 1;
+    }));
+
+    const auto& unreachable = response["unreachableFunctions"];
+    CHECK(std::ranges::any_of(
+        unreachable, [](const Json& item) { return item["detail"] == "int square(int x)"; }));
+    CHECK(std::ranges::any_of(unreachable,
+                              [](const Json& item) { return item["name"] == "unusedHelper"; }));
+
+    const auto& unused = response["unusedDeclarations"];
+    CHECK(std::ranges::any_of(unused,
+                              [](const Json& item) { return item["name"] == "unusedHelper"; }));
+    // Only the int overload of `square` has zero references anywhere in the
+    // snapshot (the float overload is called from PSMain), so it is the
+    // sole "square" entry reported here.
+    CHECK(std::ranges::any_of(unused, [](const Json& item) { return item["name"] == "square"; }));
+
+    const auto& accesses = response["globalAccesses"];
+    const auto texture_access = std::ranges::find_if(
+        accesses, [](const Json& access) { return access["name"] == "InputTexture"; });
+    REQUIRE(texture_access != accesses.end());
+    CHECK((*texture_access)["access"] == "read");
+    const auto scratch_access = std::ranges::find_if(
+        accesses, [](const Json& access) { return access["name"] == "scratch"; });
+    REQUIRE(scratch_access != accesses.end());
+    CHECK((*scratch_access)["access"] == "readWrite");
+
+    // Each reported node carries navigation-ready location data usable by
+    // either editor client (VS Code, Visual Studio) without further
+    // round-trips.
+    CHECK(response["entryPoint"]["uri"] == document.uri());
+    REQUIRE(response["entryPoint"]["range"]["start"].contains("line"));
+    REQUIRE((*texture_access)["uri"] == document.uri());
+    REQUIRE((*texture_access)["selectionRange"]["start"].contains("character"));
+}
+
+TEST_CASE("Server cancellation returns RequestCancelled for hlsl/entryPointDataFlow",
+          "[lsp][entry-point-data-flow][cancellation]") {
+    TestDirectory directory;
+    write_entry_point_data_flow_config(directory);
+    const auto document = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "shader.hlsl").string());
+    auto hooks = std::make_shared<hlsl_intellisense::analysis::AnalysisHooks>();
+    std::promise<void> entered;
+    std::promise<void> release;
+    auto released = release.get_future().share();
+    hooks->before_interactive = [&](std::string_view) {
+        entered.set_value();
+        released.wait();
+    };
+    hlsl_intellisense::lsp::ServerOptions options;
+    options.background_analysis = true;
+    options.analysis_hooks = hooks;
+    hlsl_intellisense::lsp::Server server{[](const auto&) {}, {}, options};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params = Json{{"textDocument",
+                        {{"uri", document.uri()},
+                         {"languageId", "hlsl"},
+                         {"version", 1},
+                         {"text", entry_point_data_flow_shader()}}}}}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "hlsl/didChangeActiveVariant", .params = Json{{"variant", "Prod"}}}));
+    server.wait_for_analysis();
+
+    const hlsl_intellisense::json_rpc::Request request{
+        .id = std::string{"entry-point-data-flow"},
+        .method = "hlsl/entryPointDataFlow",
+        .params = Json{{"textDocument", {{"uri", document.uri()}}}}};
+    const auto cancellation = server.begin_request(request.id);
+    auto response =
+        std::async(std::launch::async, [&] { return server.handle(request, cancellation); });
+    entered.get_future().wait();
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "$/cancelRequest", .params = Json{{"id", "entry-point-data-flow"}}}));
+
+    const auto result = response.get();
+    const auto* error = std::get_if<hlsl_intellisense::json_rpc::ErrorResponse>(&result);
+    REQUIRE(error != nullptr);
+    CHECK(error->error.code == hlsl_intellisense::json_rpc::request_cancelled_code);
+    release.set_value();
+    server.wait_for_analysis();
+}
+
+TEST_CASE("initialize advertises callHierarchyProvider", "[lsp][call-hierarchy]") {
+    hlsl_intellisense::lsp::Server server{[](const auto&) {}};
+    const auto initialized = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()});
+    REQUIRE(initialized.has_value());
+    const auto* response = std::get_if<hlsl_intellisense::json_rpc::Response>(&*initialized);
+    REQUIRE(response != nullptr);
+    CHECK(response->result["capabilities"]["callHierarchyProvider"] == true);
 }

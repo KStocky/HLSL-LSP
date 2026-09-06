@@ -572,6 +572,216 @@ struct Symbol {
     std::vector<Symbol> children;
 };
 
+// Identifies a callable declaration/definition (free function, method,
+// constructor, conversion function) for call-hierarchy and entry-point
+// data-flow reporting. DXC's IntelliSense API has no separate USR/identity
+// concept, so identity for staleness/equality purposes is the
+// (location.path, start_offset, cursor_kind) triple, mirroring the same
+// location-based identity `Definition`/`Reference` already use elsewhere in
+// this header -- this is also what distinguishes overloaded functions
+// sharing one name, since DXC resolves each call site to a distinct cursor
+// location regardless of name collisions. `location`/`start_offset`/
+// `end_offset` refer to this callable's *definition* cursor's own extent
+// when a definition exists in the current translation unit (matching
+// `IsDefinition() == true`); when only a declaration is visible in the
+// current unsaved snapshot, they refer to that declaration instead and
+// `is_definition` is false.
+struct CallableSymbol {
+    std::string name;
+    std::string qualified_name;
+    // The declaration header rendered by DXC's own formatter (mirrors
+    // `Hover::declaration`), e.g. "float helper(float x)" -- suitable as a
+    // call-hierarchy item's `detail`.
+    std::string signature;
+    std::uint32_t cursor_kind{};
+    SourceLocation location;
+    std::uint32_t start_offset{};
+    std::uint32_t end_offset{};
+    bool is_definition{};
+
+    friend bool operator==(const CallableSymbol&, const CallableSymbol&) = default;
+};
+
+struct OutgoingCall {
+    CallableSymbol callee;
+    // Call-site ranges within the *caller's* body, in source order.
+    std::vector<Reference> call_sites;
+};
+
+struct IncomingCall {
+    CallableSymbol caller;
+    // Call-site ranges within the *caller's* body, in source order.
+    std::vector<Reference> call_sites;
+};
+
+// Whether a global variable, cbuffer/tbuffer field, or resource is read,
+// written, or both. Classification is conservative: whenever DXC's cursor
+// tree does not *prove* an access is read-only or write-only, it is
+// reported as `read_write` rather than guessed narrower. See
+// `TranslationUnit::entry_point_data_flow` for the exact rules applied and
+// their empirical basis.
+enum class GlobalAccessKind : std::uint8_t { read, write, read_write };
+
+struct GlobalAccess {
+    std::string name;
+    std::string qualified_name;
+    std::uint32_t cursor_kind{};
+    // Declaration-site location of the accessed global/resource/field.
+    SourceLocation location;
+    std::uint32_t start_offset{};
+    std::uint32_t end_offset{};
+    GlobalAccessKind access{GlobalAccessKind::read_write};
+};
+
+struct ReachableFunction {
+    CallableSymbol function;
+    // Shortest call-graph distance from the entry point (the entry point
+    // itself is depth 0).
+    std::uint32_t depth{};
+    // True when this function is (transitively) part of a call cycle
+    // reachable from the entry point, including direct self-recursion.
+    // Recursive functions are still reported exactly once, at their
+    // shortest discovered depth, rather than dropped or repeated per
+    // cycle iteration -- traversal always terminates because each callable
+    // is visited at most once (see `EntryPointDataFlow::truncated` for the
+    // separate, explicit node budget that bounds unrelated huge call
+    // graphs).
+    bool recursive{};
+};
+
+// Bounds for `TranslationUnit::entry_point_data_flow`'s traversal, so a
+// pathological or huge call graph cannot make a single request run
+// unbounded work.
+struct EntryPointDataFlowLimits {
+    std::size_t max_functions_visited{4096};
+    std::size_t max_global_accesses{16384};
+    // Bounds the number of top-level declarations that
+    // `unused_top_level_declarations` will actually reference-scan (each
+    // scan is at least O(number of source files)); declarations beyond
+    // this are simply omitted from `unused_declarations` and
+    // `EntryPointDataFlow::truncated` is set, rather than performing
+    // unbounded work for a translation unit with an enormous number of
+    // top-level declarations.
+    std::size_t max_unused_declaration_candidates{4096};
+    // Bounds the number of top-level callable *definitions* collected for
+    // (a) resolving/disambiguating the configured entry point by name and
+    // (b) computing `unreachable_functions` (every definition outside the
+    // reachable set). Independent of `max_functions_visited`, which only
+    // bounds the reachability BFS over functions already known to be
+    // reachable: a translation unit with an enormous number of dead
+    // (unreachable) function definitions would otherwise make definition
+    // collection itself -- and the `unreachable_functions` output it
+    // feeds -- unbounded, even when the entry point's own reachable call
+    // graph is tiny. When this budget is hit, `EntryPointDataFlow::
+    // definitions_truncated` is set and `unreachable_functions` is left
+    // empty (see that field's comment).
+    std::size_t max_definitions_collected{16384};
+};
+
+// Result of tracing reachability and global/resource access from a
+// configured HLSL entry point (`hlsl.entryPoint` / the active variant's
+// entry point -- see `workspace::WorkspaceConfiguration`), reusing exactly
+// the compiler arguments already used to compile this translation unit. No
+// entry point can be supplied by the caller: this avoids a second, possibly
+// inconsistent, compiler configuration for the same document.
+struct EntryPointDataFlow {
+    // False when no entry point is configured, or a configured entry point
+    // name does not resolve to any function definition in the current
+    // unsaved snapshot; all other fields are then empty and `explanation`
+    // describes why.
+    bool found{};
+    std::string explanation;
+    std::optional<CallableSymbol> entry_point;
+    // Every function transitively reachable from the entry point, including
+    // the entry point itself at depth 0, ordered by ascending depth then
+    // source location.
+    std::vector<ReachableFunction> reachable_functions;
+    // Every callable definition in the translation unit that is not in
+    // `reachable_functions` (dead code for the active entry point/variant).
+    // Left empty whenever `functions_visited_truncated` *or*
+    // `definitions_truncated` is true (see their comments): the other,
+    // unrelated truncation causes (`global_accesses_truncated`,
+    // `unused_declarations_truncated`) do not affect this field, since they
+    // do not make `reachable_functions`/the definition set itself
+    // incomplete.
+    std::vector<CallableSymbol> unreachable_functions;
+    // Top-level declarations (functions and global variables/resources)
+    // that DXC reports zero references to anywhere in the current unsaved
+    // snapshot -- a compiler-verifiable, entry-point-independent dead code
+    // signal distinct from `unreachable_functions`. May be an incomplete
+    // subset (never a false "unused" claim) if `unused_declarations_truncated`
+    // is true; see that field's comment.
+    std::vector<Symbol> unused_declarations;
+    // Global variables, cbuffer/tbuffer fields, and resources read or
+    // written by any function in `reachable_functions`, merged by
+    // declaration identity (a global touched from multiple reachable
+    // functions/access kinds is reported once with the most conservative
+    // combined kind: read_write dominates read or write alone).
+    std::vector<GlobalAccess> global_accesses;
+    // True when any of the four independent bounded phases below stopped
+    // early -- equivalent to `functions_visited_truncated ||
+    // definitions_truncated || global_accesses_truncated ||
+    // unused_declarations_truncated`. Provided as a convenience "was
+    // anything incomplete" summary; callers that need to know *which*
+    // section(s) of the result may be incomplete (to render an accurate,
+    // section-specific warning rather than a single blanket one) should
+    // consult the four specific flags instead, since they are not
+    // interchangeable: each gates a different, independent subset of the
+    // response.
+    bool truncated{};
+    // True specifically when the reachability BFS itself stopped early
+    // because it hit `EntryPointDataFlowLimits::max_functions_visited`
+    // before exhausting the call graph. When true, `reachable_functions`
+    // is a conservative subset of the true reachable set (never a
+    // superset -- nothing reachable is ever misreported as unreachable),
+    // and `unreachable_functions` is left completely empty: with an
+    // incomplete reachability traversal, "not yet visited" cannot be
+    // distinguished from "provably unreachable", so no function is
+    // reported as dead code unless the full call graph from the entry
+    // point was exhausted. `global_accesses` may also be incomplete when
+    // this is true, since access scanning only runs over visited
+    // functions.
+    bool functions_visited_truncated{};
+    // True specifically when collecting the translation unit's top-level
+    // callable *definitions* (used both to resolve/disambiguate the
+    // configured entry point by name and to compute `unreachable_functions`)
+    // stopped early because it hit
+    // `EntryPointDataFlowLimits::max_definitions_collected`, independent of
+    // and unrelated to `functions_visited_truncated` above (a translation
+    // unit can have a tiny, fully-explored reachable call graph and still
+    // an enormous number of unrelated dead function definitions). When
+    // true, `unreachable_functions` is left completely empty for the same
+    // reason as under `functions_visited_truncated`: "not yet collected"
+    // cannot be distinguished from "provably unreachable" once the
+    // definition set itself is known to be incomplete. Entry point
+    // resolution still uses whatever definitions were collected before the
+    // budget was hit; in the extreme case where two same-named entry point
+    // candidates straddle the truncation point, only the ones actually
+    // collected are considered for the ambiguity check, the same
+    // conservative bounded-traversal trade-off applied throughout this
+    // request.
+    bool definitions_truncated{};
+    // True specifically when the global/resource access scan stopped
+    // *retaining* further distinct accesses because it hit
+    // `EntryPointDataFlowLimits::max_global_accesses`. The reachability
+    // traversal itself still runs to completion (bounded only by
+    // `functions_visited_truncated`); this flag means `global_accesses` is
+    // a conservative subset of the true set of accesses made by
+    // `reachable_functions` (never a superset), but is independent of
+    // whether `reachable_functions`/`unreachable_functions` are complete.
+    bool global_accesses_truncated{};
+    // True specifically when the unused-top-level-declaration scan stopped
+    // issuing further `FindReferencesInFile` lookups because it hit
+    // `EntryPointDataFlowLimits::max_unused_declaration_candidates`.
+    // `unused_declarations` is then a conservative subset of the true set
+    // of unused declarations (never a false "unused" claim -- only
+    // possible under-reporting), independent of whether
+    // `reachable_functions`/`unreachable_functions`/`global_accesses` are
+    // complete.
+    bool unused_declarations_truncated{};
+    std::size_t functions_visited{};
+};
+
 enum class TokenKind : std::uint8_t {
     punctuation,
     keyword,
@@ -667,6 +877,50 @@ class TranslationUnit final {
     [[nodiscard]] std::vector<SourceRange> skipped_ranges() const;
     [[nodiscard]] std::vector<MacroDefinition> macro_definitions() const;
     [[nodiscard]] std::vector<Symbol> symbols() const;
+
+    // Resolves the callable declaration/definition at `path`/`line`/`column`
+    // (a call site or the callable's own name), for
+    // textDocument/prepareCallHierarchy. Returns std::nullopt when the
+    // position does not resolve to a function, method, constructor, or
+    // conversion function.
+    [[nodiscard]] std::optional<CallableSymbol>
+    callable_at(std::string_view path, std::uint32_t line, std::uint32_t column) const;
+    // Functions called directly from the body of the callable at
+    // `path`/`line`/`column`, for callHierarchy/outgoingCalls. Each callee is
+    // only ever the compiler-resolved target cursor of a call expression
+    // (never guessed from source text), so overloaded functions resolve to
+    // their distinct, correctly-selected overload. `cancellation_checkpoint`
+    // is invoked periodically while scanning the callable's body (see
+    // `BodyScanner::checkpoint`) so a request can be cancelled without
+    // waiting for a pathologically large single-function body to finish.
+    [[nodiscard]] std::vector<OutgoingCall>
+    outgoing_calls(std::string_view path, std::uint32_t line, std::uint32_t column,
+                   const std::function<void()>& cancellation_checkpoint = {}) const;
+    // Functions that directly call the callable at `path`/`line`/`column`,
+    // for callHierarchy/incomingCalls. Found via DXC's own
+    // FindReferencesInFile over every source in the current unsaved
+    // snapshot (the same mechanism `references_at` uses), so it sees
+    // unsaved edits and every #include'd file already part of this
+    // translation unit. `cancellation_checkpoint` is invoked periodically
+    // across sources, reference pages, and the reference-to-caller
+    // conversion loop, so a request over a large translation unit with many
+    // references can still be cancelled promptly rather than occupying the
+    // analysis worker until every source and every page has been scanned.
+    [[nodiscard]] std::vector<IncomingCall>
+    incoming_calls(std::string_view path, std::uint32_t line, std::uint32_t column,
+                   const std::function<void()>& cancellation_checkpoint = {}) const;
+    // Traces every function transitively reachable from this translation
+    // unit's own configured entry point (parsed from its effective compiler
+    // arguments' `-E`, exactly as `compilation_info()` derives its
+    // `entry_point` -- no entry point is ever accepted as a parameter, so
+    // there is no second, possibly inconsistent compiler configuration for
+    // the same document), and every global variable, cbuffer/tbuffer field,
+    // and resource those reachable functions read or write. Bounded and
+    // cancellable by `limits` and `cancellation_checkpoint`; see
+    // `EntryPointDataFlowLimits` and `EntryPointDataFlow::truncated`.
+    [[nodiscard]] EntryPointDataFlow
+    entry_point_data_flow(const EntryPointDataFlowLimits& limits = {},
+                          const std::function<void()>& cancellation_checkpoint = {}) const;
 
     void reparse(std::vector<SourceFile> files);
 

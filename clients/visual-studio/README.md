@@ -82,6 +82,73 @@ for the full protocol, grouping/collision semantics, root-signature states
 "not applicable" state), compatibility meanings, and the bindless descriptor-heap
 limitation.
 
+## Call hierarchy and entry-point data flow
+
+Visual Studio 17.14's generic LSP client
+(`Microsoft.VisualStudio.LanguageServer.Client`) does **not** route the
+editor's built-in **right-click > View Call Hierarchy** command to any
+language client, regardless of whether it advertises the standard
+`callHierarchyProvider: true` capability -- unlike hover, signature help,
+and go-to-definition, that SDK has no bespoke call-hierarchy hookup at all.
+A prior version of this document assumed otherwise; this has since been
+confirmed incorrect, and this client now ships a **custom** Tools command
+and tool window instead of relying on any built-in surface.
+
+Run **Tools > HLSL Call Hierarchy** with the caret on a function to open a
+dedicated tool window. It issues `textDocument/prepareCallHierarchy` at the
+caret, then `callHierarchy/incomingCalls` and `callHierarchy/outgoingCalls`
+for the resolved item, and shows the selected callable plus its incoming
+callers and outgoing callees (each with a call-site count). Clicking
+"Explore calls" on any caller/callee re-centers the view on that item
+(fetching its own incoming/outgoing calls without a new
+`prepareCallHierarchy`, since its identity is already known), and **Back**
+returns to the previous view without any new request. This is a one-level
+(immediate callers/callees) view per step, matching the LSP spec's own
+per-request shape; drilling in is how deeper traversal is reached, since
+the server does not offer a whole-tree response. The window refreshes its
+current item's calls (not a fresh caret resolution) after the active
+variant changes or a relevant HLSL/header/`shadertoolsconfig.json` file is
+saved, preserving the last successful content if the refresh fails or the
+item has gone stale (the server's standard `ContentModified` response,
+translated client-side into a plain, LSP-agnostic exception so the
+Bootstrap assembly issuing the tool window never depends on
+StreamJsonRpc/LSP wire types).
+
+Run **Tools > HLSL Entry-Point Data Flow** to open a tool window that
+traces every function transitively reachable from the active HLSL
+document's configured entry point, alongside the globals/resources those
+functions read or write and the functions/declarations unused for the
+active variant. The request always analyzes the document's current unsaved
+content and active variant, matching Shader Compilation/Resource Bindings;
+if the window is already open, it refreshes automatically when the active
+variant changes and when a relevant HLSL/header/`shadertoolsconfig.json`
+file is saved (unsaved edits to `shadertoolsconfig.json` do **not** trigger
+a refresh, since the server only reads that file from disk), while keeping
+the last successful content on screen for a transient failure. A clearly
+labelled header reports whether an entry point was found (and why not, when
+absent) and whether traversal was truncated by the server's function-visit
+budget, with separate sections for reachable functions (depth and
+recursion labelled per entry), global/resource accesses (read/write/both
+labelled per entry), unreachable functions, and unused declarations;
+section-specific truncation (function-visit, definition-collection,
+global-access, and unused-declaration budgets are each independent) is
+called out where it applies rather than uniformly blaming the function
+graph. Unreachable functions is shown as "not determined" rather than an
+empty list whenever either the function-visit or definition-collection
+budget was hit, since the server leaves that list empty in both cases
+(an unvisited or uncollected function can't be proven dead code).
+
+Both windows navigate every compiler-supplied symbol/location via its
+`selectionRange` (falling back to the wider `range` only if the
+`selectionRange` is absent or malformed) -- never a location guessed from
+the symbol's name -- and both report reads (`"read"`), writes (`"write"`),
+or both (`"readWrite"`) conservatively: an access is only ever narrowed to
+read-only or write-only when the compiler's own cursor tree proves it. See
+the repository's
+[call hierarchy and entry-point data flow](../../docs/call-hierarchy.md)
+reference for the full protocol, the `CallHierarchyItem.data` identity
+envelope, and DXC's known limitations.
+
 ## Install
 
 Download `HlslLsp.VisualStudio.vsix` from the

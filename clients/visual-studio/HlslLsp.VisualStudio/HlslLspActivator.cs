@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -45,6 +46,10 @@ public sealed class HlslLspActivator :
     private HlslLanguageClient languageClient;
     private HlslNavigationBarManager navigationBars;
     private CancellationTokenSource navigationAttachCancellation;
+    private CancellationTokenSource unsavedHlslBufferDebounceCancellation;
+    private readonly ConditionalWeakTable<ITextBuffer, object> unsavedHlslBufferHookedBuffers =
+        new();
+    private static readonly object UnsavedHlslBufferHookedMarker = new();
     private HashSet<string> configuredExtensions =
         new(StringComparer.OrdinalIgnoreCase);
     private bool servicesReady;
@@ -158,6 +163,10 @@ public sealed class HlslLspActivator :
         MemoryLayoutBridge.Register(languageClient.GetMemoryLayoutAsync);
         CompilationInfoBridge.Register(languageClient.GetCompilationInfoAsync);
         PreprocessorExplorerBridge.Register(languageClient.GetPreprocessorExplorerAsync);
+        EntryPointDataFlowBridge.Register(languageClient.GetEntryPointDataFlowAsync);
+        CallHierarchyBridge.RegisterPrepare(languageClient.PrepareCallHierarchyAsync);
+        CallHierarchyBridge.RegisterIncomingCalls(languageClient.GetIncomingCallsAsync);
+        CallHierarchyBridge.RegisterOutgoingCalls(languageClient.GetOutgoingCallsAsync);
         VariantBridge.Register(
             languageClient.GetVariantsAsync,
             OnActiveVariantSelectedAsync);
@@ -407,6 +416,23 @@ public sealed class HlslLspActivator :
         joinableTaskFactory.RunAsync(
                 () => host.RefreshPreprocessorExplorerIfOpenAsync(null, cancellationToken))
             .FileAndForget("HlslLsp/RefreshPreprocessorExplorer");
+        // The Entry-Point Data Flow window issues its own request and is
+        // refreshed independently, mirroring the other windows above: a
+        // variant change can change the configured entry point, so a
+        // previously opened window can only become stale through this path.
+        joinableTaskFactory.RunAsync(
+                () => host.RefreshEntryPointDataFlowIfOpenAsync(null, cancellationToken))
+            .FileAndForget("HlslLsp/RefreshEntryPointDataFlow");
+        // The Call Hierarchy window issues its own request (re-fetching
+        // incoming/outgoing calls for its current item, not a fresh
+        // prepareCallHierarchy) and is refreshed independently, mirroring
+        // the other windows above: a variant change can change which
+        // declaration a previously resolved item's opaque data still
+        // identifies, so a previously opened window can only become stale
+        // through this path.
+        joinableTaskFactory.RunAsync(
+                () => host.RefreshCallHierarchyIfOpenAsync(null, cancellationToken))
+            .FileAndForget("HlslLsp/RefreshCallHierarchy");
     }
 
     // A saved HLSL document may change what the server would compile, so a
@@ -453,6 +479,20 @@ public sealed class HlslLspActivator :
             joinableTaskFactory.RunAsync(
                     () => host.RefreshPreprocessorExplorerIfOpenAsync(moniker, disposalToken))
                 .FileAndForget("HlslLsp/RefreshPreprocessorExplorerOnSave");
+            // The Entry-Point Data Flow window is refreshed independently on
+            // the same save, matching the same non-file/unrelated-document
+            // filtering performed inside RefreshEntryPointDataFlowIfOpenAsync.
+            joinableTaskFactory.RunAsync(
+                    () => host.RefreshEntryPointDataFlowIfOpenAsync(moniker, disposalToken))
+                .FileAndForget("HlslLsp/RefreshEntryPointDataFlowOnSave");
+            // The Call Hierarchy window is refreshed independently on the
+            // same save, matching the same non-file/unrelated-document
+            // filtering performed inside RefreshCallHierarchyIfOpenAsync
+            // (which re-fetches incoming/outgoing calls for its current
+            // item only).
+            joinableTaskFactory.RunAsync(
+                    () => host.RefreshCallHierarchyIfOpenAsync(moniker, disposalToken))
+                .FileAndForget("HlslLsp/RefreshCallHierarchyOnSave");
             return VSConstants.S_OK;
         }
         finally
@@ -586,6 +626,7 @@ public sealed class HlslLspActivator :
             {
                 buffer.ChangeContentType(GetOrCreateRemoteHeaderContentType(), this);
             }
+            HookUnsavedHlslBufferRefreshTrigger(buffer);
             return;
         }
         if (buffer.ContentType.IsOfType("HLSL"))
@@ -594,15 +635,103 @@ public sealed class HlslLspActivator :
             {
                 buffer.ChangeContentType(remoteShaderContentType, this);
             }
+            HookUnsavedHlslBufferRefreshTrigger(buffer);
             return;
         }
 
-        if (textDocuments.TryGetTextDocument(buffer, out var document) &&
-            configuredExtensions.Contains(
-                System.IO.Path.GetExtension(document.FilePath)))
+        if (textDocuments.TryGetTextDocument(buffer, out var document))
         {
-            buffer.ChangeContentType(remoteShaderContentType, this);
+            if (configuredExtensions.Contains(
+                    System.IO.Path.GetExtension(document.FilePath)))
+            {
+                buffer.ChangeContentType(remoteShaderContentType, this);
+                HookUnsavedHlslBufferRefreshTrigger(buffer);
+            }
+            // shadertoolsconfig.json is intentionally NOT hooked here: the
+            // server only ever reads it from disk (it is not part of
+            // textDocument sync the way HLSL/header content is), so an
+            // unsaved in-editor edit has no effect on the server's analysis
+            // until the file is saved. Debounced refresh on every keystroke
+            // here would just be wasted requests against unchanged server
+            // state. OnAfterSave's IsHlslOrConfigRelevantPath-filtered
+            // refresh already covers this file once its on-disk content
+            // actually changes.
         }
+    }
+
+    // Debounces unsaved edits to any open HLSL/header document (root or
+    // #include'd) into a single conservative refresh of both the
+    // Entry-Point Data Flow and Call Hierarchy windows: either window's
+    // result can depend on the active root document or any #include'd
+    // header even before the edited file is saved, and a
+    // save-only refresh (OnAfterSave below) would otherwise leave the
+    // window stale while the user is still actively editing.
+    // shadertoolsconfig.json is deliberately never hooked here (only on
+    // save) since the server only ever reads it from disk. ConditionalWeak
+    // Table avoids both double-subscribing the same buffer and leaking a
+    // strong reference to buffers that are later closed.
+    private void HookUnsavedHlslBufferRefreshTrigger(ITextBuffer buffer)
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        if (unsavedHlslBufferHookedBuffers.TryGetValue(buffer, out _))
+        {
+            return;
+        }
+        unsavedHlslBufferHookedBuffers.Add(buffer, UnsavedHlslBufferHookedMarker);
+        buffer.ChangedLowPriority += OnUnsavedHlslBufferRelevantBufferChanged;
+    }
+
+    private void OnUnsavedHlslBufferRelevantBufferChanged(
+        object sender,
+        TextContentChangedEventArgs eventArgs)
+    {
+        if (eventArgs.Changes.Count == 0)
+        {
+            return;
+        }
+        ScheduleUnsavedHlslBufferDebouncedRefresh();
+    }
+
+    // Mirrors ScheduleNavigationBarAttachment's cancel-and-replace pattern:
+    // each further edit cancels the previous pending refresh and starts a
+    // new delay, so a burst of keystrokes collapses into a single refresh
+    // once editing pauses, rather than one request per keystroke.
+    private void ScheduleUnsavedHlslBufferDebouncedRefresh()
+    {
+        var replacement =
+            CancellationTokenSource.CreateLinkedTokenSource(disposalToken);
+        var previous = Interlocked.Exchange(
+            ref unsavedHlslBufferDebounceCancellation,
+            replacement);
+        previous?.Cancel();
+        previous?.Dispose();
+        joinableTaskFactory.RunAsync(
+                () => DebounceUnsavedHlslBufferRefreshAsync(replacement.Token))
+            .FileAndForget("HlslLsp/DebounceUnsavedHlslBufferRefresh");
+    }
+
+    private async Task DebounceUnsavedHlslBufferRefreshAsync(
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(750), cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+        if (cancellationToken.IsCancellationRequested)
+        {
+            return;
+        }
+        await host.RefreshEntryPointDataFlowIfOpenAsync(null, cancellationToken);
+        // The Call Hierarchy window is refreshed independently on the same
+        // debounced trigger, matching the same non-file/unrelated-document
+        // filtering performed inside RefreshCallHierarchyIfOpenAsync (which
+        // re-runs prepareCallHierarchy at the original root position rather
+        // than trusting the possibly now-stale current item).
+        await host.RefreshCallHierarchyIfOpenAsync(null, cancellationToken);
     }
 
     private void DemoteOpenDocuments()

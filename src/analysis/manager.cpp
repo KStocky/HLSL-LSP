@@ -128,6 +128,18 @@ struct Manager::Impl final {
         std::string configuration;
         std::vector<std::string> compiler_arguments;
         std::int64_t version{};
+        // A monotonically increasing, process-wide counter bumped every
+        // time this root's translation unit is actually (re)compiled --
+        // i.e. whenever `cache_key` changes, whether from a root edit, an
+        // included file's edit, or a configuration/active-variant change --
+        // and left unchanged on a cache hit. Unlike `version` (the root
+        // document's own edit count), this also changes when only a
+        // dependency or configuration changed, which is exactly the gap
+        // call-hierarchy staleness validation needs to close: an item
+        // resolved against one compiled snapshot must never be silently
+        // reused against a later, differently-compiled one that happens to
+        // share the same root version.
+        std::uint64_t generation{};
         std::unordered_set<std::string> dependencies;
         bool has_dynamic_includes{};
         std::size_t estimated_bytes{};
@@ -293,6 +305,8 @@ struct Manager::Impl final {
                     entry->second.cache_key = std::move(cache_key);
                     entry->second.configuration = configuration;
                     entry->second.version = input.root.version();
+                    entry->second.generation =
+                        generation_counter.fetch_add(1, std::memory_order_relaxed) + 1;
                     entry->second.dependencies = std::move(resolution.dependency_identities);
                     entry->second.has_dynamic_includes = resolution.has_dynamic_includes;
                     entry->second.estimated_bytes = estimate;
@@ -317,6 +331,8 @@ struct Manager::Impl final {
                               .configuration = configuration,
                               .compiler_arguments = compiler_arguments,
                               .version = input.root.version(),
+                              .generation =
+                                  generation_counter.fetch_add(1, std::memory_order_relaxed) + 1,
                               .dependencies = std::move(resolution.dependency_identities),
                               .has_dynamic_includes = resolution.has_dynamic_includes,
                               .estimated_bytes = estimate,
@@ -471,6 +487,11 @@ struct Manager::Impl final {
     mutable std::mutex metadata_mutex;
     std::unordered_map<std::string, RootMetadata> metadata;
     std::unordered_map<std::string, std::uint64_t> root_epochs;
+    // Process-wide source of `Entry::generation` values (see its
+    // declaration for why this must be distinct from `version`); shared
+    // across all workers/roots so a value is never reused even across
+    // entry eviction/recreation.
+    std::atomic<std::uint64_t> generation_counter{};
     std::atomic_bool stopped;
     std::atomic<std::uint64_t> parse_count;
     std::atomic<std::uint64_t> reparse_count;
@@ -695,6 +716,111 @@ std::vector<dxc::Symbol> Manager::symbols(std::string root_identity, std::int64_
     return implementation_->query<std::vector<dxc::Symbol>>(
         std::move(root_identity), version, cancellation,
         [](Impl::Entry& entry) { return entry.translation_unit.symbols(); });
+}
+
+WithGeneration<std::optional<dxc::CallableSymbol>>
+Manager::callable_at(std::string root_identity, std::int64_t version, std::string path,
+                     std::uint32_t line, std::uint32_t column,
+                     const json_rpc::CancellationToken& cancellation) {
+    return implementation_->query<WithGeneration<std::optional<dxc::CallableSymbol>>>(
+        std::move(root_identity), version, cancellation,
+        [requested_path = std::move(path), line,
+         column](Impl::Entry& entry) -> WithGeneration<std::optional<dxc::CallableSymbol>> {
+            // `prepareCallHierarchy` always targets the currently open root
+            // document, so -- exactly like `definition`/`hover` above --
+            // resolve against the compiler-canonical `entry.root_path`
+            // rather than the caller's native-style path: DXC registers
+            // sources with forward-slash generic paths (see
+            // `normalized_physical_path(...).generic_string()` in
+            // `workspace::resolve_includes`), and `IDxcTranslationUnit::
+            // GetFile` requires an exact match, which a native
+            // backslash-style Windows path is not.
+            static_cast<void>(requested_path);
+            return {.value = entry.translation_unit.callable_at(entry.root_path, line, column),
+                    .generation = entry.generation};
+        });
+}
+
+WithGeneration<std::vector<dxc::OutgoingCall>>
+Manager::outgoing_calls(std::string root_identity, std::int64_t version, std::string path,
+                        std::uint32_t line, std::uint32_t column,
+                        const json_rpc::CancellationToken& cancellation) {
+    return implementation_->query<WithGeneration<std::vector<dxc::OutgoingCall>>>(
+        std::move(root_identity), version, cancellation,
+        [requested_path = std::move(path), line, column,
+         cancellation](Impl::Entry& entry) -> WithGeneration<std::vector<dxc::OutgoingCall>> {
+            return {.value = entry.translation_unit.outgoing_calls(
+                        requested_path, line, column,
+                        [cancellation] { cancellation.throw_if_cancellation_requested(); }),
+                    .generation = entry.generation};
+        });
+}
+
+WithGeneration<std::vector<dxc::IncomingCall>>
+Manager::incoming_calls(std::string root_identity, std::int64_t version, std::string path,
+                        std::uint32_t line, std::uint32_t column,
+                        const json_rpc::CancellationToken& cancellation) {
+    return implementation_->query<WithGeneration<std::vector<dxc::IncomingCall>>>(
+        std::move(root_identity), version, cancellation,
+        [requested_path = std::move(path), line, column,
+         cancellation](Impl::Entry& entry) -> WithGeneration<std::vector<dxc::IncomingCall>> {
+            return {.value = entry.translation_unit.incoming_calls(
+                        requested_path, line, column,
+                        [cancellation] { cancellation.throw_if_cancellation_requested(); }),
+                    .generation = entry.generation};
+        });
+}
+
+WithGeneration<dxc::EntryPointDataFlow>
+Manager::entry_point_data_flow(std::string root_identity, std::int64_t version,
+                               dxc::EntryPointDataFlowLimits limits,
+                               const json_rpc::CancellationToken& cancellation) {
+    return implementation_->query<WithGeneration<dxc::EntryPointDataFlow>>(
+        std::move(root_identity), version, cancellation,
+        [limits, cancellation](Impl::Entry& entry) -> WithGeneration<dxc::EntryPointDataFlow> {
+            return {.value = entry.translation_unit.entry_point_data_flow(
+                        limits, [cancellation] { cancellation.throw_if_cancellation_requested(); }),
+                    .generation = entry.generation};
+        });
+}
+
+std::uint64_t Manager::content_generation(std::string root_identity, std::int64_t version,
+                                          const json_rpc::CancellationToken& cancellation) {
+    return implementation_->query<std::uint64_t>(
+        std::move(root_identity), version, cancellation,
+        [](Impl::Entry& entry) { return entry.generation; });
+}
+
+std::optional<std::uint64_t> Manager::verify_call_hierarchy_identity(
+    std::string root_identity, std::int64_t version, std::string path, std::uint32_t line,
+    std::uint32_t column, std::uint32_t expected_start_offset, std::uint32_t expected_cursor_kind,
+    std::string expected_name, const json_rpc::CancellationToken& cancellation) {
+    return implementation_->query<std::optional<std::uint64_t>>(
+        std::move(root_identity), version, cancellation,
+        [requested_path = std::move(path), line, column, expected_start_offset,
+         expected_cursor_kind, expected_name = std::move(expected_name)](
+            Impl::Entry& entry) -> std::optional<std::uint64_t> {
+            // Re-resolves the callable at the item's own stored position
+            // within the *current* translation unit -- which may differ
+            // from the one a CallHierarchyItem was originally built from
+            // even though `root_identity`/`version` (the root document's
+            // own edit count) are unchanged, because an included file was
+            // edited or the effective configuration/active variant
+            // changed: `Manager::analyze` reparses/recompiles in either
+            // case without bumping the root's own `version`. Comparing the
+            // freshly-resolved cursor's own identity
+            // (path/start_offset/cursor_kind/name) against what was
+            // captured when the item was built is what actually detects
+            // that the stored `data` no longer describes the same symbol,
+            // rather than trusting the stored path/startOffset/kind/name
+            // fields without validating them against the current analysis.
+            const auto current = entry.translation_unit.callable_at(requested_path, line, column);
+            if (!current.has_value() || current->start_offset != expected_start_offset ||
+                current->cursor_kind != expected_cursor_kind || current->name != expected_name) {
+                return std::nullopt;
+            }
+            return entry.generation;
+        });
 }
 
 std::vector<RootMetadata> Manager::roots() const {

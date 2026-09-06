@@ -2566,6 +2566,1404 @@ TEST_CASE("Pinned DXC exposes built-in type declarations but not constructor ove
           completions.end());
 }
 
+TEST_CASE("Call hierarchy resolves direct calls with overload identity",
+          "[dxc][call-hierarchy][integration]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    const std::string source = "float helper(float value) { return value * 2.0; }\n"
+                               "float helper(float value, float bias) { return value + bias; }\n"
+                               "float4 main() : SV_Target {\n"
+                               "    float scalar = helper(1.0);\n"
+                               "    float biased = helper(1.0, 2.0);\n"
+                               "    return (scalar + biased).xxxx;\n"
+                               "}\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}});
+    REQUIRE(translation_unit.diagnostics().empty());
+
+    const auto main_symbol = translation_unit.callable_at(shader_path, 3, 8);
+    REQUIRE(main_symbol.has_value());
+    CHECK(main_symbol->name == "main");
+    CHECK(main_symbol->is_definition);
+
+    const auto outgoing = translation_unit.outgoing_calls(shader_path, 3, 8);
+    REQUIRE(outgoing.size() == 2);
+    // Overload identity must be resolved via the compiler cursor the call
+    // expression actually references, not by name: both calls are named
+    // "helper", but must resolve to their own, distinct declaration line.
+    CHECK(outgoing[0].callee.name == "helper");
+    CHECK(outgoing[0].callee.location.line == 1);
+    REQUIRE(outgoing[0].call_sites.size() == 1);
+    CHECK(outgoing[0].call_sites[0].location.line == 4);
+    CHECK(outgoing[1].callee.name == "helper");
+    CHECK(outgoing[1].callee.location.line == 2);
+    REQUIRE(outgoing[1].call_sites.size() == 1);
+    CHECK(outgoing[1].call_sites[0].location.line == 5);
+
+    const auto incoming_single_arg = translation_unit.incoming_calls(shader_path, 1, 7);
+    REQUIRE(incoming_single_arg.size() == 1);
+    CHECK(incoming_single_arg[0].caller.name == "main");
+    REQUIRE(incoming_single_arg[0].call_sites.size() == 1);
+    CHECK(incoming_single_arg[0].call_sites[0].location.line == 4);
+
+    const auto incoming_two_arg = translation_unit.incoming_calls(shader_path, 2, 7);
+    REQUIRE(incoming_two_arg.size() == 1);
+    CHECK(incoming_two_arg[0].caller.name == "main");
+    REQUIRE(incoming_two_arg[0].call_sites.size() == 1);
+    CHECK(incoming_two_arg[0].call_sites[0].location.line == 5);
+}
+
+TEST_CASE("Call hierarchy reports every call site when a caller invokes the same callee twice",
+          "[dxc][call-hierarchy][integration]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    const std::string source = "float helper(float value) { return value * 2.0; }\n"
+                               "float4 main() : SV_Target {\n"
+                               "    float first = helper(1.0);\n"
+                               "    float second = helper(2.0);\n"
+                               "    return (first + second).xxxx;\n"
+                               "}\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}});
+    REQUIRE(translation_unit.diagnostics().empty());
+
+    const auto outgoing = translation_unit.outgoing_calls(shader_path, 2, 8);
+    REQUIRE(outgoing.size() == 1);
+    REQUIRE(outgoing[0].call_sites.size() == 2);
+    CHECK(outgoing[0].call_sites[0].location.line == 3);
+    CHECK(outgoing[0].call_sites[1].location.line == 4);
+
+    const auto incoming = translation_unit.incoming_calls(shader_path, 1, 7);
+    REQUIRE(incoming.size() == 1);
+    REQUIRE(incoming[0].call_sites.size() == 2);
+    CHECK(incoming[0].call_sites[0].location.line == 3);
+    CHECK(incoming[0].call_sites[1].location.line == 4);
+}
+
+TEST_CASE("Call hierarchy resolves calls across an unsaved include and reparsed edits",
+          "[dxc][call-hierarchy][includes][reparse][integration]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    const auto root = (std::filesystem::current_path() / "call-hierarchy.hlsl").generic_string();
+    const auto include =
+        (std::filesystem::current_path() / "call-hierarchy.hlsli").generic_string();
+    const std::string include_source = "float square(float value) { return value * value; }\n";
+    const std::string root_source = "#include \"call-hierarchy.hlsli\"\n"
+                                    "float4 main() : SV_Target {\n"
+                                    "    return square(2.0).xxxx;\n"
+                                    "}\n";
+    auto translation_unit =
+        intellisense.parse(root, {{root, root_source}, {include, include_source}});
+    REQUIRE(translation_unit.diagnostics().empty());
+
+    const auto outgoing = translation_unit.outgoing_calls(root, 2, 8);
+    REQUIRE(outgoing.size() == 1);
+    CHECK(outgoing[0].callee.location.path == include);
+
+    const auto incoming = translation_unit.incoming_calls(include, 1, 7);
+    REQUIRE(incoming.size() == 1);
+    CHECK(incoming[0].caller.location.path == root);
+    REQUIRE(incoming[0].call_sites.size() == 1);
+    CHECK(incoming[0].call_sites[0].location.line == 3);
+
+    // Editing the (still unsaved) include to add a second caller must be
+    // reflected without re-parsing from disk.
+    const std::string edited_root_source = "#include \"call-hierarchy.hlsli\"\n"
+                                           "float4 main() : SV_Target {\n"
+                                           "    return (square(2.0) + square(3.0)).xxxx;\n"
+                                           "}\n";
+    translation_unit.reparse({{root, edited_root_source}, {include, include_source}});
+    const auto incoming_after_edit = translation_unit.incoming_calls(include, 1, 7);
+    REQUIRE(incoming_after_edit.size() == 1);
+    REQUIRE(incoming_after_edit[0].call_sites.size() == 2);
+}
+
+TEST_CASE("Call hierarchy represents recursion instead of dropping it",
+          "[dxc][call-hierarchy][integration]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    const std::string source = "float factorial(float value) {\n"
+                               "    if (value <= 1.0) { return 1.0; }\n"
+                               "    return value * factorial(value - 1.0);\n"
+                               "}\n"
+                               "float4 main() : SV_Target { return factorial(4.0).xxxx; }\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}});
+    REQUIRE(translation_unit.diagnostics().empty());
+
+    const auto outgoing = translation_unit.outgoing_calls(shader_path, 1, 7);
+    REQUIRE(outgoing.size() == 1);
+    CHECK(outgoing[0].callee.name == "factorial");
+    CHECK(outgoing[0].callee.location.line == 1);
+    REQUIRE(outgoing[0].call_sites.size() == 1);
+    CHECK(outgoing[0].call_sites[0].location.line == 3);
+
+    const auto incoming = translation_unit.incoming_calls(shader_path, 1, 7);
+    // Both the self-recursive call site and main()'s call site must be
+    // represented as distinct callers, not merged or dropped.
+    REQUIRE(incoming.size() == 2);
+    const auto find_caller = [&incoming](std::string_view name) {
+        return std::ranges::find(incoming, name, [](const auto& call) { return call.caller.name; });
+    };
+    const auto self_call = find_caller("factorial");
+    REQUIRE(self_call != incoming.end());
+    REQUIRE(self_call->call_sites.size() == 1);
+    CHECK(self_call->call_sites[0].location.line == 3);
+    const auto main_call = find_caller("main");
+    REQUIRE(main_call != incoming.end());
+    REQUIRE(main_call->call_sites.size() == 1);
+    CHECK(main_call->call_sites[0].location.line == 5);
+}
+
+TEST_CASE("Call hierarchy resolves calls through struct methods",
+          "[dxc][call-hierarchy][integration]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    const std::string source = "struct Material {\n"
+                               "    float roughness;\n"
+                               "    float Shade(float value) { return value * roughness; }\n"
+                               "};\n"
+                               "float4 main() : SV_Target {\n"
+                               "    Material material = (Material)0;\n"
+                               "    return material.Shade(1.0).xxxx;\n"
+                               "}\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}});
+    REQUIRE(translation_unit.diagnostics().empty());
+
+    const auto outgoing = translation_unit.outgoing_calls(shader_path, 5, 8);
+    REQUIRE(outgoing.size() == 1);
+    CHECK(outgoing[0].callee.name == "Shade");
+    CHECK(outgoing[0].callee.location.line == 3);
+
+    const auto incoming = translation_unit.incoming_calls(shader_path, 3, 11);
+    REQUIRE(incoming.size() == 1);
+    CHECK(incoming[0].caller.name == "main");
+}
+
+TEST_CASE("Call hierarchy has no outgoing calls for a leaf function and no incoming calls for an "
+          "unreferenced function",
+          "[dxc][call-hierarchy][integration]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    const std::string source = "float unused(float value) { return value; }\n"
+                               "float leaf(float value) { return value * 2.0; }\n"
+                               "float4 main() : SV_Target { return leaf(1.0).xxxx; }\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}});
+    REQUIRE(translation_unit.diagnostics().empty());
+
+    CHECK(translation_unit.outgoing_calls(shader_path, 2, 7).empty());
+    CHECK(translation_unit.incoming_calls(shader_path, 1, 7).empty());
+}
+
+TEST_CASE("Call hierarchy rejects a position that does not resolve to a callable",
+          "[dxc][call-hierarchy][integration]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    const std::string source = "float4 main() : SV_Target {\n"
+                               "    float value = 1.0;\n"
+                               "    return value.xxxx;\n"
+                               "}\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}});
+    REQUIRE(translation_unit.diagnostics().empty());
+
+    CHECK_FALSE(translation_unit.callable_at(shader_path, 2, 11).has_value());
+    CHECK(translation_unit.outgoing_calls(shader_path, 2, 11).empty());
+    CHECK(translation_unit.incoming_calls(shader_path, 2, 11).empty());
+}
+
+TEST_CASE("Outgoing calls honor a cancellation checkpoint fired partway through body scanning, "
+          "not only before the query starts",
+          "[dxc][call-hierarchy][cancellation][integration]") {
+    // Regression: `outgoing_calls` previously accepted no cancellation
+    // checkpoint at all, so a large function body's scan could not be
+    // cancelled once started and would occupy the analysis worker until it
+    // finished. A body with many simple statements is large enough that
+    // `BodyScanner`'s own per-512-node checkpoint fires multiple times
+    // during a single scan; this first measures how many times a
+    // non-throwing counting checkpoint fires over a normal, completed
+    // scan, then reruns with a checkpoint that throws partway through that
+    // same count -- proving cancellation genuinely interrupts scanning
+    // mid-traversal rather than only being checked once up front.
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    constexpr int statement_count = 3000;
+    std::string body = "float scan(float value) {\n";
+    for (int index = 0; index < statement_count; ++index) {
+        body += "    value = value + 1.0;\n";
+    }
+    body += "    return callee(value);\n}\n";
+    const std::string source = "float callee(float value) { return value; }\n" + body +
+                               "float4 main() : SV_Target { return scan(1.0).xxxx; }\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}});
+    REQUIRE(translation_unit.diagnostics().empty());
+    // `scan` is declared on the line after `callee`.
+    constexpr std::uint32_t scan_line = 2;
+
+    std::uint64_t baseline_checkpoint_calls = 0;
+    const auto baseline = translation_unit.outgoing_calls(shader_path, scan_line, 7,
+                                                          [&] { ++baseline_checkpoint_calls; });
+    REQUIRE(baseline.size() == 1);
+    CHECK(baseline[0].callee.name == "callee");
+    // Multiple checkpoint calls over one scan proves there are genuinely
+    // several checkpoint opportunities mid-traversal, not just one.
+    REQUIRE(baseline_checkpoint_calls > 1);
+
+    struct CancelledError final : std::runtime_error {
+        CancelledError() : std::runtime_error{"cancelled"} {}
+    };
+    std::uint64_t checkpoint_calls = 0;
+    const auto interior_threshold = baseline_checkpoint_calls / 2;
+    CHECK_THROWS_AS(translation_unit.outgoing_calls(shader_path, scan_line, 7,
+                                                    [&] {
+                                                        if (++checkpoint_calls >
+                                                            interior_threshold) {
+                                                            throw CancelledError{};
+                                                        }
+                                                    }),
+                    CancelledError);
+}
+
+TEST_CASE("Incoming calls honor a cancellation checkpoint fired partway through reference "
+          "traversal, not only before the query starts",
+          "[dxc][call-hierarchy][cancellation][integration]") {
+    // Regression: `incoming_calls` previously accepted no cancellation
+    // checkpoint at all, so a large reference scan (many call sites, many
+    // sources, or many pages of `FindReferencesInFile` results) could not
+    // be cancelled once started. This calls `target` from enough distinct
+    // sites that `FindReferencesInFile`'s 256-entry pages span more than
+    // one page, exercising the per-source, per-page, and per-reference
+    // checkpoints together; it then proves cancellation genuinely
+    // interrupts traversal mid-scan the same way as the outgoing-calls
+    // regression above.
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    constexpr int call_count = 600;
+    std::string body = "float caller(float value) {\n";
+    for (int index = 0; index < call_count; ++index) {
+        body += "    value = target(value);\n";
+    }
+    body += "    return value;\n}\n";
+    const std::string source = "float target(float value) { return value; }\n" + body +
+                               "float4 main() : SV_Target { return caller(1.0).xxxx; }\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}});
+    REQUIRE(translation_unit.diagnostics().empty());
+
+    std::uint64_t baseline_checkpoint_calls = 0;
+    const auto baseline =
+        translation_unit.incoming_calls(shader_path, 1, 7, [&] { ++baseline_checkpoint_calls; });
+    REQUIRE(baseline.size() == 1);
+    CHECK(baseline[0].caller.name == "caller");
+    CHECK(baseline[0].call_sites.size() == static_cast<std::size_t>(call_count));
+    REQUIRE(baseline_checkpoint_calls > 1);
+
+    struct CancelledError final : std::runtime_error {
+        CancelledError() : std::runtime_error{"cancelled"} {}
+    };
+    std::uint64_t checkpoint_calls = 0;
+    const auto interior_threshold = baseline_checkpoint_calls / 2;
+    CHECK_THROWS_AS(translation_unit.incoming_calls(shader_path, 1, 7,
+                                                    [&] {
+                                                        if (++checkpoint_calls >
+                                                            interior_threshold) {
+                                                            throw CancelledError{};
+                                                        }
+                                                    }),
+                    CancelledError);
+}
+
+TEST_CASE("Entry-point data flow traces reachable functions and reports unreachable ones",
+          "[dxc][entry-point-data-flow][integration]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.entry_point = "main";
+    const std::string source = "float helper(float value) { return value * 2.0; }\n"
+                               "float deadCode(float value) { return value + 1.0; }\n"
+                               "float4 main() : SV_Target { return helper(1.0).xxxx; }\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+    REQUIRE(translation_unit.diagnostics().empty());
+
+    const auto flow = translation_unit.entry_point_data_flow();
+    REQUIRE(flow.found);
+    REQUIRE(flow.entry_point.has_value());
+    CHECK(flow.entry_point->name == "main");
+
+    REQUIRE(flow.reachable_functions.size() == 2);
+    CHECK(flow.reachable_functions[0].function.name == "main");
+    CHECK(flow.reachable_functions[0].depth == 0);
+    CHECK_FALSE(flow.reachable_functions[0].recursive);
+    CHECK(flow.reachable_functions[1].function.name == "helper");
+    CHECK(flow.reachable_functions[1].depth == 1);
+    CHECK_FALSE(flow.reachable_functions[1].recursive);
+
+    REQUIRE(flow.unreachable_functions.size() == 1);
+    CHECK(flow.unreachable_functions[0].name == "deadCode");
+    CHECK_FALSE(flow.truncated);
+}
+
+TEST_CASE("Entry-point data flow marks self-recursion and mutual recursion without truncation",
+          "[dxc][entry-point-data-flow][integration]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.entry_point = "main";
+    const std::string source = "float isOdd(float value);\n"
+                               "float isEven(float value) {\n"
+                               "    if (value <= 0.0) { return 1.0; }\n"
+                               "    return isOdd(value - 1.0);\n"
+                               "}\n"
+                               "float isOdd(float value) {\n"
+                               "    if (value <= 0.0) { return 0.0; }\n"
+                               "    return isEven(value - 1.0);\n"
+                               "}\n"
+                               "float factorial(float value) {\n"
+                               "    if (value <= 1.0) { return 1.0; }\n"
+                               "    return value * factorial(value - 1.0);\n"
+                               "}\n"
+                               "float4 main() : SV_Target {\n"
+                               "    return (isEven(4.0) + factorial(4.0)).xxxx;\n"
+                               "}\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+    REQUIRE(translation_unit.diagnostics().empty());
+
+    const auto flow = translation_unit.entry_point_data_flow();
+    REQUIRE(flow.found);
+    const auto find_reachable = [&flow](std::string_view name) {
+        return std::ranges::find(flow.reachable_functions, name,
+                                 [](const auto& reachable) { return reachable.function.name; });
+    };
+    const auto even = find_reachable("isEven");
+    REQUIRE(even != flow.reachable_functions.end());
+    CHECK(even->recursive);
+    const auto odd = find_reachable("isOdd");
+    REQUIRE(odd != flow.reachable_functions.end());
+    CHECK(odd->recursive);
+    const auto factorial = find_reachable("factorial");
+    REQUIRE(factorial != flow.reachable_functions.end());
+    CHECK(factorial->recursive);
+    CHECK_FALSE(flow.truncated);
+}
+
+TEST_CASE("Entry-point data flow correctly classifies recursion on a call chain long enough to "
+          "overflow a recursive cycle-detection stack",
+          "[dxc][entry-point-data-flow][integration][stress]") {
+    // Regression for a stack-overflow risk: cycle detection used to be a
+    // recursive DFS, so a single long chain reachable from the entry point
+    // would grow the native call stack by one frame per edge -- and with
+    // `EntryPointDataFlowLimits::max_functions_visited` defaulting to 4096
+    // (raised here so the whole chain is actually visited, not truncated),
+    // a naturally occurring translation unit could reach exactly that
+    // stack depth. This builds a single 8000-node cycle (comfortably past
+    // typical default thread stack limits) reachable from `main` and
+    // proves the iterative, explicit-stack DFS completes without
+    // overflowing the stack (a crash cannot be caught by Catch2 -- simply
+    // returning from this test case at all is part of what it proves) and
+    // still classifies every node in the cycle as recursive.
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.entry_point = "main";
+    constexpr int chain_length = 8000;
+    std::string source;
+    for (int index = 0; index < chain_length; ++index) {
+        source += "float node" + std::to_string(index) + "(float value);\n";
+    }
+    for (int index = 0; index < chain_length; ++index) {
+        const int next = (index + 1) % chain_length;
+        source += "float node" + std::to_string(index) + "(float value) { return node" +
+                  std::to_string(next) + "(value) + 1.0; }\n";
+    }
+    source += "float4 main() : SV_Target { return node0(1.0).xxxx; }\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+    REQUIRE(translation_unit.diagnostics().empty());
+
+    const auto flow =
+        translation_unit.entry_point_data_flow(hlsl_intellisense::dxc::EntryPointDataFlowLimits{
+            .max_functions_visited = 10000, .max_unused_declaration_candidates = 20000});
+    REQUIRE(flow.found);
+    CHECK_FALSE(flow.truncated);
+    CHECK_FALSE(flow.functions_visited_truncated);
+    // `main` plus every node in the 8000-node cycle.
+    CHECK(flow.functions_visited == chain_length + 1);
+    REQUIRE(flow.reachable_functions.size() == flow.functions_visited);
+    std::size_t recursive_count = 0;
+    for (const auto& reachable : flow.reachable_functions) {
+        if (reachable.function.name == "main") {
+            CHECK_FALSE(reachable.recursive);
+            continue;
+        }
+        CHECK(reachable.recursive);
+        if (reachable.recursive) {
+            ++recursive_count;
+        }
+    }
+    CHECK(recursive_count == chain_length);
+}
+
+TEST_CASE("Entry-point data flow marks every member of a non-trivial three-node strongly "
+          "connected component even when a naive back-edge-only cycle check would miss one node",
+          "[dxc][entry-point-data-flow][integration]") {
+    // Regression for a cycle-detection algorithm that only found cycles by
+    // checking whether a successor is still on the *current* DFS path
+    // (classic white/gray/black back-edge detection): with edges
+    // funcA->funcB, funcB->funcA, funcA->funcC, funcC->funcB, a DFS from
+    // funcA fully finishes funcB's subtree (correctly finding the direct
+    // funcA<->funcB cycle) *before* visiting funcC, so by the time
+    // funcC->funcB is examined, funcB is already finalized and the edge is
+    // silently ignored -- even though funcC can reach back to funcA (via
+    // funcB) and is therefore in the very same strongly connected
+    // component as funcA and funcB. Only a real SCC algorithm (Kosaraju's,
+    // used here) reports funcC as recursive. funcD is reached only forward
+    // from the cycle and must NOT be marked recursive, proving the fix
+    // does not over-approximate SCC membership either.
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.entry_point = "main";
+    const std::string source =
+        "float funcA(float value);\n"
+        "float funcB(float value);\n"
+        "float funcC(float value);\n"
+        "float funcD(float value);\n"
+        "float funcA(float value) { return funcB(value) + funcC(value) + 1.0; }\n"
+        "float funcB(float value) { return funcA(value) + 1.0; }\n"
+        "float funcC(float value) { return funcB(value) + funcD(value); }\n"
+        "float funcD(float value) { return value + 1.0; }\n"
+        "float4 main() : SV_Target { return funcA(1.0).xxxx; }\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+    REQUIRE(translation_unit.diagnostics().empty());
+
+    const auto flow = translation_unit.entry_point_data_flow();
+    REQUIRE(flow.found);
+    const auto find_reachable = [&flow](std::string_view name) {
+        return std::ranges::find(flow.reachable_functions, name,
+                                 [](const auto& reachable) { return reachable.function.name; });
+    };
+    const auto func_a = find_reachable("funcA");
+    REQUIRE(func_a != flow.reachable_functions.end());
+    CHECK(func_a->recursive);
+    const auto func_b = find_reachable("funcB");
+    REQUIRE(func_b != flow.reachable_functions.end());
+    CHECK(func_b->recursive);
+    const auto func_c = find_reachable("funcC");
+    REQUIRE(func_c != flow.reachable_functions.end());
+    CHECK(func_c->recursive);
+    const auto func_d = find_reachable("funcD");
+    REQUIRE(func_d != flow.reachable_functions.end());
+    CHECK_FALSE(func_d->recursive);
+    const auto main_reachable = find_reachable("main");
+    REQUIRE(main_reachable != flow.reachable_functions.end());
+    CHECK_FALSE(main_reachable->recursive);
+    CHECK_FALSE(flow.truncated);
+}
+
+TEST_CASE("Entry-point data flow correctly separates thousands of chained three-node cycles into "
+          "distinct strongly connected components without overflowing the SCC passes' stack",
+          "[dxc][entry-point-data-flow][integration][stress]") {
+    // Regression for the iterative Kosaraju SCC replacement at scale: this
+    // builds a long chain of thousands of independent 3-node cycles (the
+    // exact a/b/c shape above) where each cycle's third node also calls
+    // into the *next* cycle's entry point -- a purely forward edge that
+    // must never be mistaken for a cycle. This exercises both DFS passes
+    // (the forward finishing-order pass and the reverse transpose pass)
+    // across thousands of components without overflowing the native stack
+    // (a crash here cannot be caught by Catch2 -- simply returning from
+    // this test at all is part of what it proves), and proves component
+    // boundaries are respected: every node inside a cycle is `recursive`,
+    // while the forward-only chaining edges between cycles never leak
+    // recursion into an unrelated component.
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.entry_point = "main";
+    constexpr int cluster_count = 2500;
+    std::string source;
+    for (int index = 0; index < cluster_count; ++index) {
+        source += "float a" + std::to_string(index) + "(float value);\n";
+        source += "float b" + std::to_string(index) + "(float value);\n";
+        source += "float c" + std::to_string(index) + "(float value);\n";
+    }
+    for (int index = 0; index < cluster_count; ++index) {
+        const std::string a = "a" + std::to_string(index);
+        const std::string b = "b" + std::to_string(index);
+        const std::string c = "c" + std::to_string(index);
+        source +=
+            "float " + a + "(float value) { return " + b + "(value) + " + c + "(value) + 1.0; }\n";
+        source += "float " + b + "(float value) { return " + a + "(value) + 1.0; }\n";
+        if (index + 1 < cluster_count) {
+            const std::string next_a = "a" + std::to_string(index + 1);
+            source += "float " + c + "(float value) { return " + b + "(value) + " + next_a +
+                      "(value); }\n";
+        } else {
+            source += "float " + c + "(float value) { return " + b + "(value) + 1.0; }\n";
+        }
+    }
+    source += "float4 main() : SV_Target { return a0(1.0).xxxx; }\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+    REQUIRE(translation_unit.diagnostics().empty());
+
+    const auto flow =
+        translation_unit.entry_point_data_flow(hlsl_intellisense::dxc::EntryPointDataFlowLimits{
+            .max_functions_visited = static_cast<std::size_t>(cluster_count) * 3 + 10,
+            .max_unused_declaration_candidates = static_cast<std::size_t>(cluster_count) * 3 + 20});
+    REQUIRE(flow.found);
+    CHECK_FALSE(flow.truncated);
+    CHECK_FALSE(flow.functions_visited_truncated);
+    REQUIRE(flow.functions_visited == static_cast<std::size_t>(cluster_count) * 3 + 1);
+    REQUIRE(flow.reachable_functions.size() == flow.functions_visited);
+
+    const auto find_reachable = [&flow](std::string_view name) {
+        return std::ranges::find(flow.reachable_functions, name,
+                                 [](const auto& reachable) { return reachable.function.name; });
+    };
+    const auto main_reachable = find_reachable("main");
+    REQUIRE(main_reachable != flow.reachable_functions.end());
+    CHECK_FALSE(main_reachable->recursive);
+
+    std::size_t recursive_count = 0;
+    for (const auto& reachable : flow.reachable_functions) {
+        if (reachable.recursive) {
+            ++recursive_count;
+        }
+    }
+    // Every a/b/c triplet forms its own 3-node cycle; `main` is the only
+    // non-recursive node.
+    CHECK(recursive_count == static_cast<std::size_t>(cluster_count) * 3);
+}
+
+TEST_CASE("Entry-point data flow reports conservative global and resource read/write access",
+          "[dxc][entry-point-data-flow][integration]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.entry_point = "main";
+    options.target_profile = "cs_6_6";
+    const std::string source = "cbuffer Constants : register(b0) {\n"
+                               "    float readOnlyScalar;\n"
+                               "    float readWriteScalar;\n"
+                               "}\n"
+                               "RWStructuredBuffer<float> buf : register(u0);\n"
+                               "static float globalAccumulator = 0.0;\n"
+                               "float readGlobal() { return readOnlyScalar; }\n"
+                               "void writeGlobal() { globalAccumulator = readWriteScalar; }\n"
+                               "[numthreads(1, 1, 1)]\n"
+                               "void main(uint3 id : SV_DispatchThreadID) {\n"
+                               "    writeGlobal();\n"
+                               "    float sampled = readGlobal();\n"
+                               "    buf[id.x] = sampled + globalAccumulator;\n"
+                               "    float stored = buf[id.x];\n"
+                               "    buf[id.x] += 1.0;\n"
+                               "}\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+    REQUIRE(translation_unit.diagnostics().empty());
+
+    const auto flow = translation_unit.entry_point_data_flow();
+    REQUIRE(flow.found);
+
+    using hlsl_intellisense::dxc::GlobalAccessKind;
+    const auto find_access = [&flow](std::string_view name) {
+        return std::ranges::find(flow.global_accesses, name,
+                                 [](const auto& access) { return access.name; });
+    };
+
+    const auto read_only = find_access("readOnlyScalar");
+    REQUIRE(read_only != flow.global_accesses.end());
+    CHECK(read_only->access == GlobalAccessKind::read);
+
+    const auto read_write_scalar = find_access("readWriteScalar");
+    REQUIRE(read_write_scalar != flow.global_accesses.end());
+    CHECK(read_write_scalar->access == GlobalAccessKind::read);
+
+    const auto accumulator = find_access("globalAccumulator");
+    REQUIRE(accumulator != flow.global_accesses.end());
+    // Read once (RHS of buf[id.x] assignment) and written once (LHS of
+    // writeGlobal's assignment): must merge to read_write, never
+    // de-escalated back to read or write alone.
+    CHECK(accumulator->access == GlobalAccessKind::read_write);
+
+    const auto resource = find_access("buf");
+    REQUIRE(resource != flow.global_accesses.end());
+    // buf[id.x] is both read (`float stored = buf[id.x];`), written
+    // (`buf[id.x] = ...`), and read-modify-written (`buf[id.x] += 1.0;`):
+    // must merge to read_write.
+    CHECK(resource->access == GlobalAccessKind::read_write);
+}
+
+TEST_CASE("Entry-point data flow continues conservatively merging an already-retained global "
+          "access after the retention budget rejects a later, different global",
+          "[dxc][entry-point-data-flow][integration]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.entry_point = "main";
+    const std::string source = "static float g = 0.0;\n"
+                               "static float h = 0.0;\n"
+                               "float4 main() : SV_Target {\n"
+                               "    float a = g;\n"
+                               "    float b = h;\n"
+                               "    g = 1.0;\n"
+                               "    return (a + b).xxxx;\n"
+                               "}\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+    REQUIRE(translation_unit.diagnostics().empty());
+
+    // Order matters here: `g` is read first (`float a = g;`) and retained
+    // (capacity 1). `h` is read second (`float b = h;`) and, being a new,
+    // unseen key with the retention set already at capacity, is rejected
+    // and sets `global_accesses_truncated`. The later write `g = 1.0;`
+    // must still be merged into the already-retained `g` entry -- upgrading
+    // it from `read` to `read_write` -- even though the scanner is by then
+    // in a truncated state: rejecting only *unseen* keys past capacity,
+    // while continuing to conservatively merge already-retained keys, is
+    // exactly the contract under test.
+    hlsl_intellisense::dxc::EntryPointDataFlowLimits limits;
+    limits.max_global_accesses = 1;
+    const auto flow = translation_unit.entry_point_data_flow(limits);
+    REQUIRE(flow.found);
+    CHECK(flow.global_accesses_truncated);
+
+    using hlsl_intellisense::dxc::GlobalAccessKind;
+    const auto find_access = [&flow](std::string_view name) {
+        return std::ranges::find(flow.global_accesses, name,
+                                 [](const auto& access) { return access.name; });
+    };
+    const auto g_access = find_access("g");
+    REQUIRE(g_access != flow.global_accesses.end());
+    CHECK(g_access->access == GlobalAccessKind::read_write);
+    CHECK(find_access("h") == flow.global_accesses.end());
+    CHECK(flow.global_accesses.size() == 1);
+}
+
+TEST_CASE("Entry-point data flow uses a read-only allow list for named resource methods",
+          "[dxc][entry-point-data-flow][integration]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.entry_point = "main";
+    const std::string source = "Texture2D<float4> tex : register(t0);\n"
+                               "SamplerState samp : register(s0);\n"
+                               "RWStructuredBuffer<uint> counter : register(u0);\n"
+                               "float4 main(float2 uv : TEXCOORD) : SV_Target {\n"
+                               "    uint index = counter.IncrementCounter();\n"
+                               "    return tex.Sample(samp, uv) * float(index);\n"
+                               "}\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+    REQUIRE(translation_unit.diagnostics().empty());
+
+    const auto flow = translation_unit.entry_point_data_flow();
+    REQUIRE(flow.found);
+
+    using hlsl_intellisense::dxc::GlobalAccessKind;
+    const auto find_access = [&flow](std::string_view name) {
+        return std::ranges::find(flow.global_accesses, name,
+                                 [](const auto& access) { return access.name; });
+    };
+
+    const auto texture = find_access("tex");
+    REQUIRE(texture != flow.global_accesses.end());
+    CHECK(texture->access == GlobalAccessKind::read);
+
+    const auto counter = find_access("counter");
+    REQUIRE(counter != flow.global_accesses.end());
+    // IncrementCounter() is a mutating method with no wrap/bare signal on
+    // its own for the base object (unlike operator[]), so a conservative
+    // name-based allow list is used; IncrementCounter is not on the
+    // read-only allow list and must be reported read_write.
+    CHECK(counter->access == GlobalAccessKind::read_write);
+}
+
+TEST_CASE("Entry-point data flow never applies the read-only method-name allow list to a "
+          "user-defined type sharing a resource method's name",
+          "[dxc][entry-point-data-flow][integration]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.entry_point = "main";
+    // `Counter` is an ordinary user-defined struct, not a compiler builtin
+    // resource/sampler type, even though it declares a method named `Load`
+    // -- one of the names on the read-only allow list used for genuine
+    // builtin resource types (Texture2D::Load, RWStructuredBuffer::Load,
+    // ...). Calling `counter.Load()` mutates `counter`'s own field, so the
+    // global instance `counter` must be reported read_write: applying the
+    // allow list here (matching purely on method name, ignoring the
+    // receiver's actual type) would wrongly under-report this as a
+    // read-only access.
+    const std::string source = "struct Counter {\n"
+                               "    float value;\n"
+                               "    float Load() { value = value + 1.0; return value; }\n"
+                               "};\n"
+                               "static Counter counter = { 0.0 };\n"
+                               "float4 main() : SV_Target {\n"
+                               "    float sampled = counter.Load();\n"
+                               "    return sampled.xxxx;\n"
+                               "}\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+    REQUIRE(translation_unit.diagnostics().empty());
+
+    const auto flow = translation_unit.entry_point_data_flow();
+    REQUIRE(flow.found);
+
+    using hlsl_intellisense::dxc::GlobalAccessKind;
+    const auto find_access = [&flow](std::string_view name) {
+        return std::ranges::find(flow.global_accesses, name,
+                                 [](const auto& access) { return access.name; });
+    };
+    const auto counter = find_access("counter");
+    REQUIRE(counter != flow.global_accesses.end());
+    CHECK(counter->access == GlobalAccessKind::read_write);
+}
+
+TEST_CASE("Entry-point data flow does not suppress a global argument's own access when it is "
+          "passed to a method called on a non-global (parameter) receiver",
+          "[dxc][entry-point-data-flow][integration]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.entry_point = "main";
+    options.target_profile = "cs_6_6";
+    // `target` (the receiver of `InterlockedAdd`) is a function
+    // *parameter*, not a global -- so `find_resource_base` finds no global
+    // receiver for this call at all. `globalArg`, however, is a genuine
+    // global passed *as* `InterlockedAdd`'s `out` argument, which DXC
+    // leaves bare (unwrapped) at the call site (see `classify_bare_context`
+    // for why a bare call argument's access cannot be narrowed past
+    // read_write). Before excluding genuine arguments from the implicit-
+    // receiver search, `globalArg` -- being the only global among the
+    // call's children -- could be mistaken for the call's own receiver,
+    // both misclassifying it and suppressing its own independent access
+    // entirely via `resource_suppress_key`; it must instead be
+    // independently reported, and read_write.
+    const std::string source = "RWByteAddressBuffer res : register(u0);\n"
+                               "static uint globalArg = 0;\n"
+                               "void bumpCounter(RWByteAddressBuffer target, uint address) {\n"
+                               "    target.InterlockedAdd(address, 1, globalArg);\n"
+                               "}\n"
+                               "[numthreads(1, 1, 1)]\n"
+                               "void main(uint3 id : SV_DispatchThreadID) {\n"
+                               "    bumpCounter(res, 0);\n"
+                               "}\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+    REQUIRE(translation_unit.diagnostics().empty());
+
+    const auto flow = translation_unit.entry_point_data_flow();
+    REQUIRE(flow.found);
+
+    using hlsl_intellisense::dxc::GlobalAccessKind;
+    const auto find_access = [&flow](std::string_view name) {
+        return std::ranges::find(flow.global_accesses, name,
+                                 [](const auto& access) { return access.name; });
+    };
+    const auto global_arg = find_access("globalArg");
+    REQUIRE(global_arg != flow.global_accesses.end());
+    CHECK(global_arg->access == GlobalAccessKind::read_write);
+}
+
+TEST_CASE("Entry-point data flow reports unused top-level declarations excluding the entry point",
+          "[dxc][entry-point-data-flow][integration]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.entry_point = "main";
+    const std::string source = "static float unusedGlobal = 1.0;\n"
+                               "float unusedFunction(float value) { return value; }\n"
+                               "float helper(float value) { return value * 2.0; }\n"
+                               "float4 main() : SV_Target { return helper(1.0).xxxx; }\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+    REQUIRE(translation_unit.diagnostics().empty());
+
+    const auto flow = translation_unit.entry_point_data_flow();
+    REQUIRE(flow.found);
+
+    const auto has_name = [](const auto& candidates, std::string_view name) {
+        return std::ranges::any_of(candidates,
+                                   [name](const auto& symbol) { return symbol.name == name; });
+    };
+    CHECK(has_name(flow.unused_declarations, "unusedGlobal"));
+    CHECK(has_name(flow.unused_declarations, "unusedFunction"));
+    CHECK_FALSE(has_name(flow.unused_declarations, "helper"));
+    // The entry point itself is expected to have no internal callers and
+    // must never be misreported as an unused declaration.
+    CHECK_FALSE(has_name(flow.unused_declarations, "main"));
+}
+
+TEST_CASE("Entry-point data flow reports why nothing was traced when no entry point is configured",
+          "[dxc][entry-point-data-flow][integration]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    const std::string source = "float4 main() : SV_Target { return 1.0.xxxx; }\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}});
+
+    const auto flow = translation_unit.entry_point_data_flow();
+    CHECK_FALSE(flow.found);
+    CHECK_FALSE(flow.explanation.empty());
+    CHECK(flow.reachable_functions.empty());
+    CHECK(flow.entry_point == std::nullopt);
+}
+
+TEST_CASE("Entry-point data flow reports why nothing was traced when the configured entry point "
+          "does not resolve",
+          "[dxc][entry-point-data-flow][integration]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.entry_point = "missingEntryPoint";
+    const std::string source = "float4 main() : SV_Target { return 1.0.xxxx; }\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+
+    const auto flow = translation_unit.entry_point_data_flow();
+    CHECK_FALSE(flow.found);
+    CHECK_FALSE(flow.explanation.empty());
+}
+
+TEST_CASE("Entry-point data flow does not select a struct method that merely shares the "
+          "configured entry point's spelling",
+          "[dxc][entry-point-data-flow][integration]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.entry_point = "main";
+    // `Foo::main` is a struct method with the exact same unqualified
+    // spelling as the configured entry point; it must never be silently
+    // selected instead of the genuine top-level shader entry function.
+    const std::string source = "struct Foo {\n"
+                               "    float main() { return 1.0; }\n"
+                               "};\n"
+                               "float4 main() : SV_Target { return 1.0.xxxx; }\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+    REQUIRE(translation_unit.diagnostics().empty());
+
+    const auto flow = translation_unit.entry_point_data_flow();
+    REQUIRE(flow.found);
+    REQUIRE(flow.entry_point.has_value());
+    // The entry point's own qualified name has no `Foo::` prefix: it is the
+    // top-level function, not the struct method.
+    CHECK(flow.entry_point->qualified_name == "main");
+    CHECK(flow.entry_point->location.line == 4);
+
+    const auto has_unreachable = [&flow](std::string_view qualified_name) {
+        return std::ranges::any_of(flow.unreachable_functions,
+                                   [qualified_name](const auto& symbol) {
+                                       return symbol.qualified_name == qualified_name;
+                                   });
+    };
+    // The struct method is unreached dead code, distinct from -- and not
+    // merged with -- the entry point it happens to share a spelling with.
+    CHECK(has_unreachable("Foo::main"));
+}
+
+TEST_CASE("Entry-point data flow rejects an ambiguous configured entry point name shared by "
+          "multiple top-level function overloads",
+          "[dxc][entry-point-data-flow][integration]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.entry_point = "main";
+    // Two distinct top-level function definitions both named `main`
+    // (illegal HLSL, but DXC's cursor tree can still expose both
+    // definitions for an unsaved/in-progress edit): traversal-order-first
+    // selection must not silently pick one; the ambiguity itself must be
+    // reported instead.
+    const std::string source = "float main(float value) { return value; }\n"
+                               "float4 main() : SV_Target { return 1.0.xxxx; }\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+
+    const auto flow = translation_unit.entry_point_data_flow();
+    CHECK_FALSE(flow.found);
+    CHECK_FALSE(flow.explanation.empty());
+    CHECK(flow.entry_point == std::nullopt);
+    CHECK(flow.reachable_functions.empty());
+}
+
+TEST_CASE("Entry-point data flow honors an explicit function-visit budget",
+          "[dxc][entry-point-data-flow][integration]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.entry_point = "main";
+    const std::string source = "float step1(float value) { return value + 1.0; }\n"
+                               "float step2(float value) { return step1(value) + 1.0; }\n"
+                               "float step3(float value) { return step2(value) + 1.0; }\n"
+                               "float4 main() : SV_Target { return step3(1.0).xxxx; }\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+    REQUIRE(translation_unit.diagnostics().empty());
+
+    hlsl_intellisense::dxc::EntryPointDataFlowLimits limits;
+    limits.max_functions_visited = 2;
+    const auto flow = translation_unit.entry_point_data_flow(limits);
+    REQUIRE(flow.found);
+    CHECK(flow.truncated);
+    CHECK(flow.functions_visited_truncated);
+    CHECK_FALSE(flow.global_accesses_truncated);
+    CHECK_FALSE(flow.unused_declarations_truncated);
+    CHECK(flow.functions_visited <= 2);
+    // Truncation must only ever shrink the reachable set, never grow it
+    // beyond the true call graph.
+    CHECK(flow.reachable_functions.size() <= 2);
+    // A truncated traversal cannot prove any function unreachable: `step2`
+    // and `step3` are genuinely reachable (they lie on the call chain from
+    // `main`) but were never visited because the budget was hit first.
+    // Reporting them as unreachable would be a false "dead code" claim, so
+    // `unreachable_functions` must be left empty whenever truncated.
+    CHECK(flow.unreachable_functions.empty());
+}
+
+TEST_CASE("Entry-point data flow never reports a downstream reachable function as unreachable "
+          "when the traversal is truncated",
+          "[dxc][entry-point-data-flow][integration]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.entry_point = "main";
+    // A linear call chain entry -> a -> b -> c, plus one function that is
+    // genuinely unreachable (deadCode). With a function-visit budget of 2,
+    // the BFS visits only `main` and `a` before truncating: `b` and `c` are
+    // discovered as queued-but-unvisited edges, not proven unreachable, and
+    // must never appear in `unreachable_functions` even though they were
+    // never actually explored.
+    const std::string source = "float c(float value) { return value + 1.0; }\n"
+                               "float b(float value) { return c(value) + 1.0; }\n"
+                               "float a(float value) { return b(value) + 1.0; }\n"
+                               "float deadCode(float value) { return value - 1.0; }\n"
+                               "float4 main() : SV_Target { return a(1.0).xxxx; }\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+    REQUIRE(translation_unit.diagnostics().empty());
+
+    hlsl_intellisense::dxc::EntryPointDataFlowLimits limits;
+    limits.max_functions_visited = 2;
+    const auto flow = translation_unit.entry_point_data_flow(limits);
+    REQUIRE(flow.found);
+    REQUIRE(flow.truncated);
+    CHECK(flow.functions_visited_truncated);
+    CHECK_FALSE(flow.global_accesses_truncated);
+    CHECK_FALSE(flow.unused_declarations_truncated);
+    CHECK(flow.functions_visited <= 2);
+
+    const auto has_name = [](const auto& candidates, std::string_view name) {
+        return std::ranges::any_of(candidates,
+                                   [name](const auto& symbol) { return symbol.name == name; });
+    };
+    // Downstream reachable functions (never actually visited due to the
+    // budget) must be absent, not falsely reported as dead code.
+    CHECK_FALSE(has_name(flow.unreachable_functions, "b"));
+    CHECK_FALSE(has_name(flow.unreachable_functions, "c"));
+    // `deadCode` is also absent: an incomplete traversal cannot prove
+    // *anything* unreachable, so `unreachable_functions` is entirely empty
+    // while truncated, even for functions that would truly be dead code in
+    // a completed traversal.
+    CHECK(flow.unreachable_functions.empty());
+}
+
+TEST_CASE("Entry-point data flow classifies dead code as unreachable only once traversal fully "
+          "completes",
+          "[dxc][entry-point-data-flow][integration]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.entry_point = "main";
+    const std::string source = "float c(float value) { return value + 1.0; }\n"
+                               "float b(float value) { return c(value) + 1.0; }\n"
+                               "float a(float value) { return b(value) + 1.0; }\n"
+                               "float deadCode(float value) { return value - 1.0; }\n"
+                               "float4 main() : SV_Target { return a(1.0).xxxx; }\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+    REQUIRE(translation_unit.diagnostics().empty());
+
+    // A large enough budget for the whole call chain to be exhausted: the
+    // traversal is not truncated, so `deadCode` can now be soundly reported
+    // as unreachable.
+    hlsl_intellisense::dxc::EntryPointDataFlowLimits limits;
+    limits.max_functions_visited = 64;
+    const auto flow = translation_unit.entry_point_data_flow(limits);
+    REQUIRE(flow.found);
+    CHECK_FALSE(flow.truncated);
+    CHECK_FALSE(flow.functions_visited_truncated);
+    CHECK_FALSE(flow.global_accesses_truncated);
+    CHECK_FALSE(flow.unused_declarations_truncated);
+    const auto has_name = [](const auto& candidates, std::string_view name) {
+        return std::ranges::any_of(candidates,
+                                   [name](const auto& symbol) { return symbol.name == name; });
+    };
+    REQUIRE(flow.unreachable_functions.size() == 1);
+    CHECK(has_name(flow.unreachable_functions, "deadCode"));
+}
+
+TEST_CASE("Entry-point data flow is cancellable via the supplied checkpoint",
+          "[dxc][entry-point-data-flow][integration]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.entry_point = "main";
+    const std::string source = "float helper(float value) { return value * 2.0; }\n"
+                               "float4 main() : SV_Target { return helper(1.0).xxxx; }\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+    REQUIRE(translation_unit.diagnostics().empty());
+
+    struct CancelledError final : std::runtime_error {
+        CancelledError() : std::runtime_error{"cancelled"} {}
+    };
+    CHECK_THROWS_AS(translation_unit.entry_point_data_flow({}, [] { throw CancelledError{}; }),
+                    CancelledError);
+}
+
+TEST_CASE("Entry-point data flow cancellation checkpoint is honored during cycle detection over "
+          "a large mutually-recursive call graph",
+          "[dxc][entry-point-data-flow][integration]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.entry_point = "main";
+    // One long cycle of 600 functions reachable from `main`, each calling
+    // the next and finally calling back to the first. Large enough that
+    // the cycle-detection DFS's own periodic checkpoint (every 512 visited
+    // nodes) fires at least once mid-traversal, distinct from the BFS
+    // loop's own per-iteration checkpoint call.
+    constexpr int chain_length = 600;
+    std::string source;
+    for (int index = 0; index < chain_length; ++index) {
+        source += "float node" + std::to_string(index) + "(float value);\n";
+    }
+    for (int index = 0; index < chain_length; ++index) {
+        const int next = (index + 1) % chain_length;
+        source += "float node" + std::to_string(index) + "(float value) { return node" +
+                  std::to_string(next) + "(value) + 1.0; }\n";
+    }
+    source += "float4 main() : SV_Target { return node0(1.0).xxxx; }\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+    REQUIRE(translation_unit.diagnostics().empty());
+
+    // Establishes, from purely observable output, exactly how many
+    // checkpoint calls the BFS loop itself makes: one per queue iteration,
+    // i.e. one per function it actually visits (`functions_visited`).
+    const auto baseline = translation_unit.entry_point_data_flow();
+    REQUIRE(baseline.found);
+    REQUIRE_FALSE(baseline.truncated);
+    const auto bfs_checkpoint_calls = baseline.functions_visited;
+
+    struct CancelledError final : std::runtime_error {
+        CancelledError() : std::runtime_error{"cancelled"} {}
+    };
+    // Allows exactly the BFS loop's own known number of checkpoint calls to
+    // pass, then cancels on the very next one. Since the BFS loop cannot
+    // itself make any further calls once it has finished, that next call
+    // can only come from a later phase (cycle-detection DFS runs
+    // immediately afterward) -- proving a checkpoint exists there too, not
+    // merely inside the BFS loop.
+    std::uint64_t checkpoint_calls = 0;
+    CHECK_THROWS_AS(translation_unit.entry_point_data_flow({},
+                                                           [&] {
+                                                               if (++checkpoint_calls >
+                                                                   bfs_checkpoint_calls) {
+                                                                   throw CancelledError{};
+                                                               }
+                                                           }),
+                    CancelledError);
+}
+
+TEST_CASE("Entry-point data flow cancellation checkpoint is honored while classifying "
+          "unreachable functions over a large translation unit",
+          "[dxc][entry-point-data-flow][integration]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.entry_point = "main";
+    // `main` itself calls nothing else, so the BFS/cycle-detection/
+    // conversion phases finish almost immediately; the bulk of the work is
+    // in the unreachable-function classification loop scanning many unused
+    // top-level definitions, and in unused-declaration reference scanning.
+    constexpr int unreachable_count = 700;
+    std::string source;
+    for (int index = 0; index < unreachable_count; ++index) {
+        source += "float deadCode" + std::to_string(index) + "(float value) { return value; }\n";
+    }
+    source += "float4 main() : SV_Target { return 1.0.xxxx; }\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+    REQUIRE(translation_unit.diagnostics().empty());
+
+    const auto baseline = translation_unit.entry_point_data_flow();
+    REQUIRE(baseline.found);
+    REQUIRE_FALSE(baseline.truncated);
+    CHECK(baseline.unreachable_functions.size() == unreachable_count);
+    // Only `main` is ever visited by the BFS loop.
+    CHECK(baseline.functions_visited == 1);
+
+    struct CancelledError final : std::runtime_error {
+        CancelledError() : std::runtime_error{"cancelled"} {}
+    };
+    // The candidate-definition collection pass (`collect_callable_
+    // definitions`) runs first and, over 701 top-level children, makes
+    // exactly one checkpoint call of its own (at its internal count of
+    // 512); the BFS loop then makes exactly one call for `main`'s single
+    // queue iteration (`baseline.functions_visited`). Allowing exactly
+    // those two calls through and cancelling on the third proves a
+    // checkpoint exists in a later phase -- the unreachable-function
+    // classification loop, which runs next and is large enough (700 items)
+    // to reach its own internal count of 512 -- not merely inside
+    // definition collection or the BFS loop.
+    const std::uint64_t threshold = 1 + baseline.functions_visited;
+    std::uint64_t checkpoint_calls = 0;
+    CHECK_THROWS_AS(translation_unit.entry_point_data_flow({},
+                                                           [&] {
+                                                               if (++checkpoint_calls > threshold) {
+                                                                   throw CancelledError{};
+                                                               }
+                                                           }),
+                    CancelledError);
+}
+
+TEST_CASE("Entry-point data flow bounds the unused-declaration reference scan by an explicit "
+          "budget and reports truncation",
+          "[dxc][entry-point-data-flow][integration]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.entry_point = "main";
+    constexpr int declaration_count = 20;
+    std::string source;
+    for (int index = 0; index < declaration_count; ++index) {
+        source += "float unused" + std::to_string(index) + "(float value) { return value; }\n";
+    }
+    source += "float4 main() : SV_Target { return 1.0.xxxx; }\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+    REQUIRE(translation_unit.diagnostics().empty());
+
+    // With no budget restriction, every unused top-level function is
+    // reported and the analysis is not truncated.
+    const auto full = translation_unit.entry_point_data_flow();
+    REQUIRE(full.found);
+    CHECK_FALSE(full.truncated);
+    CHECK_FALSE(full.functions_visited_truncated);
+    CHECK_FALSE(full.global_accesses_truncated);
+    CHECK_FALSE(full.unused_declarations_truncated);
+    CHECK(full.unused_declarations.size() == declaration_count);
+
+    // A budget far smaller than the number of candidate declarations must
+    // stop the reference-scanning work early (never performing unbounded
+    // work for a translation unit with many top-level declarations),
+    // report fewer results, and set `truncated` so callers know the
+    // returned `unused_declarations` is a conservative, possibly
+    // incomplete subset.
+    hlsl_intellisense::dxc::EntryPointDataFlowLimits limits;
+    limits.max_unused_declaration_candidates = 5;
+    const auto bounded = translation_unit.entry_point_data_flow(limits);
+    REQUIRE(bounded.found);
+    CHECK(bounded.truncated);
+    // This is the *only* one of the three independent truncation causes
+    // that applies here: neither the reachability BFS (a trivial `main`
+    // with no calls) nor the global-access retention limit is anywhere
+    // near its own budget, so those two flags must remain false even
+    // though the combined `truncated` flag is true -- proving the three
+    // reasons are tracked, and reported, independently rather than
+    // collapsed into one indistinguishable flag.
+    CHECK_FALSE(bounded.functions_visited_truncated);
+    CHECK_FALSE(bounded.global_accesses_truncated);
+    CHECK(bounded.unused_declarations_truncated);
+    CHECK(bounded.unused_declarations.size() <= 5);
+    // The bounded run must never fabricate a declaration name that isn't
+    // truly unused in the full analysis (a subset, never a superset).
+    for (const auto& declaration : bounded.unused_declarations) {
+        CHECK(std::ranges::any_of(full.unused_declarations, [&](const auto& other) {
+            return other.name == declaration.name;
+        }));
+    }
+}
+
+TEST_CASE("Entry-point data flow bounds the retained global/resource access set by an explicit "
+          "budget and reports truncation independently of the other two phases",
+          "[dxc][entry-point-data-flow][integration]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.entry_point = "main";
+    constexpr int global_count = 20;
+    std::string source;
+    for (int index = 0; index < global_count; ++index) {
+        source += "static float g" + std::to_string(index) + " = 0.0;\n";
+    }
+    source += "float4 main() : SV_Target {\n"
+              "    float sum = 0.0;\n";
+    for (int index = 0; index < global_count; ++index) {
+        source += "    sum += g" + std::to_string(index) + ";\n";
+    }
+    source += "    return sum.xxxx;\n"
+              "}\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+    REQUIRE(translation_unit.diagnostics().empty());
+
+    // With no budget restriction, every distinct global read is retained
+    // and the analysis is not truncated.
+    const auto full = translation_unit.entry_point_data_flow();
+    REQUIRE(full.found);
+    CHECK_FALSE(full.truncated);
+    CHECK(full.global_accesses.size() == global_count);
+
+    // A retention budget far smaller than the number of distinct globals
+    // touched must stop retaining further accesses (never performing
+    // unbounded retention for a translation unit that touches many
+    // distinct globals/resources), report fewer results, and set
+    // `truncated`/`global_accesses_truncated` -- while the reachability
+    // traversal itself (a single `main` with no calls) and the
+    // unused-declaration scan (no unused top-level declarations here) are
+    // nowhere near their own budgets, so their flags must remain false,
+    // proving the three reasons are tracked and reported independently.
+    hlsl_intellisense::dxc::EntryPointDataFlowLimits limits;
+    limits.max_global_accesses = 5;
+    const auto bounded = translation_unit.entry_point_data_flow(limits);
+    REQUIRE(bounded.found);
+    CHECK(bounded.truncated);
+    CHECK(bounded.global_accesses_truncated);
+    CHECK_FALSE(bounded.functions_visited_truncated);
+    CHECK_FALSE(bounded.unused_declarations_truncated);
+    CHECK(bounded.global_accesses.size() <= 5);
+    // The bounded run must never fabricate a global that wasn't truly
+    // touched in the full analysis (a subset, never a superset).
+    for (const auto& access : bounded.global_accesses) {
+        CHECK(std::ranges::any_of(full.global_accesses,
+                                  [&](const auto& other) { return other.name == access.name; }));
+    }
+}
+
+TEST_CASE("Entry-point data flow bounds definition collection independently of the reachable "
+          "call graph and suppresses unreachableFunctions when that budget is hit",
+          "[dxc][entry-point-data-flow][integration]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.entry_point = "main";
+    // A tiny, fully-reachable call graph (`main` -> `helper`) declared
+    // *before* a large corpus of unrelated dead top-level functions (entry
+    // point resolution reuses the same bounded, in-source-order
+    // definition-collection pass that feeds `unreachable_functions`, so
+    // both `main` and `helper` must be collected well within the budget
+    // below, while the dead-function tail is what gets truncated).
+    // Definition collection walks every top-level declaration, so an
+    // enormous dead-function corpus must be bounded by
+    // `max_definitions_collected` independently of `max_functions_visited`
+    // -- the reachable subgraph here is trivially small (2 functions), so a
+    // generous `max_functions_visited` alone would not bound this phase.
+    constexpr int dead_function_count = 4000;
+    std::string source = "float helper(float value) { return value * 2.0; }\n"
+                         "float4 main() : SV_Target { return helper(1.0).xxxx; }\n";
+    for (int index = 0; index < dead_function_count; ++index) {
+        source += "float dead" + std::to_string(index) + "(float value) { return value; }\n";
+    }
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+    REQUIRE(translation_unit.diagnostics().empty());
+
+    // A definitions budget far smaller than the dead-function corpus
+    // (but comfortably larger than the 2-node reachable subgraph) must
+    // stop definition collection early -- never performing unbounded work
+    // proportional to the size of a huge dead-code corpus -- and report
+    // `definitionsTruncated` rather than silently completing.
+    hlsl_intellisense::dxc::EntryPointDataFlowLimits limits;
+    limits.max_definitions_collected = 50;
+    limits.max_functions_visited = 4096;
+    const auto bounded = translation_unit.entry_point_data_flow(limits);
+    REQUIRE(bounded.found);
+    CHECK(bounded.truncated);
+    CHECK(bounded.definitions_truncated);
+    // The reachable subgraph is tiny and entirely visited within budget:
+    // this specific truncation cause must be independent of the other
+    // three.
+    CHECK_FALSE(bounded.functions_visited_truncated);
+    CHECK_FALSE(bounded.global_accesses_truncated);
+    CHECK_FALSE(bounded.unused_declarations_truncated);
+    const auto has_name = [](const auto& candidates, std::string_view name) {
+        return std::ranges::any_of(candidates,
+                                   [name](const auto& symbol) { return symbol.name == name; });
+    };
+    const auto reachable_has_name = [](const auto& candidates, std::string_view name) {
+        return std::ranges::any_of(
+            candidates, [name](const auto& reachable) { return reachable.function.name == name; });
+    };
+    CHECK(reachable_has_name(bounded.reachable_functions, "main"));
+    CHECK(reachable_has_name(bounded.reachable_functions, "helper"));
+    // An incomplete definition collection cannot prove *anything*
+    // unreachable (a not-yet-collected dead function is indistinguishable
+    // from one that was collected but genuinely reachable), so
+    // `unreachable_functions` must be entirely empty here -- even though
+    // most of the 4000 dead functions genuinely are dead code in a
+    // completed traversal.
+    CHECK(bounded.unreachable_functions.empty());
+
+    // With a definitions budget comfortably larger than the whole corpus,
+    // the same translation unit completes untruncated and correctly
+    // reports the dead functions as unreachable, proving the budget above
+    // was the actual bottleneck and not some other limit.
+    hlsl_intellisense::dxc::EntryPointDataFlowLimits generous_limits;
+    generous_limits.max_definitions_collected = 8192;
+    generous_limits.max_functions_visited = 4096;
+    const auto full = translation_unit.entry_point_data_flow(generous_limits);
+    REQUIRE(full.found);
+    CHECK_FALSE(full.truncated);
+    CHECK_FALSE(full.definitions_truncated);
+    CHECK(has_name(full.unreachable_functions, "dead0"));
+    CHECK(has_name(full.unreachable_functions, "dead" + std::to_string(dead_function_count - 1)));
+}
+
+TEST_CASE("Entry-point data flow reports an incomplete, non-definitive not-found when a tight "
+          "definition budget is exhausted before the configured entry point is collected",
+          "[dxc][entry-point-data-flow][integration]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.entry_point = "main";
+    // `main` is declared *after* a large corpus of unrelated dead
+    // functions, so a small `max_definitions_collected` budget exhausts
+    // itself (in source order) before ever reaching `main`'s own
+    // definition. `found` must still be `false` (the entry point genuinely
+    // was not among the definitions collected), but this must be
+    // represented as an *incomplete* result -- `definitionsTruncated`/
+    // `truncated` set, and `explanation` noting the caveat -- never a
+    // silent, definitive "this document has no such entry point".
+    constexpr int dead_function_count = 4000;
+    std::string source;
+    for (int index = 0; index < dead_function_count; ++index) {
+        source += "float dead" + std::to_string(index) + "(float value) { return value; }\n";
+    }
+    source += "float4 main() : SV_Target { return 1.0.xxxx; }\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+    REQUIRE(translation_unit.diagnostics().empty());
+
+    hlsl_intellisense::dxc::EntryPointDataFlowLimits limits;
+    limits.max_definitions_collected = 50;
+    const auto flow = translation_unit.entry_point_data_flow(limits);
+    CHECK_FALSE(flow.found);
+    CHECK(flow.entry_point == std::nullopt);
+    CHECK(flow.reachable_functions.empty());
+    CHECK(flow.definitions_truncated);
+    CHECK(flow.truncated);
+    CHECK_FALSE(flow.explanation.empty());
+    // The explanation must not read as a plain, unqualified "not found":
+    // a client rendering only `explanation` (not the boolean flags) still
+    // needs to see that this is an incomplete search.
+    CHECK(flow.explanation.find("truncat") != std::string::npos);
+
+    // With a generous budget covering the whole corpus, the same
+    // translation unit resolves `main` normally, proving the budget above
+    // was the actual reason for the "not found" result.
+    hlsl_intellisense::dxc::EntryPointDataFlowLimits generous_limits;
+    generous_limits.max_definitions_collected = 8192;
+    const auto full = translation_unit.entry_point_data_flow(generous_limits);
+    REQUIRE(full.found);
+    CHECK_FALSE(full.definitions_truncated);
+    CHECK_FALSE(full.truncated);
+}
+
+TEST_CASE("Entry-point data flow reports an ambiguous entry point as potentially incomplete when "
+          "the definition budget is exhausted before every same-named overload is collected",
+          "[dxc][entry-point-data-flow][integration]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.entry_point = "main";
+    // Two top-level `main` overloads appear early (both within the tight
+    // budget below), a large dead-function corpus follows, and a *third*
+    // colliding `main` overload appears last, past the truncation point.
+    // The two early overloads alone are already a genuine, correctly
+    // reported ambiguity; the point of this test is that the budget makes
+    // that count itself possibly incomplete (a further collision may
+    // exist beyond what was collected), which must be visible to a
+    // caller, not silently omitted.
+    constexpr int dead_function_count = 4000;
+    std::string source = "float main(float value) { return value; }\n"
+                         "float4 main() : SV_Target { return 1.0.xxxx; }\n";
+    for (int index = 0; index < dead_function_count; ++index) {
+        source += "float dead" + std::to_string(index) + "(float value) { return value; }\n";
+    }
+    source += "float main(float value, float value2) { return value + value2; }\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+    // Not asserted empty: multiple top-level `main` definitions (illegal
+    // HLSL overloading of the entry point name) can itself produce
+    // compiler diagnostics, same as the pre-existing plain-ambiguity test
+    // above -- this test only cares about `entry_point_data_flow`'s own
+    // reporting given DXC's still-available cursor tree.
+
+    hlsl_intellisense::dxc::EntryPointDataFlowLimits limits;
+    limits.max_definitions_collected = 50;
+    const auto flow = translation_unit.entry_point_data_flow(limits);
+    CHECK_FALSE(flow.found);
+    CHECK(flow.entry_point == std::nullopt);
+    CHECK(flow.definitions_truncated);
+    CHECK(flow.truncated);
+    CHECK_FALSE(flow.explanation.empty());
+    CHECK(flow.explanation.find("ambiguous") != std::string::npos);
+    CHECK(flow.explanation.find("truncat") != std::string::npos);
+
+    // With a generous budget covering the whole corpus, the same
+    // translation unit reports the full, untruncated ambiguity (all three
+    // overloads considered), proving the budget above -- not some other
+    // limit -- was what made the count above potentially incomplete.
+    hlsl_intellisense::dxc::EntryPointDataFlowLimits generous_limits;
+    generous_limits.max_definitions_collected = 8192;
+    const auto full = translation_unit.entry_point_data_flow(generous_limits);
+    CHECK_FALSE(full.found);
+    CHECK_FALSE(full.definitions_truncated);
+    CHECK_FALSE(full.truncated);
+    CHECK(full.explanation.find("3 top-level function definitions") != std::string::npos);
+}
+
 namespace {
 
 [[nodiscard]] auto test_runtime_directory() -> std::filesystem::path {
