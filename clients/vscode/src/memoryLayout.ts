@@ -149,6 +149,12 @@ function rowDiagram(layout: MemoryLayout): string {
   for (let row = 0; row < rows; ++row) {
     const start = row * rowSize;
     const end = start + rowSize;
+    const scale = [0, 4, 8, 12, 16]
+      .map(
+        (offset) =>
+          `<span style="left:${String((offset / rowSize) * 100)}%">${String(start + offset)}</span>`,
+      )
+      .join("");
     const rowBlocks = segments
       .filter(
         (segment) =>
@@ -166,7 +172,7 @@ function rowDiagram(layout: MemoryLayout): string {
       })
       .join("");
     blocks.push(
-      `<div class="row"><div class="offset">${String(start)}</div><div class="bytes">${rowBlocks}</div></div>`,
+      `<div class="row"><div class="offset">${String(start)}</div><div class="lane"><div class="scale" aria-label="Byte offsets ${String(start)} through ${String(end)}">${scale}</div><div class="bytes">${rowBlocks}</div></div></div>`,
     );
   }
   return blocks.join("");
@@ -224,9 +230,14 @@ export function memoryLayoutHtml(layout: MemoryLayout): string {
   h1 { font-size: 1.35rem; margin: 0 0 .25rem; }
   .summary { color: var(--vscode-descriptionForeground); margin-bottom: 1.25rem; }
   .diagram { max-width: 70rem; margin: 1rem 0 1.5rem; }
-  .row { display: grid; grid-template-columns: 4rem 1fr; min-height: 2.25rem; margin-bottom: .25rem; }
-  .offset { text-align: right; padding: .55rem .75rem 0 0; color: var(--vscode-descriptionForeground); font-family: var(--vscode-editor-font-family); }
-  .bytes { position: relative; border: 1px solid var(--vscode-panel-border); background: repeating-linear-gradient(90deg, transparent 0, transparent calc(25% - 1px), var(--vscode-panel-border) calc(25% - 1px), var(--vscode-panel-border) 25%); }
+  .row { display: grid; grid-template-columns: 4rem 1fr; margin-bottom: .35rem; }
+  .offset { text-align: right; padding: 1.55rem .75rem 0 0; color: var(--vscode-descriptionForeground); font-family: var(--vscode-editor-font-family); }
+  .lane { min-width: 32rem; }
+  .scale { position: relative; height: 1.2rem; color: var(--vscode-descriptionForeground); font-family: var(--vscode-editor-font-family); font-size: .8rem; }
+  .scale span { position: absolute; transform: translateX(-50%); }
+  .scale span:first-child { transform: none; }
+  .scale span:last-child { transform: translateX(-100%); }
+  .bytes { position: relative; height: 2.25rem; border: 1px solid var(--vscode-panel-border); background: repeating-linear-gradient(90deg, transparent 0, transparent calc(12.5% - 1px), color-mix(in srgb, var(--vscode-panel-border) 45%, transparent) calc(12.5% - 1px), color-mix(in srgb, var(--vscode-panel-border) 45%, transparent) 12.5%), repeating-linear-gradient(90deg, transparent 0, transparent calc(25% - 1px), var(--vscode-panel-border) calc(25% - 1px), var(--vscode-panel-border) 25%); }
   .block { position: absolute; box-sizing: border-box; height: 100%; overflow: hidden; padding: .45rem .35rem; border: 2px solid; text-align: center; white-space: nowrap; text-overflow: ellipsis; background: color-mix(in srgb, var(--vscode-symbolIcon-fieldForeground) 20%, var(--vscode-editor-background)); }
   .depth-0 { border-color: var(--vscode-symbolIcon-fieldForeground); }
   .depth-1 { border-color: var(--vscode-symbolIcon-structForeground); }

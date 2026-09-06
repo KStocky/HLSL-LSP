@@ -673,9 +673,6 @@ void fix_sizes(std::vector<MemoryLayoutElement>& members, std::uint32_t parent_s
             const std::uint32_t array_stride =
                 is_cbuffer ? ((tight_stride + 15) / 16) * 16 : m.size / count;
             m.array_stride = array_stride;
-            if (is_cbuffer) {
-                m.size = array_stride * count;
-            }
 
             // Expand the array elements from the prototype.
             if (m.members.size() == 1) {
@@ -697,6 +694,9 @@ void fix_sizes(std::vector<MemoryLayoutElement>& members, std::uint32_t parent_s
                     elem.array_index = idx;
                     // For record arrays, adjust member offsets (they're already relative to 0).
                     m.members.push_back(std::move(elem));
+                }
+                if (is_cbuffer) {
+                    m.size = array_stride * (count - 1U) + proto.size;
                 }
             }
         } else if (m.kind == MemoryLayoutElementKind::record && !m.members.empty()) {
@@ -741,7 +741,8 @@ void finalize_element_allocations(MemoryLayoutElement& element) {
 
     if (element.kind == MemoryLayoutElementKind::array && element.array_stride > 0) {
         for (auto& member : element.members) {
-            member.allocation_size = element.array_stride;
+            const auto remaining = element.size > member.offset ? element.size - member.offset : 0U;
+            member.allocation_size = (std::min)(element.array_stride, remaining);
         }
     } else if (element.kind == MemoryLayoutElementKind::matrix && element.matrix_stride > 0) {
         for (auto& member : element.members) {
@@ -1050,7 +1051,6 @@ std::optional<MemoryLayout> memory_layout_from_probe(DxcCreateInstanceProc creat
                     (count > 0) ? (var_desc.Size + count - 1) / count : var_desc.Size;
                 const std::uint32_t array_stride = ((raw_elem_size + 15) / 16) * 16;
                 element.array_stride = array_stride;
-                element.size = array_stride * count;
                 element.array_dimensions.push_back(count);
 
                 // Get the element type description (same type without array).
@@ -1113,6 +1113,10 @@ std::optional<MemoryLayout> memory_layout_from_probe(DxcCreateInstanceProc creat
                         proto.size = last.offset + last.size;
                     }
                 }
+
+                element.size = is_cbuffer
+                                   ? (count == 0 ? 0U : array_stride * (count - 1U) + proto.size)
+                                   : var_desc.Size;
 
                 element.members.reserve(count);
                 for (unsigned idx = 0; idx < count; ++idx) {

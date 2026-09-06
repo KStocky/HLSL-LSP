@@ -81,6 +81,19 @@ internal static class MemoryLayoutDisplayName
     }
 }
 
+internal static class MemoryLayoutByteScale
+{
+    internal static IReadOnlyList<long> Labels(long rowStart)
+        => new[]
+        {
+            rowStart,
+            rowStart + 4,
+            rowStart + 8,
+            rowStart + 12,
+            rowStart + 16,
+        };
+}
+
 public static class MemoryLayoutBridge
 {
     private static Func<Uri, int, int, CancellationToken, Task<MemoryLayoutModel>> request;

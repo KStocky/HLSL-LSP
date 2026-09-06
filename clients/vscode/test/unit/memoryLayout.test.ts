@@ -224,8 +224,8 @@ void test("memory layout spans cover native 16-bit array allocation exactly", ()
         type: "int16_t",
         kind: "array",
         offset: 0,
-        size: 80,
-        allocationSize: 80,
+        size: 66,
+        allocationSize: 66,
         alignment: 16,
         paddingBefore: 0,
         arrayStride: 16,
@@ -236,7 +236,7 @@ void test("memory layout spans cover native 16-bit array allocation exactly", ()
           kind: "scalar" as const,
           offset: index * 16,
           size: 2,
-          allocationSize: 16,
+          allocationSize: index === 4 ? 2 : 16,
           alignment: 2,
           paddingBefore: index === 0 ? 0 : 14,
           arrayIndex: index,
@@ -264,6 +264,44 @@ void test("memory layout spans cover native 16-bit array allocation exactly", ()
     segments
       .filter((segment) => segment.kind === "internal-padding")
       .reduce((total, segment) => total + segment.size, 0),
-    70,
+    56,
   );
+  assert.equal(
+    segments
+      .filter((segment) => segment.kind === "trailing-padding")
+      .reduce((total, segment) => total + segment.size, 0),
+    14,
+  );
+});
+
+void test("memory layout diagram labels absolute four-byte units and two-byte guides", () => {
+  const html = memoryLayoutHtml({
+    name: "Constants",
+    type: "cbuffer",
+    mode: "constantBuffer",
+    size: 18,
+    alignment: 16,
+    allocationSize: 32,
+    diagnostics: [],
+    members: [
+      {
+        name: "value",
+        type: "int16_t",
+        kind: "scalar",
+        offset: 0,
+        size: 2,
+        allocationSize: 2,
+        alignment: 2,
+        paddingBefore: 0,
+        members: [],
+      },
+    ],
+  });
+
+  assert.match(html, /Byte offsets 0 through 16/);
+  assert.match(html, /Byte offsets 16 through 32/);
+  assert.match(html, />0<\/span>/);
+  assert.match(html, />4<\/span>/);
+  assert.match(html, />16<\/span>/);
+  assert.match(html, /12\.5%/);
 });
