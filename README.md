@@ -12,7 +12,7 @@ with:
 - DXC-backed hover and signature help
 - Natural structure and constant-buffer memory layout inspection
 - DXC-backed shader compilation inspection: effective configuration,
-  diagnostics, and DXIL/SPIR-V reflection
+  diagnostics, reflection, and compiler-generated disassembly
 - Resource binding inspection: register-space/class grouping, collisions,
   embedded root-signature state, and root-signature compatibility
 - DXC-backed semantic colouring and go-to-definition for symbols and include paths
@@ -66,13 +66,15 @@ or run **HLSL: Show Memory Layout** from the Command Palette.
 
 A combined Shader Compilation view/command reports the effective compiler
 configuration, compiler success/failure and diagnostics, output type and
-size, DXC reflection (input/output signatures, resource bindings, and
-thread-group size), and include directories and resolved include paths for
-the active open HLSL document, backed by the cross-editor
+size, DXC-generated disassembly with Copy and Save actions, DXC reflection
+(input/output signatures, resource bindings, and thread-group size), and
+include directories and resolved include paths for the active open HLSL
+document, backed by the cross-editor
 `hlsl/compilationInfo` protocol. It always reflects the document's current
 unsaved snapshot and active variant. DXIL output supports full reflection;
-SPIR-V output explains why reflection is unavailable instead of fabricating
-it. Protocol, refresh behavior, and DXIL/SPIR-V differences are documented in
+the pinned DXC runtime rejects SPIR-V disassembly and reflection, so the view
+explains those limitations instead of fabricating output. Protocol, refresh
+behavior, and DXIL/SPIR-V differences are documented in
 [`docs/compilation-info.md`](docs/compilation-info.md).
 
 In Visual Studio, run **Tools > HLSL Shader Compilation**. In Visual Studio

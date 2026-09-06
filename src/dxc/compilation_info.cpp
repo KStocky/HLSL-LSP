@@ -41,6 +41,8 @@
 // ---------------------------------------------------------------------------
 namespace {
 
+constexpr std::size_t max_disassembly_bytes = std::size_t{4} * 1024U * 1024U;
+
 // D3D_REGISTER_COMPONENT_TYPE
 constexpr unsigned RCT_UINT32 = 1;
 constexpr unsigned RCT_SINT32 = 2;
@@ -790,6 +792,52 @@ unknown_compatibility(std::string reason) {
         .issues = {}};
 }
 
+[[nodiscard]] hlsl_intellisense::dxc::CompilationDisassembly
+extract_disassembly(IDxcCompiler3& compiler, const DxcBuffer& object, std::string format) {
+    using hlsl_intellisense::dxc::CompilationDisassembly;
+
+    CompilationDisassembly output{.format = std::move(format)};
+    LocalComPtr<IDxcResult> result;
+    const auto disassemble_hr =
+        compiler.Disassemble(&object, __uuidof(IDxcResult), result.put_void());
+    if (FAILED(disassemble_hr) || !result) {
+        output.unavailable_reason = "DXC could not disassemble the compiled output (HRESULT " +
+                                    std::to_string(static_cast<unsigned long>(disassemble_hr)) +
+                                    ")";
+        return output;
+    }
+
+    HRESULT status{};
+    const auto status_hr = result->GetStatus(&status);
+    if (FAILED(status_hr) || FAILED(status)) {
+        output.unavailable_reason =
+            "DXC reported that disassembly is unavailable for this compiled output";
+        return output;
+    }
+
+    LocalComPtr<IDxcBlobUtf8> text;
+    const auto output_hr =
+        result->GetOutput(DXC_OUT_DISASSEMBLY, __uuidof(IDxcBlobUtf8), text.put_void(), nullptr);
+    if (FAILED(output_hr) || !text) {
+        output.unavailable_reason = "DXC produced no textual disassembly for this compiled output";
+        return output;
+    }
+
+    const auto* bytes = text->GetStringPointer();
+    output.original_size = text->GetStringLength();
+    auto retained_size = (std::min)(output.original_size, max_disassembly_bytes);
+    // Do not split a UTF-8 continuation sequence at the protocol boundary.
+    while (retained_size > 0 && retained_size < output.original_size &&
+           (static_cast<unsigned char>(bytes[retained_size]) & 0xC0U) == 0x80U) {
+        --retained_size;
+    }
+    output.text.assign(bytes, retained_size);
+    output.displayed_size = output.text.size();
+    output.truncated = output.displayed_size < output.original_size;
+    output.available = true;
+    return output;
+}
+
 } // namespace
 
 namespace hlsl_intellisense::dxc::detail {
@@ -899,6 +947,10 @@ CompilationInfo compilation_info_from_compile(DxcCreateInstanceProc create_insta
     }
     info.output = CompilationOutput{.size = object_blob->GetBufferSize(),
                                     .type = wants_spirv ? "spirv" : "dxil"};
+    DxcBuffer object_buffer{.Ptr = object_blob->GetBufferPointer(),
+                            .Size = object_blob->GetBufferSize(),
+                            .Encoding = 0};
+    info.disassembly = extract_disassembly(*compiler.get(), object_buffer, info.output->type);
 
     if (wants_spirv) {
         info.reflection = CompilationReflection{
@@ -919,9 +971,6 @@ CompilationInfo compilation_info_from_compile(DxcCreateInstanceProc create_insta
         return info;
     }
 
-    DxcBuffer object_buffer{.Ptr = object_blob->GetBufferPointer(),
-                            .Size = object_blob->GetBufferSize(),
-                            .Encoding = 0};
     info.root_signature = extract_root_signature(utils.get(), object_buffer, /*is_spirv=*/false);
 
     LocalComPtr<IShaderReflection> reflection;

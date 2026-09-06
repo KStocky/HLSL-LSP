@@ -2482,6 +2482,7 @@ TEST_CASE("Server compiles hlsl/compilationInfo using DXC and honors the active 
         CHECK_FALSE(result->result["diagnostics"].empty());
         CHECK(result->result["activeVariant"].is_null());
         CHECK(result->result["targetProfile"] == "ps_6_6");
+        CHECK(result->result["disassembly"].is_null());
     }
 
     static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
@@ -2506,6 +2507,12 @@ TEST_CASE("Server compiles hlsl/compilationInfo using DXC and honors the active 
     REQUIRE(!info["output"].is_null());
     CHECK(info["output"]["type"] == "dxil");
     CHECK(info["output"]["size"].get<std::size_t>() > 0);
+    REQUIRE(!info["disassembly"].is_null());
+    CHECK(info["disassembly"]["available"] == true);
+    CHECK(info["disassembly"]["format"] == "dxil");
+    CHECK_FALSE(info["disassembly"]["text"].get<std::string>().empty());
+    CHECK(info["disassembly"]["truncated"] == false);
+    CHECK(info["disassembly"]["originalSize"] == info["disassembly"]["displayedSize"]);
     REQUIRE(!info["reflection"].is_null());
     CHECK(info["reflection"]["available"] == true);
     const auto& resources = info["reflection"]["resources"];
@@ -2671,6 +2678,11 @@ TEST_CASE("Server reports SPIR-V compilation info without fabricated reflection"
     REQUIRE(info["success"] == true);
     REQUIRE(!info["output"].is_null());
     CHECK(info["output"]["type"] == "spirv");
+    REQUIRE(!info["disassembly"].is_null());
+    CHECK(info["disassembly"]["available"] == false);
+    CHECK(info["disassembly"]["format"] == "spirv");
+    CHECK(info["disassembly"]["text"] == "");
+    CHECK_FALSE(info["disassembly"]["unavailableReason"].get<std::string>().empty());
     REQUIRE(!info["reflection"].is_null());
     CHECK(info["reflection"]["available"] == false);
     CHECK_FALSE(info["reflection"]["unavailableReason"].get<std::string>().empty());

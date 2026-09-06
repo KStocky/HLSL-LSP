@@ -5,7 +5,10 @@ import {
   CompilationInfo,
   compilationInfoErrorHtml,
   compilationInfoHtml,
+  copyDisassemblyCommand,
+  disassemblyFileName,
   resolveCompilationInfoRefresh,
+  saveDisassemblyCommand,
 } from "../../src/compilationInfo";
 
 function baseInfo(overrides: Partial<CompilationInfo> = {}): CompilationInfo {
@@ -22,6 +25,7 @@ function baseInfo(overrides: Partial<CompilationInfo> = {}): CompilationInfo {
     success: true,
     diagnostics: [],
     output: { type: "dxil", size: 1024 },
+    disassembly: null,
     reflection: {
       available: true,
       unavailableReason: "",
@@ -227,6 +231,121 @@ void test("compilation info error HTML escapes the failure message", () => {
   assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt; failed/);
 });
 
+void test("compilation info HTML reports no disassembly when there is no output", () => {
+  const html = compilationInfoHtml(baseInfo({ disassembly: null }));
+
+  assert.match(
+    html,
+    /Disassembly is not available because no compiled output was produced/,
+  );
+  assert.doesNotMatch(html, /Copy Disassembly/);
+  assert.doesNotMatch(html, /<pre class="disassembly">/);
+});
+
+void test("compilation info HTML explains unavailable disassembly without offering Copy/Save", () => {
+  const html = compilationInfoHtml(
+    baseInfo({
+      disassembly: {
+        available: false,
+        text: "",
+        unavailableReason: "DXC could not disassemble the compiled output.",
+        truncated: false,
+        originalSize: 0,
+        displayedSize: 0,
+        format: "spirv",
+      },
+    }),
+  );
+
+  assert.match(
+    html,
+    /Disassembly is unavailable: DXC could not disassemble the compiled output\./,
+  );
+  assert.doesNotMatch(html, /Copy Disassembly/);
+  assert.doesNotMatch(html, /Save Disassembly/);
+  assert.doesNotMatch(html, /<pre class="disassembly">/);
+});
+
+void test("compilation info HTML renders available disassembly with Copy/Save links and no truncation notice", () => {
+  const html = compilationInfoHtml(
+    baseInfo({
+      disassembly: {
+        available: true,
+        text: "; DXIL disassembly\ntarget datalayout = ...",
+        unavailableReason: "",
+        truncated: false,
+        originalSize: 42,
+        displayedSize: 42,
+        format: "dxil",
+      },
+    }),
+  );
+
+  assert.match(html, /; DXIL disassembly/);
+  assert.match(html, /42 bytes/);
+  assert.match(html, new RegExp(`href="command:${copyDisassemblyCommand}"`));
+  assert.match(html, new RegExp(`href="command:${saveDisassemblyCommand}"`));
+  assert.doesNotMatch(html, /truncated for display/);
+});
+
+void test("compilation info HTML reports truncation and still exposes Copy/Save for the retained text", () => {
+  const html = compilationInfoHtml(
+    baseInfo({
+      disassembly: {
+        available: true,
+        text: "partial text",
+        unavailableReason: "",
+        truncated: true,
+        originalSize: 4194304 + 100,
+        displayedSize: 4194304,
+        format: "spirv",
+      },
+    }),
+  );
+
+  assert.match(html, /partial text/);
+  assert.match(html, /4194304 of 4194404 bytes/);
+  assert.match(html, /truncated for display/);
+  assert.match(html, new RegExp(`href="command:${copyDisassemblyCommand}"`));
+});
+
+void test("compilation info HTML escapes untrusted disassembly text", () => {
+  const html = compilationInfoHtml(
+    baseInfo({
+      disassembly: {
+        available: true,
+        text: "<script>alert(1)</script>",
+        unavailableReason: "",
+        truncated: false,
+        originalSize: 26,
+        displayedSize: 26,
+        format: "dxil",
+      },
+    }),
+  );
+
+  assert.doesNotMatch(html, /<script>alert\(1\)<\/script>/);
+  assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+});
+
+void test("disassemblyFileName prefers .ll for dxil and swaps the document's extension", () => {
+  assert.equal(
+    disassemblyFileName("/workspace/shaders/lighting.hlsl", "dxil"),
+    "lighting.ll",
+  );
+});
+
+void test("disassemblyFileName prefers .spvasm for spirv", () => {
+  assert.equal(
+    disassemblyFileName("/workspace/shaders/lighting.hlsl", "spirv"),
+    "lighting.spvasm",
+  );
+});
+
+void test("disassemblyFileName falls back to a generic name for an unnamed document", () => {
+  assert.equal(disassemblyFileName("", "dxil"), "shader.ll");
+});
+
 void test("a refresh with a successful result renders content and remembers it", () => {
   const info = baseInfo();
 
@@ -235,6 +354,10 @@ void test("a refresh with a successful result renders content and remembers it",
   assert.equal(outcome.hasContent, true);
   assert.equal(outcome.title, "Shader Compilation: PSMain");
   assert.equal(outcome.html, compilationInfoHtml(info));
+  // A caller (extension.ts) stores this on the panel's state so Copy/Save
+  // Disassembly always reads the most recently rendered result, never a
+  // stale value from before this refresh.
+  assert.equal(outcome.info, info);
 });
 
 void test("a failed refresh with no prior content shows an explicit error, not a placeholder", () => {
@@ -275,6 +398,9 @@ void test("a cancelled or failed refresh keeps prior successful content instead 
   assert.equal(outcome.html, undefined);
   assert.equal(outcome.hasContent, true);
   assert.equal(outcome.title, undefined);
+  // A caller must not overwrite its stored "last successful info" (used by
+  // Copy/Save Disassembly) with anything from this cancelled attempt.
+  assert.equal(outcome.info, undefined);
 });
 
 void test("a null result with prior content is treated the same as a failure: content is kept", () => {
