@@ -15,6 +15,7 @@
 #include <functional>
 #include <future>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -47,6 +48,28 @@ class TestDirectory final {
 [[nodiscard]] std::string frame(const Json& message) {
     const auto payload = message.dump();
     return "Content-Length: " + std::to_string(payload.size()) + "\r\n\r\n" + payload;
+}
+
+// Matches `Scheduler::owner_for`'s own hash exactly: used by concurrency
+// regressions below to deterministically place two roots on different
+// scheduler workers (`hash(identity) % worker_count`) without needing to
+// grow `worker_count` itself. Growing `worker_count` until two *fixed*
+// identities' hashes happen to separate is unbounded in the worst case --
+// on a platform/CI host where the two base paths' hashes share many common
+// small factors (entirely possible, since the containing temp/work
+// directory -- and therefore every identity's hash -- varies by host), that
+// search can run away to an enormous worker count and thread pool. Instead,
+// every test below keeps `worker_count` fixed at a small constant and
+// searches a small, bounded number of *candidate root names* for the one
+// root whose identity is free to vary, stopping as soon as one lands on a
+// different worker than the other (fixed) root.
+[[nodiscard]] std::uint64_t fnv1a_hash(std::string_view text) {
+    std::uint64_t hash{14695981039346656037ULL};
+    for (const auto character : text) {
+        hash ^= static_cast<unsigned char>(character);
+        hash *= 1099511628211ULL;
+    }
+    return hash;
 }
 
 [[nodiscard]] std::vector<Json> read_frames(const std::string& output) {
@@ -4748,48 +4771,52 @@ TEST_CASE("Incoming calls reject a candidate root's contribution when that root 
     }
     // Named so its identity sorts before the target root's identity in
     // `Manager::roots()` (sorted by `root_identity`), guaranteeing it is
-    // processed first in the incoming-calls candidate-root loop.
-    const auto other_root = hlsl_intellisense::workspace::DocumentUri::from_path(
-        (directory.path() / "aaaOther.hlsl").string());
+    // processed first in the incoming-calls candidate-root loop. The exact
+    // numeric suffix is chosen below (see `worker_count`'s own comment);
+    // any suffix still sorts before "zzzTarget" because of the shared
+    // "aaaOther" prefix.
     const auto target_root = hlsl_intellisense::workspace::DocumentUri::from_path(
         (directory.path() / "zzzTarget.hlsl").string());
     const auto target_only_include =
         hlsl_intellisense::workspace::DocumentUri::from_path(target_only_include_path.string());
-    const std::string other_text =
-        "#include \"shared.hlsli\"\nfloat4 main() : SV_Target { return helper(2.0).xxxx; }\n";
     const std::string target_text = "#include \"shared.hlsli\"\n"
                                     "#include \"targetOnly.hlsli\"\n"
                                     "float4 main() : SV_Target { "
                                     "return helper(1.0 + targetOnlyValue).xxxx; }\n";
     const std::string target_only_include_text = "static const float targetOnlyValue = 1.0;\n";
 
-    // The scheduler pins ALL work (both background reanalysis and interactive
-    // queries) for a given root to a single worker, chosen by hashing
-    // `root_identity` with the very same FNV-1a function `Scheduler::owner_for`
-    // uses. If the two roots below happened to hash to the same worker, the
-    // paused "other" root's task would block the *target* root's own queue
-    // (they'd share a worker), deadlocking this test's later steps. Replicate
-    // that hash locally and pick a worker count that provably separates the
-    // two roots' identities (any count that does not evenly divide the
-    // difference of their hashes works), rather than hoping a fixed count
-    // avoids a collision.
-    const auto fnv1a_hash = [](std::string_view text) {
-        std::uint64_t hash{14695981039346656037ULL};
-        for (const auto character : text) {
-            hash ^= static_cast<unsigned char>(character);
-            hash *= 1099511628211ULL;
-        }
-        return hash;
-    };
-    const auto other_identity = other_root.identity();
+    // The scheduler pins ALL work (both background reanalysis and
+    // interactive queries) for a given root to a single worker, chosen by
+    // hashing `root_identity` with the very same FNV-1a function
+    // `Scheduler::owner_for` uses. If the two roots below happened to hash
+    // to the same worker, the paused "other" root's task would block the
+    // *target* root's own queue (they'd share a worker), deadlocking this
+    // test's later steps. Rather than growing `worker_count` until a
+    // *fixed* pair of identities happens to separate -- unbounded in the
+    // worst case, since every identity's hash also depends on the host's
+    // containing temp/work directory path, which can make the search never
+    // terminate within a sane bound on some hosts/CI configurations and
+    // spin up an enormous, resource-exhausting thread pool -- `worker_count`
+    // is kept fixed at a small constant, and instead a small, bounded
+    // number of candidate names for the "other" root are tried, stopping
+    // at the first one whose identity hash lands on a different worker
+    // than the (fixed) target root's.
+    constexpr std::size_t worker_count{2};
     const auto target_identity = target_root.identity();
-    const auto other_hash = fnv1a_hash(other_identity);
     const auto target_hash = fnv1a_hash(target_identity);
-    std::size_t worker_count{2};
-    while (other_hash % worker_count == target_hash % worker_count) {
-        ++worker_count;
-        REQUIRE(worker_count < 4096);
+    std::optional<hlsl_intellisense::workspace::DocumentUri> other_root;
+    for (int attempt = 0; attempt < 64; ++attempt) {
+        auto candidate = hlsl_intellisense::workspace::DocumentUri::from_path(
+            (directory.path() / ("aaaOther" + std::to_string(attempt) + ".hlsl")).string());
+        if (fnv1a_hash(candidate.identity()) % worker_count != target_hash % worker_count) {
+            other_root = std::move(candidate);
+            break;
+        }
     }
+    REQUIRE(other_root.has_value());
+    const auto other_identity = other_root->identity();
+    const std::string other_text =
+        "#include \"shared.hlsli\"\nfloat4 main() : SV_Target { return helper(2.0).xxxx; }\n";
 
     auto hooks = std::make_shared<hlsl_intellisense::analysis::AnalysisHooks>();
     std::promise<void> entered;
@@ -4813,7 +4840,7 @@ TEST_CASE("Incoming calls reject a candidate root's contribution when that root 
     static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
         .method = "initialized", .params = Json::object()}));
     for (const auto& [uri, text] : std::array{
-             std::pair{other_root.uri(), other_text}, std::pair{target_root.uri(), target_text},
+             std::pair{other_root->uri(), other_text}, std::pair{target_root.uri(), target_text},
              std::pair{target_only_include.uri(), target_only_include_text}}) {
         static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
             .method = "textDocument/didOpen",
@@ -4902,34 +4929,35 @@ TEST_CASE("Incoming calls treat a root with pending (placeholder) dependency met
         include << helper_text;
     }
     const auto helper = hlsl_intellisense::workspace::DocumentUri::from_path(helper_path.string());
-    const auto caller_root = hlsl_intellisense::workspace::DocumentUri::from_path(
-        (directory.path() / "callerRoot.hlsl").string());
-    const std::string caller_text =
-        "#include \"helper.hlsli\"\nfloat callerFn(float x) { return helper(x) + 1.0; }\n";
 
     // The scheduler pins all work for a root to a single worker (see the
     // pre-existing "Incoming calls reject a candidate root's contribution"
-    // test above for the full rationale); pick a worker count that
-    // provably separates `helper`'s own root from the caller root, so
-    // pausing the caller root's background analyze() cannot also block
-    // `helper`'s own (already fully analyzed) self-query.
-    const auto fnv1a_hash = [](std::string_view text) {
-        std::uint64_t hash{14695981039346656037ULL};
-        for (const auto character : text) {
-            hash ^= static_cast<unsigned char>(character);
-            hash *= 1099511628211ULL;
-        }
-        return hash;
-    };
+    // test above for the full rationale). Rather than growing the worker
+    // count until a *fixed* pair of identities happens to separate --
+    // unbounded in the worst case, since every identity's hash also
+    // depends on the host's containing temp/work directory path --
+    // `worker_count` is kept fixed at a small constant, and a small,
+    // bounded number of candidate names for the caller root are tried
+    // instead, stopping at the first one whose identity hash lands on a
+    // different worker than `helper`'s own (fixed) root -- so pausing the
+    // caller root's background analyze() cannot also block `helper`'s own
+    // (already fully analyzed) self-query.
+    constexpr std::size_t worker_count{2};
     const auto helper_identity = helper.identity();
-    const auto caller_identity = caller_root.identity();
     const auto helper_hash = fnv1a_hash(helper_identity);
-    const auto caller_hash = fnv1a_hash(caller_identity);
-    std::size_t worker_count{2};
-    while (helper_hash % worker_count == caller_hash % worker_count) {
-        ++worker_count;
-        REQUIRE(worker_count < 4096);
+    std::optional<hlsl_intellisense::workspace::DocumentUri> caller_root;
+    for (int attempt = 0; attempt < 64; ++attempt) {
+        auto candidate = hlsl_intellisense::workspace::DocumentUri::from_path(
+            (directory.path() / ("callerRoot" + std::to_string(attempt) + ".hlsl")).string());
+        if (fnv1a_hash(candidate.identity()) % worker_count != helper_hash % worker_count) {
+            caller_root = std::move(candidate);
+            break;
+        }
     }
+    REQUIRE(caller_root.has_value());
+    const auto caller_identity = caller_root->identity();
+    const std::string caller_text =
+        "#include \"helper.hlsli\"\nfloat callerFn(float x) { return helper(x) + 1.0; }\n";
 
     auto hooks = std::make_shared<hlsl_intellisense::analysis::AnalysisHooks>();
     std::promise<void> entered;
@@ -4958,7 +4986,7 @@ TEST_CASE("Incoming calls treat a root with pending (placeholder) dependency met
     static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
         .method = "initialized", .params = Json::object()}));
     for (const auto& [uri, text] : std::array{std::pair{helper.uri(), helper_text},
-                                              std::pair{caller_root.uri(), caller_text}}) {
+                                              std::pair{caller_root->uri(), caller_text}}) {
         static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
             .method = "textDocument/didOpen",
             .params =
@@ -4981,7 +5009,7 @@ TEST_CASE("Incoming calls treat a root with pending (placeholder) dependency met
     // `release` is fulfilled below.
     static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
         .method = "textDocument/didChange",
-        .params = Json{{"textDocument", {{"uri", caller_root.uri()}, {"version", 2}}},
+        .params = Json{{"textDocument", {{"uri", caller_root->uri()}, {"version", 2}}},
                        {"contentChanges", Json::array({Json{{"text", caller_text}}})}}}));
     entered.get_future().wait();
 
