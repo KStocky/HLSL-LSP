@@ -60,9 +60,11 @@ declaration. Otherwise the result has this shape:
 Every recursive member contains `name`, `type`, `kind`, `offset`, `size`,
 `alignment`, `allocationSize`, `paddingBefore`, and `members`. `size` is the
 value or aggregate extent; `allocationSize` is the byte span reserved for that
-entry, so a 2-byte `int16_t` array element with a 16-byte stride reports
-`size: 2` and `allocationSize: 16`. Expanded array elements may
-additionally contain a nonnegative `arrayIndex`. Array parents expose
+entry. A 2-byte `int16_t` array element with a 16-byte stride reports
+`size: 2` and `allocationSize: 16` when another element follows. The final
+element reports only its occupied extent because a following cbuffer member
+may pack into the rest of that row. Expanded array elements may additionally
+contain a nonnegative `arrayIndex`. Array parents expose
 `arrayStride` and `arrayDimensions`; matrix parents expose `matrixStride` and
 `rowMajor`. Editor diagrams qualify leaf labels with their complete hierarchy,
 such as `constants[1].material.colour`, and identify matrix vectors as rows or
@@ -111,6 +113,8 @@ Editor diagrams render occupied values separately from padding. Hatched blocks
 mark padding inside an array element or matrix vector, warning-coloured blocks
 mark gaps between members, and subdued blocks mark trailing aggregate padding.
 These spans partition the compiler-reported allocation without overlaps.
+Absolute byte labels appear every 4 bytes and lighter guides divide each row
+into 2-byte units so native 16-bit values are explicit.
 
 ## Supported syntax and limitations
 

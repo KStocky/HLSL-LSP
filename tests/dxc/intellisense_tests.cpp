@@ -360,7 +360,7 @@ TEST_CASE("DXC IntelliSense computes constant-buffer packing", "[dxc][memory-lay
     CHECK(layout->members[2].offset == 24);
     CHECK(layout->members[3].offset == 32);
     CHECK(layout->members[3].array_stride == 16);
-    CHECK(layout->members[3].size == 32);
+    CHECK(layout->members[3].size == 20);
     REQUIRE(layout->members[3].members.size() == 2);
     CHECK(layout->members[3].members[0].offset == 0);
     CHECK(layout->members[3].members[1].offset == 16);
@@ -425,13 +425,15 @@ TEST_CASE("Nested matrix arrays preserve compiler-owned vector structure",
     const auto& transforms = layout->members[0].members[0];
     CHECK(transforms.kind == hlsl_intellisense::dxc::MemoryLayoutElementKind::array);
     CHECK(transforms.array_stride == 32);
+    CHECK(transforms.size == 56);
     REQUIRE(transforms.members.size() == 2);
-    for (const auto& transform : transforms.members) {
+    for (std::uint32_t index = 0; index < transforms.members.size(); ++index) {
+        const auto& transform = transforms.members[index];
         CHECK(transform.kind == hlsl_intellisense::dxc::MemoryLayoutElementKind::matrix);
         CHECK(transform.row_major);
         CHECK(transform.matrix_stride == 16);
         CHECK(transform.size == 24);
-        CHECK(transform.allocation_size == 32);
+        CHECK(transform.allocation_size == (index + 1U < transforms.members.size() ? 32U : 24U));
         REQUIRE(transform.members.size() == 2);
         CHECK(transform.members[0].offset == 0);
         CHECK(transform.members[0].size == 8);
@@ -608,17 +610,17 @@ TEST_CASE("Constant-buffer arrays separate value bytes from allocation stride",
     REQUIRE(layout->supported);
     REQUIRE(layout->members.size() == 1);
     const auto& values = layout->members[0];
-    CHECK(values.size == 80);
-    CHECK(values.allocation_size == 80);
+    CHECK(values.size == 66);
+    CHECK(values.allocation_size == 66);
     CHECK(values.array_stride == 16);
     REQUIRE(values.members.size() == 5);
     for (std::uint32_t index = 0; index < values.members.size(); ++index) {
         const auto& value = values.members[index];
         CHECK(value.offset == index * 16);
         CHECK(value.size == 2);
-        CHECK(value.allocation_size == 16);
+        CHECK(value.allocation_size == (index + 1U < values.members.size() ? 16U : 2U));
     }
-    CHECK(layout->size == 80);
+    CHECK(layout->size == 66);
     CHECK(layout->allocation_size == 80);
 
     auto nested_translation =
@@ -634,10 +636,45 @@ TEST_CASE("Constant-buffer arrays separate value bytes from allocation stride",
     REQUIRE(nested->members[0].members.size() == 1);
     const auto& nested_values = nested->members[0].members[0];
     REQUIRE(nested_values.members.size() == 5);
-    for (const auto& value : nested_values.members) {
+    for (std::uint32_t index = 0; index < nested_values.members.size(); ++index) {
+        const auto& value = nested_values.members[index];
         CHECK(value.size == 2);
-        CHECK(value.allocation_size == 16);
+        CHECK(value.allocation_size == (index + 1U < nested_values.members.size() ? 16U : 2U));
     }
+}
+
+TEST_CASE("Constant-buffer array tail does not overlap a following member",
+          "[dxc][memory-layout][cbuffer][regression]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.additional_arguments = {"-enable-16bit-types"};
+    const std::string source = "cbuffer Test {\n"
+                               "    float3 a;\n"
+                               "    int16_t b[5];\n"
+                               "    float3 c;\n"
+                               "    float3x4 d;\n"
+                               "};\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+
+    const auto layout = translation_unit.memory_layout_at(shader_path, 1, 9);
+    REQUIRE(layout.has_value());
+    INFO(layout->explanation);
+    REQUIRE(layout->supported);
+    REQUIRE(layout->members.size() == 4);
+    const auto& values = layout->members[1];
+    const auto& following = layout->members[2];
+    CHECK(values.name == "b");
+    CHECK(values.offset == 16);
+    CHECK(values.size == 66);
+    CHECK(values.allocation_size == 66);
+    REQUIRE(values.members.size() == 5);
+    CHECK(values.members.back().offset == 64);
+    CHECK(values.members.back().size == 2);
+    CHECK(values.members.back().allocation_size == 2);
+    CHECK(following.name == "c");
+    CHECK(values.offset + values.allocation_size <= following.offset);
+    CHECK(following.offset == 84);
+    CHECK(following.size == 12);
 }
 
 TEST_CASE("Nested records keep ancestor tail padding out of their value extent",

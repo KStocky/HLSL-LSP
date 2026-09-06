@@ -137,6 +137,44 @@ internal sealed class HlslClassifier : IClassifier
         },
         StringComparer.Ordinal);
 
+    private static readonly string[] MatrixScalarTypes =
+    {
+        "bool", "double", "dword", "float", "half", "int", "uint",
+        "float16_t", "int16_t", "int32_t", "int64_t",
+        "min10float", "min12int", "min16float", "min16int", "min16uint",
+        "uint16_t", "uint32_t", "uint64_t",
+    };
+
+    internal static bool IsBuiltInType(string identifier)
+    {
+        if (BuiltInTypes.Contains(identifier))
+        {
+            return true;
+        }
+
+        foreach (var scalarType in MatrixScalarTypes)
+        {
+            if (!identifier.StartsWith(scalarType, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var suffix = identifier.Substring(scalarType.Length);
+            if (suffix.Length == 3 &&
+                IsDimension(suffix[0]) &&
+                suffix[1] == 'x' &&
+                IsDimension(suffix[2]))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsDimension(char value)
+        => value >= '1' && value <= '4';
+
     private readonly IClassificationType keyword;
     private readonly IClassificationType preprocessor;
     private readonly IClassificationType macro;
@@ -418,7 +456,7 @@ internal sealed class HlslClassifier : IClassifier
                     result.Add(new TokenSpan(offset, end - offset, type));
                     expectTypeName = false;
                 }
-                else if (BuiltInTypes.Contains(identifier) || userTypes.Contains(identifier))
+                else if (IsBuiltInType(identifier) || userTypes.Contains(identifier))
                 {
                     result.Add(new TokenSpan(offset, end - offset, type));
                 }
