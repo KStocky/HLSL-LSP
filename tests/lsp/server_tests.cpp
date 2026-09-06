@@ -4749,82 +4749,54 @@ TEST_CASE("Incoming calls reject a candidate root's contribution when that root 
     // second query's own generation still matched what validation confirmed -- an
     // included-file edit reanalyzing that root in between (without bumping its own document
     // version) could silently serve results computed against a newer analysis than the one
-    // `data` was validated against. This reproduces that window deterministically: an
-    // unrelated other root ("aaaOther", sorted first by `Manager::roots()`) is paused via
-    // `AnalysisHooks::before_interactive` while the loop is still processing it, and only
-    // then is the target root's own private include edited and its reanalysis awaited (via a
-    // second, ordinary interactive query, which the scheduler guarantees runs after any
-    // already-queued/running work for that same root) -- so the target root's generation has
-    // provably already changed by the time the loop reaches its own branch.
+    // `data` was validated against.
+    //
+    // This test previously reproduced the window by pausing an *unrelated second root*
+    // inside `AnalysisHooks::before_interactive` -- which fires on a `Manager` scheduler
+    // worker thread, not the calling thread -- while the target root's own reanalysis ran
+    // concurrently on a different worker. That design held a scheduler worker hostage for
+    // the whole pause and, more importantly, guaranteed two roots' DXC-backed analyses were
+    // genuinely in flight at the same time; that combination reproducibly crashed DXC's
+    // IntelliSense implementation on Linux CI (SIGSEGV), even after bounding the worker
+    // count could not resolve it, because the real hazard was concurrent DXC operations
+    // across roots, not thread-pool size.
+    //
+    // This redesign uses a *single* root (plus one include) and pauses via
+    // `AnalysisHooks::before_call_hierarchy_candidate_root` instead, which fires once per
+    // candidate root at the very top of `call_hierarchy_incoming_calls`'s own per-root loop
+    // -- strictly before that root's live snapshot/query -- but, critically, runs on the
+    // *calling* (request-handling) thread, exactly like `before_call_hierarchy_revalidation`
+    // (see `RevalidationFixture` below, which relies on the same "runs on the calling
+    // thread, not a worker" property). Pausing there therefore never occupies a scheduler
+    // worker, and with only one root total there is never a second root's analysis running
+    // concurrently: the root's own reanalysis (triggered by the include edit below) runs to
+    // completion entirely on its own, uncontended worker while the paused request thread is
+    // blocked purely on a `std::promise`, not inside any DXC call.
     TestDirectory directory;
-    const auto shared_include_path = directory.path() / "shared.hlsli";
+    const auto include_path = directory.path() / "helper.hlsli";
     {
-        std::ofstream include{shared_include_path};
+        std::ofstream include{include_path};
         REQUIRE(include);
         include << "float helper(float x) { return x * 2.0; }\n";
     }
-    const auto target_only_include_path = directory.path() / "targetOnly.hlsli";
-    {
-        std::ofstream include{target_only_include_path};
-        REQUIRE(include);
-        include << "static const float targetOnlyValue = 1.0;\n";
-    }
-    // Named so its identity sorts before the target root's identity in
-    // `Manager::roots()` (sorted by `root_identity`), guaranteeing it is
-    // processed first in the incoming-calls candidate-root loop. The exact
-    // numeric suffix is chosen below (see `worker_count`'s own comment);
-    // any suffix still sorts before "zzzTarget" because of the shared
-    // "aaaOther" prefix.
-    const auto target_root = hlsl_intellisense::workspace::DocumentUri::from_path(
-        (directory.path() / "zzzTarget.hlsl").string());
-    const auto target_only_include =
-        hlsl_intellisense::workspace::DocumentUri::from_path(target_only_include_path.string());
-    const std::string target_text = "#include \"shared.hlsli\"\n"
-                                    "#include \"targetOnly.hlsli\"\n"
-                                    "float4 main() : SV_Target { "
-                                    "return helper(1.0 + targetOnlyValue).xxxx; }\n";
-    const std::string target_only_include_text = "static const float targetOnlyValue = 1.0;\n";
-
-    // The scheduler pins ALL work (both background reanalysis and
-    // interactive queries) for a given root to a single worker, chosen by
-    // hashing `root_identity` with the very same FNV-1a function
-    // `Scheduler::owner_for` uses. If the two roots below happened to hash
-    // to the same worker, the paused "other" root's task would block the
-    // *target* root's own queue (they'd share a worker), deadlocking this
-    // test's later steps. Rather than growing `worker_count` until a
-    // *fixed* pair of identities happens to separate -- unbounded in the
-    // worst case, since every identity's hash also depends on the host's
-    // containing temp/work directory path, which can make the search never
-    // terminate within a sane bound on some hosts/CI configurations and
-    // spin up an enormous, resource-exhausting thread pool -- `worker_count`
-    // is kept fixed at a small constant, and instead a small, bounded
-    // number of candidate names for the "other" root are tried, stopping
-    // at the first one whose identity hash lands on a different worker
-    // than the (fixed) target root's.
-    constexpr std::size_t worker_count{2};
-    const auto target_identity = target_root.identity();
-    const auto target_hash = fnv1a_hash(target_identity);
-    std::optional<hlsl_intellisense::workspace::DocumentUri> other_root;
-    for (int attempt = 0; attempt < 64; ++attempt) {
-        auto candidate = hlsl_intellisense::workspace::DocumentUri::from_path(
-            (directory.path() / ("aaaOther" + std::to_string(attempt) + ".hlsl")).string());
-        if (fnv1a_hash(candidate.identity()) % worker_count != target_hash % worker_count) {
-            other_root = std::move(candidate);
-            break;
-        }
-    }
-    REQUIRE(other_root.has_value());
-    const auto other_identity = other_root->identity();
-    const std::string other_text =
-        "#include \"shared.hlsli\"\nfloat4 main() : SV_Target { return helper(2.0).xxxx; }\n";
+    const auto root = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "root.hlsl").string());
+    const auto include_uri =
+        hlsl_intellisense::workspace::DocumentUri::from_path(include_path.string());
+    const std::string root_text = "#include \"helper.hlsli\"\n"
+                                  "float caller(float x) { return helper(x) + 1.0; }\n"
+                                  "float4 main() : SV_Target { return caller(1.0).xxxx; }\n";
+    const std::string include_text_before = "float helper(float x) { return x * 2.0; }\n";
+    const std::string include_text_after = "float helper(float x) { return x * 2.0 + 1.0; }\n";
 
     auto hooks = std::make_shared<hlsl_intellisense::analysis::AnalysisHooks>();
     std::promise<void> entered;
     std::promise<void> release;
     auto released = release.get_future().share();
     std::atomic<bool> paused_once{false};
-    hooks->before_interactive = [&](std::string_view identity) {
-        if (identity == other_identity && !paused_once.exchange(true)) {
+    const auto root_identity = root.identity();
+    hooks->before_call_hierarchy_candidate_root = [&](std::string_view identity) {
+        if (identity == root_identity && !paused_once.exchange(true)) {
             entered.set_value();
             released.wait();
         }
@@ -4832,16 +4804,13 @@ TEST_CASE("Incoming calls reject a candidate root's contribution when that root 
     hlsl_intellisense::lsp::ServerOptions options;
     options.background_analysis = true;
     options.analysis_hooks = hooks;
-    options.analysis.scheduler.worker_count = worker_count;
-    options.analysis.scheduler.queue_capacity = std::max<std::size_t>(128, worker_count * 4);
     hlsl_intellisense::lsp::Server server{[](const auto&) {}, {}, options};
     static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
         .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
     static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
         .method = "initialized", .params = Json::object()}));
-    for (const auto& [uri, text] : std::array{
-             std::pair{other_root->uri(), other_text}, std::pair{target_root.uri(), target_text},
-             std::pair{target_only_include.uri(), target_only_include_text}}) {
+    for (const auto& [uri, text] : std::array{std::pair{root.uri(), root_text},
+                                              std::pair{include_uri.uri(), include_text_before}}) {
         static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
             .method = "textDocument/didOpen",
             .params =
@@ -4850,10 +4819,10 @@ TEST_CASE("Incoming calls reject a candidate root's contribution when that root 
     }
     server.wait_for_analysis();
 
-    const auto call_offset = target_text.find("helper(1.0");
+    const auto call_offset = root_text.find("helper(x)");
     const auto helper_item = call_hierarchy_result(
-        server, prepare_call_hierarchy_request(2, target_root.uri(),
-                                               position_at(target_text, call_offset)))[0];
+        server,
+        prepare_call_hierarchy_request(2, root.uri(), position_at(root_text, call_offset)))[0];
     CHECK(helper_item["name"] == "helper");
     const std::uint64_t original_generation = helper_item["data"]["generation"];
 
@@ -4865,25 +4834,22 @@ TEST_CASE("Incoming calls reject a candidate root's contribution when that root 
     });
     entered.get_future().wait();
 
-    // Edited while the loop is paused on the *other* root: only the target
-    // root depends on this include, so only the target root is reanalyzed,
-    // and its own document version never changes.
+    // Edited while the loop is paused right before it would otherwise take this root's own
+    // document snapshot: this reanalysis runs and completes on its own scheduler worker with
+    // no other DXC operation in flight anywhere -- the only other activity right now is the
+    // async thread above, blocked purely on a `std::promise`.
     static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
         .method = "textDocument/didChange",
-        .params = Json{{"textDocument", {{"uri", target_only_include.uri()}, {"version", 2}}},
-                       {"contentChanges",
-                        Json::array({Json{{"text", "static const float targetOnlyValue = 1.0;\n"
-                                                   "static const float trailing = 2.0;\n"}}})}}}));
+        .params = Json{{"textDocument", {{"uri", include_uri.uri()}, {"version", 2}}},
+                       {"contentChanges", Json::array({Json{{"text", include_text_after}}})}}}));
+    server.wait_for_analysis();
 
-    // An ordinary interactive query for the target root is guaranteed by the
-    // scheduler to run only after any already-queued/running work for that
-    // same root (see `Scheduler::submit`'s same-root ordering for
-    // interactive-after-background insertion), so this single call both
-    // waits for the reanalysis above to finish and confirms it actually
-    // changed the target root's generation.
+    // An ordinary (unpaused) prepare query for the same call site confirms the reanalysis
+    // above actually changed the root's generation, independent of whatever the still-paused
+    // incoming-calls request later observes.
     const auto reanalyzed_item = call_hierarchy_result(
-        server, prepare_call_hierarchy_request(4, target_root.uri(),
-                                               position_at(target_text, call_offset)))[0];
+        server,
+        prepare_call_hierarchy_request(4, root.uri(), position_at(root_text, call_offset)))[0];
     const std::uint64_t reanalyzed_generation = reanalyzed_item["data"]["generation"];
     REQUIRE(reanalyzed_generation != original_generation);
 
@@ -4930,18 +4896,23 @@ TEST_CASE("Incoming calls treat a root with pending (placeholder) dependency met
     }
     const auto helper = hlsl_intellisense::workspace::DocumentUri::from_path(helper_path.string());
 
-    // The scheduler pins all work for a root to a single worker (see the
-    // pre-existing "Incoming calls reject a candidate root's contribution"
-    // test above for the full rationale). Rather than growing the worker
-    // count until a *fixed* pair of identities happens to separate --
-    // unbounded in the worst case, since every identity's hash also
-    // depends on the host's containing temp/work directory path --
-    // `worker_count` is kept fixed at a small constant, and a small,
-    // bounded number of candidate names for the caller root are tried
-    // instead, stopping at the first one whose identity hash lands on a
-    // different worker than `helper`'s own (fixed) root -- so pausing the
-    // caller root's background analyze() cannot also block `helper`'s own
-    // (already fully analyzed) self-query.
+    // The scheduler pins ALL work (both background reanalysis and
+    // interactive queries) for a given root to a single worker, chosen by
+    // hashing `root_identity` with the very same FNV-1a function
+    // `Scheduler::owner_for` uses. If `caller_root` and `helper` happened
+    // to hash to the same worker, pausing the caller root's background
+    // analyze() would also block `helper`'s own (already fully analyzed)
+    // self-query, since they'd share a worker. Rather than growing
+    // `worker_count` until a *fixed* pair of identities happens to
+    // separate -- unbounded in the worst case, since every identity's hash
+    // also depends on the host's containing temp/work directory path,
+    // which can make the search never terminate within a sane bound on
+    // some hosts/CI configurations and spin up an enormous,
+    // resource-exhausting thread pool -- `worker_count` is kept fixed at a
+    // small constant, and instead a small, bounded number of candidate
+    // names for the caller root are tried, stopping at the first one whose
+    // identity hash lands on a different worker than `helper`'s own
+    // (fixed) root.
     constexpr std::size_t worker_count{2};
     const auto helper_identity = helper.identity();
     const auto helper_hash = fnv1a_hash(helper_identity);
