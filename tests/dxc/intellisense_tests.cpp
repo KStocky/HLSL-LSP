@@ -142,6 +142,60 @@ TEST_CASE("DXC IntelliSense computes natural HLSL record layouts", "[dxc][memory
     CHECK_FALSE(layout->packed_offset.has_value());
 }
 
+TEST_CASE("DXC IntelliSense reports compiler-skipped preprocessor ranges", "[dxc][preprocessor]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    const std::string source = "#define ACTIVE_VALUE 7\n"
+                               "#define SCALE(value) ((value) * ACTIVE_VALUE)\n"
+                               "#if 0\n"
+                               "float skippedValue;\n"
+                               "#endif\n"
+                               "float activeValue;\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}});
+
+    const auto ranges = translation_unit.skipped_ranges();
+    REQUIRE_FALSE(ranges.empty());
+    CHECK(std::ranges::any_of(ranges, [](const auto& range) {
+        return range.start.path == shader_path && range.start.line <= 3 && range.end.line >= 3;
+    }));
+    const auto macros = translation_unit.macro_definitions();
+    const auto active =
+        std::ranges::find(macros, "ACTIVE_VALUE", &hlsl_intellisense::dxc::MacroDefinition::name);
+    REQUIRE(active != macros.end());
+    CHECK(active->value == "7");
+    CHECK(active->location.path == shader_path);
+    const auto scale =
+        std::ranges::find(macros, "SCALE", &hlsl_intellisense::dxc::MacroDefinition::name);
+    REQUIRE(scale != macros.end());
+    CHECK(scale->value == "(value) ((value) * ACTIVE_VALUE)");
+}
+
+TEST_CASE("DXC IntelliSense reports preprocessing records from unsaved includes",
+          "[dxc][preprocessor][includes]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    const auto root = (std::filesystem::current_path() / "preprocessor-root.hlsl").generic_string();
+    const auto include =
+        (std::filesystem::current_path() / "preprocessor-include.hlsli").generic_string();
+    const std::string root_source = "#include \"preprocessor-include.hlsli\"\n"
+                                    "float activeValue = INCLUDED_VALUE;\n";
+    const std::string include_source = "#define INCLUDED_VALUE 3\n"
+                                       "#if 0\n"
+                                       "float skippedIncludeValue;\n"
+                                       "#endif\n";
+    auto translation_unit =
+        intellisense.parse(root, {{root, root_source}, {include, include_source}});
+
+    const auto ranges = translation_unit.skipped_ranges();
+    CHECK(std::ranges::any_of(ranges, [&include](const auto& range) {
+        return range.start.path == include && range.start.line <= 3 && range.end.line >= 3;
+    }));
+    const auto macros = translation_unit.macro_definitions();
+    const auto included =
+        std::ranges::find(macros, "INCLUDED_VALUE", &hlsl_intellisense::dxc::MacroDefinition::name);
+    REQUIRE(included != macros.end());
+    CHECK(included->value == "3");
+    CHECK(included->location.path == include);
+}
+
 TEST_CASE("Memory layout probes replace configured target profiles", "[dxc][memory-layout]") {
     hlsl_intellisense::dxc::Intellisense intellisense;
     hlsl_intellisense::dxc::CompilerOptions options;

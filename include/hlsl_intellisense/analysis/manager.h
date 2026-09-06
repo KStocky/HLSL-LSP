@@ -128,6 +128,12 @@ class Manager final {
     [[nodiscard]] std::vector<dxc::Token> tokens(std::string root_identity, std::int64_t version,
                                                  std::string path,
                                                  const json_rpc::CancellationToken& cancellation);
+    [[nodiscard]] std::vector<dxc::SourceRange>
+    skipped_ranges(std::string root_identity, std::int64_t version,
+                   const json_rpc::CancellationToken& cancellation);
+    [[nodiscard]] std::vector<dxc::MacroDefinition>
+    macro_definitions(std::string root_identity, std::int64_t version,
+                      const json_rpc::CancellationToken& cancellation);
     [[nodiscard]] std::vector<dxc::Symbol> symbols(std::string root_identity, std::int64_t version,
                                                    const json_rpc::CancellationToken& cancellation);
 

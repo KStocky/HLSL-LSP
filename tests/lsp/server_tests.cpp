@@ -328,6 +328,68 @@ TEST_CASE("Server exposes memory layouts through hover and the custom protocol",
     CHECK(edited_response->result["members"][0]["type"] == "double");
 }
 
+TEST_CASE("Server exposes compiler-backed preprocessor exploration",
+          "[lsp][preprocessor][integration]") {
+    const auto uri = shader_uri();
+    const std::string source = "#define ACTIVE_VALUE 7\n"
+                               "#include \"missing.hlsli\"\n"
+                               "#define HEADER_NAME \"dynamic.hlsli\"\n"
+                               "#include HEADER_NAME\n"
+                               "#if 0\n"
+                               "float skippedValue;\n"
+                               "#endif\n"
+                               "float activeValue;\n";
+    std::string server_log;
+    hlsl_intellisense::lsp::Server server{[](const auto&) {},
+                                          [&server_log](std::string_view message) {
+                                              server_log.append(message);
+                                              server_log.push_back('\n');
+                                          }};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params =
+            Json{{"textDocument",
+                  {{"uri", uri}, {"languageId", "hlsl"}, {"version", 1}, {"text", source}}}}}));
+
+    const auto response = server.handle(
+        hlsl_intellisense::json_rpc::Request{.id = std::int64_t{2},
+                                             .method = "hlsl/preprocessorExplorer",
+                                             .params = Json{{"textDocument", {{"uri", uri}}}}});
+    REQUIRE(response.has_value());
+    const auto* result = std::get_if<hlsl_intellisense::json_rpc::Response>(&*response);
+    if (const auto* error = std::get_if<hlsl_intellisense::json_rpc::ErrorResponse>(&*response)) {
+        FAIL(error->error.message << '\n' << server_log);
+    }
+    REQUIRE(result != nullptr);
+    INFO(result->result.dump());
+    CHECK(result->result["rootUri"] == uri);
+    REQUIRE(result->result["files"].size() == 1);
+    REQUIRE(result->result["files"][0]["includes"].size() == 2);
+    CHECK(result->result["files"][0]["includes"][0]["status"] == "missing");
+    CHECK(result->result["files"][0]["includes"][1]["status"] == "dynamic");
+    CHECK_FALSE(result->result["skippedRegions"].empty());
+    REQUIRE_FALSE(result->result["macros"].empty());
+    const auto active_macro = std::ranges::find_if(result->result["macros"], [](const auto& macro) {
+        return macro["name"] == "ACTIVE_VALUE";
+    });
+    REQUIRE(active_macro != result->result["macros"].end());
+    CHECK((*active_macro)["value"] == "7");
+    CHECK((*active_macro)["source"] == "compiler");
+    CHECK_FALSE(result->result["settings"].empty());
+    const auto target_profile =
+        std::ranges::find_if(result->result["settings"], [](const auto& setting) {
+            return setting["name"] == "targetProfile";
+        });
+    REQUIRE(target_profile != result->result["settings"].end());
+    CHECK((*target_profile)["value"] == "");
+    CHECK((*target_profile)["origin"] == "not configured");
+    CHECK_FALSE(result->result["diagnostics"].empty());
+}
+
 TEST_CASE("Memory layout protocol handles packoffset and conditionals via DXC",
           "[lsp][memory-layout][unsupported]") {
     const auto uri = shader_uri();

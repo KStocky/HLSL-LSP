@@ -87,6 +87,43 @@ TEST_CASE("Include resolution uses open buffers and recursively tracks disk file
     CHECK(resolution.dependency_identities.size() == 3);
 }
 
+TEST_CASE("Include resolution reports resolved missing cyclic and macro directives",
+          "[workspace][includes][explorer]") {
+    TestTree tree;
+    tree.file("nested.hlsli", "#include \"root.hlsl\"\n");
+    const auto root_path = tree.path("root.hlsl");
+    const auto root = snapshot(root_path, "#include \"nested.hlsli\"\n"
+                                          "#include \"missing.hlsli\"\n"
+                                          "#define DYNAMIC_HEADER \"dynamic.hlsli\"\n"
+                                          "#include DYNAMIC_HEADER\n");
+    const std::vector open_documents{root};
+
+    const auto resolution =
+        workspace::resolve_includes(root, open_documents, workspace::WorkspaceConfiguration{});
+
+    REQUIRE(resolution.files.size() == 2);
+    const auto root_file = std::ranges::find(
+        resolution.files, std::filesystem::absolute(root_path).lexically_normal().generic_string(),
+        &workspace::IncludeResolution::File::physical_path);
+    REQUIRE(root_file != resolution.files.end());
+    REQUIRE(root_file->includes.size() == 3);
+    CHECK(root_file->open);
+    CHECK(root_file->includes[0].status == workspace::IncludeResolution::Status::resolved);
+    CHECK(root_file->includes[0].resolved_path ==
+          std::filesystem::absolute(tree.path("nested.hlsli")).lexically_normal().generic_string());
+    CHECK(root_file->includes[1].status == workspace::IncludeResolution::Status::missing);
+    CHECK(root_file->includes[2].status == workspace::IncludeResolution::Status::dynamic);
+    CHECK(root_file->includes[2].requested_path == "DYNAMIC_HEADER");
+    CHECK(resolution.has_dynamic_includes);
+
+    const auto nested_file =
+        std::ranges::find(resolution.files, tree.path("nested.hlsli").generic_string(),
+                          &workspace::IncludeResolution::File::physical_path);
+    REQUIRE(nested_file != resolution.files.end());
+    REQUIRE(nested_file->includes.size() == 1);
+    CHECK(nested_file->includes[0].status == workspace::IncludeResolution::Status::cyclic);
+}
+
 TEST_CASE("Virtual mappings provide logical and physical names for DXC unsaved files",
           "[workspace][includes][virtual]") {
     TestTree tree;
@@ -113,6 +150,13 @@ TEST_CASE("Virtual mappings provide logical and physical names for DXC unsaved f
     REQUIRE(root_source != resolution.sources.end());
     CHECK(root_source->text.find(tree.path("Engine/Common.hlsli").generic_string()) !=
           std::string::npos);
+    const auto root_file = std::ranges::find(
+        resolution.files, std::filesystem::absolute(root_path).lexically_normal().generic_string(),
+        &workspace::IncludeResolution::File::physical_path);
+    REQUIRE(root_file != resolution.files.end());
+    CHECK(root_file->source_text == root.text());
+    REQUIRE(root_file->includes.size() == 1);
+    CHECK(root_file->includes[0].path_offset == root.text().find("/Engine/Common.hlsli"));
     CHECK(resolution.dependency_identities.size() == 2);
 }
 

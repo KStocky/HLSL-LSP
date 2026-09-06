@@ -144,6 +144,12 @@ TEST_CASE("Configuration discovery merges toward the shader and stops at root",
     CHECK(configuration.preprocessor_definitions.at("FEATURE") == "true");
     CHECK(configuration.preprocessor_definitions.at("NO_VALUE").empty());
     CHECK(!configuration.preprocessor_definitions.contains("IGNORED"));
+    CHECK(configuration.definition_origins.at("BASE") ==
+          tree.path("project/shadertoolsconfig.json").generic_string());
+    CHECK(configuration.definition_origins.at("OVERRIDE") ==
+          tree.path("project/shaders/shadertoolsconfig.json").generic_string());
+    CHECK(configuration.definition_origin_files.at("OVERRIDE") ==
+          tree.path("project/shaders/shadertoolsconfig.json"));
     REQUIRE(configuration.additional_include_directories.size() == 2);
     CHECK(configuration.additional_include_directories[0] ==
           std::filesystem::weakly_canonical(tree.path("project/shaders/local")));
@@ -158,6 +164,12 @@ TEST_CASE("Configuration discovery merges toward the shader and stops at root",
     CHECK(configuration.entry_point == "Main");
     CHECK(configuration.additional_arguments ==
           std::vector<std::string>{"-enable-16bit-types", "-O3"});
+    CHECK(configuration.setting_origins.at("languageVersion") ==
+          tree.path("project/shadertoolsconfig.json").generic_string());
+    CHECK(configuration.setting_origins.at("targetProfile") ==
+          tree.path("project/shaders/shadertoolsconfig.json").generic_string());
+    CHECK(configuration.setting_origin_files.at("targetProfile") ==
+          tree.path("project/shaders/shadertoolsconfig.json"));
 }
 
 TEST_CASE("Configuration converts typed flags to deterministic DXC options",

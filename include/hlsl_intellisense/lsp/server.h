@@ -92,6 +92,8 @@ class Server final {
                                                const json_rpc::RequestContext& context);
     [[nodiscard]] json_rpc::Json compilation_info(const std::optional<json_rpc::Json>& params,
                                                   const json_rpc::RequestContext& context);
+    [[nodiscard]] json_rpc::Json preprocessor_explorer(const std::optional<json_rpc::Json>& params,
+                                                       const json_rpc::RequestContext& context);
     [[nodiscard]] json_rpc::Json signature_help(const std::optional<json_rpc::Json>& params,
                                                 const json_rpc::RequestContext& context);
     [[nodiscard]] json_rpc::Json document_symbols(const std::optional<json_rpc::Json>& params,

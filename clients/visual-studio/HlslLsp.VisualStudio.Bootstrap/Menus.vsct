@@ -33,6 +33,12 @@
           <ButtonText>HLSL Resource Bindings</ButtonText>
         </Strings>
       </Button>
+      <Button guid="guidHlslLspCommands" id="ShowPreprocessorExplorer" priority="0x0104" type="Button">
+        <Parent guid="guidHlslLspCommands" id="HlslLspGroup"/>
+        <Strings>
+          <ButtonText>HLSL Preprocessor Explorer</ButtonText>
+        </Strings>
+      </Button>
     </Buttons>
   </Commands>
   <Symbols>
@@ -43,6 +49,7 @@
       <IDSymbol name="SelectVariant" value="0x0101"/>
       <IDSymbol name="ShowCompilationInfo" value="0x0102"/>
       <IDSymbol name="ShowResourceBindings" value="0x0103"/>
+      <IDSymbol name="ShowPreprocessorExplorer" value="0x0104"/>
     </GuidSymbol>
   </Symbols>
 </CommandTable>

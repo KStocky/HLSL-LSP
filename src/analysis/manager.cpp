@@ -657,6 +657,22 @@ std::vector<dxc::Token> Manager::tokens(std::string root_identity, std::int64_t 
         });
 }
 
+std::vector<dxc::SourceRange>
+Manager::skipped_ranges(std::string root_identity, std::int64_t version,
+                        const json_rpc::CancellationToken& cancellation) {
+    return implementation_->query<std::vector<dxc::SourceRange>>(
+        std::move(root_identity), version, cancellation,
+        [](Impl::Entry& entry) { return entry.translation_unit.skipped_ranges(); });
+}
+
+std::vector<dxc::MacroDefinition>
+Manager::macro_definitions(std::string root_identity, std::int64_t version,
+                           const json_rpc::CancellationToken& cancellation) {
+    return implementation_->query<std::vector<dxc::MacroDefinition>>(
+        std::move(root_identity), version, cancellation,
+        [](Impl::Entry& entry) { return entry.translation_unit.macro_definitions(); });
+}
+
 std::vector<dxc::Symbol> Manager::symbols(std::string root_identity, std::int64_t version,
                                           const json_rpc::CancellationToken& cancellation) {
     return implementation_->query<std::vector<dxc::Symbol>>(

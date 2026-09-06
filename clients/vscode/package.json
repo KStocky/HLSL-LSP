@@ -38,6 +38,7 @@
     "onCommand:hlsl.showMemoryLayout",
     "onCommand:hlsl.showCompilationInfo",
     "onCommand:hlsl.showResourceBindings",
+    "onCommand:hlsl.showPreprocessorExplorer",
     "onCommand:hlsl.selectVariant"
   ],
   "capabilities": {
@@ -97,6 +98,11 @@
       {
         "command": "hlsl.showResourceBindings",
         "title": "HLSL: Show Resource Bindings",
+        "category": "HLSL"
+      },
+      {
+        "command": "hlsl.showPreprocessorExplorer",
+        "title": "HLSL: Show Preprocessor Explorer",
         "category": "HLSL"
       },
       {

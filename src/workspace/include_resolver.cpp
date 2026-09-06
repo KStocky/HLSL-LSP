@@ -21,6 +21,8 @@ struct SourceNode {
     std::string logical_path;
     std::string text;
     bool virtual_path{};
+    bool open{};
+    std::string virtual_mapping;
 };
 
 [[nodiscard]] std::string_view trim_left(std::string_view value) {
@@ -52,6 +54,10 @@ struct SourceNode {
                     }
                 } else if (!line.empty()) {
                     result.has_dynamic = true;
+                    result.dynamic_directives.push_back(
+                        {.expression = std::string{line},
+                         .expression_offset =
+                             static_cast<std::size_t>(line.data() - source_begin)});
                 }
             }
         }
@@ -104,7 +110,9 @@ class Resolver final {
                            .logical_path =
                                normalized_physical_path(document.path()).generic_string(),
                            .text = document.text(),
-                           .virtual_path = false});
+                           .virtual_path = false,
+                           .open = true,
+                           .virtual_mapping = {}});
         }
     }
 
@@ -113,7 +121,9 @@ class Resolver final {
         SourceNode root_node{.physical_path = normalized_physical_path(root.path()),
                              .logical_path = normalized_physical_path(root.path()).generic_string(),
                              .text = root.text(),
-                             .virtual_path = false};
+                             .virtual_path = false,
+                             .open = true,
+                             .virtual_mapping = {}};
         visit(root_node, result, true);
         return result;
     }
@@ -124,7 +134,9 @@ class Resolver final {
         SourceNode root_node{.physical_path = normalized_physical_path(root.path()),
                              .logical_path = normalized_physical_path(root.path()).generic_string(),
                              .text = root.text(),
-                             .virtual_path = false};
+                             .virtual_path = false,
+                             .open = true,
+                             .virtual_mapping = {}};
         const auto parsed = metadata(physical_identity(root_node.physical_path), root_node.text);
         const auto directive =
             std::ranges::find_if(parsed.directives, [utf8_offset](const auto& item) {
@@ -197,7 +209,9 @@ class Resolver final {
         return SourceNode{.physical_path = physical_path,
                           .logical_path = normalized_include,
                           .text = std::move(*text),
-                          .virtual_path = true};
+                          .virtual_path = true,
+                          .open = open_documents_.contains(physical_identity(physical_path)),
+                          .virtual_mapping = best->first};
     }
 
     [[nodiscard]] std::optional<SourceNode>
@@ -212,7 +226,9 @@ class Resolver final {
         return SourceNode{.physical_path = normalized,
                           .logical_path = logical_path.value_or(normalized.generic_string()),
                           .text = std::move(*text),
-                          .virtual_path = logical_path.has_value()};
+                          .virtual_path = logical_path.has_value(),
+                          .open = open_documents_.contains(physical_identity(normalized)),
+                          .virtual_mapping = {}};
     }
 
     [[nodiscard]] std::optional<SourceNode> resolve_directive(const SourceNode& source,
@@ -255,21 +271,63 @@ class Resolver final {
             result.dependency_identities.insert(identity);
         }
         const auto first_physical_visit = visited_physical_paths_.insert(identity).second;
+        if (first_physical_visit) {
+            active_physical_paths_.insert(identity);
+        }
 
         const auto parsed = metadata(identity, source.text);
         std::vector<SourceNode> included_sources;
         included_sources.reserve(parsed.directives.size());
+        IncludeResolution::File file{.physical_path = source.physical_path.generic_string(),
+                                     .logical_path = source.logical_path,
+                                     .open = source.open,
+                                     .includes = {},
+                                     .source_text = source.text};
         auto dxc_text = source.text;
         for (auto directive = parsed.directives.rbegin(); directive != parsed.directives.rend();
              ++directive) {
             if (auto included = resolve_directive(source, *directive, result)) {
+                const auto included_identity = physical_identity(included->physical_path);
+                file.includes.push_back(
+                    {.source_path = source.physical_path.generic_string(),
+                     .requested_path = directive->path,
+                     .path_offset = directive->path_offset,
+                     .quoted = directive->quoted,
+                     .status = active_physical_paths_.contains(included_identity)
+                                   ? IncludeResolution::Status::cyclic
+                                   : IncludeResolution::Status::resolved,
+                     .resolved_path = included->physical_path.generic_string(),
+                     .logical_path = included->logical_path,
+                     .virtual_mapping = included->virtual_mapping});
                 if (directive->path.starts_with('/') || directive->path.starts_with('\\')) {
                     dxc_text.replace(directive->path_offset, directive->path.size(),
                                      included->physical_path.generic_string());
                 }
                 included_sources.push_back(std::move(*included));
+            } else {
+                file.includes.push_back({.source_path = source.physical_path.generic_string(),
+                                         .requested_path = directive->path,
+                                         .path_offset = directive->path_offset,
+                                         .quoted = directive->quoted,
+                                         .status = IncludeResolution::Status::missing,
+                                         .resolved_path = {},
+                                         .logical_path = {},
+                                         .virtual_mapping = {}});
             }
         }
+        std::ranges::reverse(file.includes);
+        for (const auto& directive : parsed.dynamic_directives) {
+            file.includes.push_back({.source_path = source.physical_path.generic_string(),
+                                     .requested_path = directive.expression,
+                                     .path_offset = directive.expression_offset,
+                                     .quoted = false,
+                                     .status = IncludeResolution::Status::dynamic,
+                                     .resolved_path = {},
+                                     .logical_path = {},
+                                     .virtual_mapping = {}});
+        }
+        std::ranges::sort(file.includes, {}, &IncludeResolution::Edge::path_offset);
+        result.files.push_back(std::move(file));
         result.sources.push_back({source.logical_path, dxc_text});
         if (source.virtual_path && first_physical_visit) {
             result.sources.push_back(
@@ -293,6 +351,7 @@ class Resolver final {
              ++included) {
             visit(*included, result, false);
         }
+        active_physical_paths_.erase(identity);
     }
 
     const WorkspaceConfiguration& configuration_;
@@ -300,6 +359,7 @@ class Resolver final {
     std::unordered_map<std::string, SourceNode> open_documents_;
     std::unordered_set<std::string> emitted_logical_paths_;
     std::unordered_set<std::string> visited_physical_paths_;
+    std::unordered_set<std::string> active_physical_paths_;
 };
 
 } // namespace

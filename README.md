@@ -114,6 +114,19 @@ meanings, and navigation behavior.
 In Visual Studio, run **Tools > HLSL Resource Bindings**. In Visual Studio
 Code, run **HLSL: Show Resource Bindings** from the Command Palette.
 
+### Preprocessor explorer
+
+The Preprocessor Explorer shows the resolved include graph, missing, cyclic,
+and macro-based includes, DXC-reported skipped conditional regions, source and
+configuration macros, and effective compiler settings with their provenance.
+It uses the current unsaved document and active variant, and provides
+navigation to source and file-backed configuration locations. See
+[`docs/preprocessor-explorer.md`](docs/preprocessor-explorer.md) for the
+protocol and conservative handling of macro-based includes.
+
+In Visual Studio, run **Tools > HLSL Preprocessor Explorer**. In Visual Studio
+Code, run **HLSL: Show Preprocessor Explorer** from the Command Palette.
+
 ### Semantic colouring
 
 Types, functions, variables, templates, preprocessor directives, and other
