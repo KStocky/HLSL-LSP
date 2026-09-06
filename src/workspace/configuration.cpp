@@ -941,6 +941,7 @@ resolve_variants(const std::vector<ConfigFile>& configs,
 
         result.push_back(ResolvedVariant{.name = variant->name,
                                          .description = variant->description,
+                                         .declaring_file = variant->declaring_file,
                                          .is_default = variant->is_default,
                                          .applicable = applicable,
                                          .settings = to_variant_settings(settings)});
@@ -948,24 +949,39 @@ resolve_variants(const std::vector<ConfigFile>& configs,
     return result;
 }
 
-void apply_settings(WorkspaceConfiguration& result, const ConfigurationSettings& settings) {
+void apply_settings(WorkspaceConfiguration& result, const ConfigurationSettings& settings,
+                    const std::filesystem::path& origin) {
     for (const auto& [name, value] : settings.definitions) {
         result.preprocessor_definitions[name] = value;
+        result.definition_origins[name] = origin.generic_string();
+        result.definition_origin_files[name] = origin;
     }
     for (const auto& [virtual_directory, real_directory] : settings.virtual_mappings) {
         result.virtual_directory_mappings[virtual_directory] = real_directory;
     }
+    if (!settings.virtual_mappings.empty()) {
+        result.setting_origins["virtualDirectoryMappings"] = origin.generic_string();
+        result.setting_origin_files["virtualDirectoryMappings"] = origin;
+    }
     if (settings.language_version) {
         result.language_version = settings.language_version;
+        result.setting_origins["languageVersion"] = origin.generic_string();
+        result.setting_origin_files["languageVersion"] = origin;
     }
     if (settings.target_profile) {
         result.target_profile = settings.target_profile;
+        result.setting_origins["targetProfile"] = origin.generic_string();
+        result.setting_origin_files["targetProfile"] = origin;
     }
     if (settings.entry_point) {
         result.entry_point = settings.entry_point;
+        result.setting_origins["entryPoint"] = origin.generic_string();
+        result.setting_origin_files["entryPoint"] = origin;
     }
     if (settings.additional_arguments) {
         result.additional_arguments = *settings.additional_arguments;
+        result.setting_origins["additionalArguments"] = origin.generic_string();
+        result.setting_origin_files["additionalArguments"] = origin;
     }
 }
 
@@ -973,11 +989,11 @@ void apply_settings(WorkspaceConfiguration& result, const ConfigurationSettings&
 merge_configurations(const std::vector<ConfigFile>& configs,
                      const std::optional<std::filesystem::path>& canonical_shader) {
     WorkspaceConfiguration result;
-    std::vector<const ConfigurationSettings*> applied_settings;
+    std::vector<std::pair<const ConfigurationSettings*, std::filesystem::path>> applied_settings;
 
     for (auto iterator = configs.rbegin(); iterator != configs.rend(); ++iterator) {
-        apply_settings(result, iterator->settings);
-        applied_settings.push_back(&iterator->settings);
+        apply_settings(result, iterator->settings, iterator->path);
+        applied_settings.emplace_back(&iterator->settings, iterator->path);
     }
 
     if (canonical_shader) {
@@ -990,21 +1006,29 @@ merge_configurations(const std::vector<ConfigFile>& configs,
             }
             for (const auto& group : iterator->file_groups) {
                 if (matches(group, relative_shader)) {
-                    apply_settings(result, group.settings);
-                    applied_settings.push_back(&group.settings);
+                    apply_settings(result, group.settings, iterator->path);
+                    applied_settings.emplace_back(&group.settings, iterator->path);
                 }
             }
         }
     }
 
     std::set<std::filesystem::path> included;
+    std::set<std::filesystem::path> include_origins;
     for (auto settings = applied_settings.rbegin(); settings != applied_settings.rend();
          ++settings) {
-        for (const auto& include_directory : (*settings)->include_directories) {
+        for (const auto& include_directory : settings->first->include_directories) {
             if (included.insert(include_directory).second) {
                 result.additional_include_directories.push_back(include_directory);
+                include_origins.insert(settings->second);
             }
         }
+    }
+    if (include_origins.size() == 1) {
+        result.setting_origins["includeDirectories"] = include_origins.begin()->generic_string();
+        result.setting_origin_files["includeDirectories"] = *include_origins.begin();
+    } else if (!include_origins.empty()) {
+        result.setting_origins["includeDirectories"] = "multiple configuration files";
     }
 
     // The DXC runtime is loaded once per process and therefore cannot vary per
@@ -1031,6 +1055,10 @@ merge_configurations(const std::vector<ConfigFile>& configs,
         }
     }
     result.dxc_runtime_directory = std::move(selected_runtime);
+    if (result.dxc_runtime_directory) {
+        result.setting_origins["dxcRuntimeDirectory"] = selected_runtime_file.generic_string();
+        result.setting_origin_files["dxcRuntimeDirectory"] = selected_runtime_file;
+    }
     result.variants = resolve_variants(configs, canonical_shader);
     return result;
 }
@@ -1125,6 +1153,12 @@ auto apply_configuration_overrides(WorkspaceConfiguration configuration,
     const auto settings_path = base_directory / "<editor-settings>";
     if (overrides.preprocessor_definitions) {
         configuration.preprocessor_definitions = *overrides.preprocessor_definitions;
+        configuration.definition_origins.clear();
+        configuration.definition_origin_files.clear();
+        for (const auto& [name, value] : configuration.preprocessor_definitions) {
+            static_cast<void>(value);
+            configuration.definition_origins[name] = "editor settings";
+        }
     }
     if (overrides.additional_include_directories) {
         configuration.additional_include_directories.clear();
@@ -1134,6 +1168,8 @@ auto apply_configuration_overrides(WorkspaceConfiguration configuration,
             configuration.additional_include_directories.push_back(resolve_directory(
                 settings_path, "hlsl.additionalIncludeDirectories", directory.string()));
         }
+        configuration.setting_origins["includeDirectories"] = "editor settings";
+        configuration.setting_origin_files.erase("includeDirectories");
     }
     if (overrides.virtual_directory_mappings) {
         configuration.virtual_directory_mappings.clear();
@@ -1146,6 +1182,8 @@ auto apply_configuration_overrides(WorkspaceConfiguration configuration,
                                          "Virtual directory '" + virtual_directory +
                                              "' must start with a forward slash or backslash"};
             }
+            configuration.setting_origins["virtualDirectoryMappings"] = "editor settings";
+            configuration.setting_origin_files.erase("virtualDirectoryMappings");
             configuration.virtual_directory_mappings.emplace(
                 virtual_directory, resolve_directory(settings_path, "hlsl.virtualDirectoryMappings",
                                                      real_directory.string()));
@@ -1153,15 +1191,23 @@ auto apply_configuration_overrides(WorkspaceConfiguration configuration,
     }
     if (overrides.language_version) {
         configuration.language_version = *overrides.language_version;
+        configuration.setting_origins["languageVersion"] = "editor settings";
+        configuration.setting_origin_files.erase("languageVersion");
     }
     if (overrides.target_profile) {
         configuration.target_profile = *overrides.target_profile;
+        configuration.setting_origins["targetProfile"] = "editor settings";
+        configuration.setting_origin_files.erase("targetProfile");
     }
     if (overrides.entry_point) {
         configuration.entry_point = *overrides.entry_point;
+        configuration.setting_origins["entryPoint"] = "editor settings";
+        configuration.setting_origin_files.erase("entryPoint");
     }
     if (overrides.additional_arguments) {
         configuration.additional_arguments = *overrides.additional_arguments;
+        configuration.setting_origins["additionalArguments"] = "editor settings";
+        configuration.setting_origin_files.erase("additionalArguments");
     }
     if (overrides.dxc_runtime_directory) {
         // An explicitly configured editor runtime replaces any file-derived
@@ -1174,6 +1220,8 @@ auto apply_configuration_overrides(WorkspaceConfiguration configuration,
         } else {
             configuration.dxc_runtime_directory.reset();
         }
+        configuration.setting_origins["dxcRuntimeDirectory"] = "editor settings";
+        configuration.setting_origin_files.erase("dxcRuntimeDirectory");
     }
     return configuration;
 }
@@ -1194,28 +1242,46 @@ auto apply_variant(WorkspaceConfiguration& configuration, std::string_view name)
     const auto& settings = variant->settings;
     for (const auto& [key, value] : settings.preprocessor_definitions) {
         configuration.preprocessor_definitions[key] = value;
+        configuration.definition_origins[key] = "variant " + variant->name;
+        configuration.definition_origin_files[key] = variant->declaring_file;
     }
     for (const auto& [virtual_directory, real_directory] : settings.virtual_directory_mappings) {
         configuration.virtual_directory_mappings[virtual_directory] = real_directory;
     }
+    if (!settings.virtual_directory_mappings.empty()) {
+        configuration.setting_origins["virtualDirectoryMappings"] = "variant " + variant->name;
+        configuration.setting_origin_files["virtualDirectoryMappings"] = variant->declaring_file;
+    }
     if (settings.language_version) {
         configuration.language_version = settings.language_version;
+        configuration.setting_origins["languageVersion"] = "variant " + variant->name;
+        configuration.setting_origin_files["languageVersion"] = variant->declaring_file;
     }
     if (settings.target_profile) {
         configuration.target_profile = settings.target_profile;
+        configuration.setting_origins["targetProfile"] = "variant " + variant->name;
+        configuration.setting_origin_files["targetProfile"] = variant->declaring_file;
     }
     if (settings.entry_point) {
         configuration.entry_point = settings.entry_point;
+        configuration.setting_origins["entryPoint"] = "variant " + variant->name;
+        configuration.setting_origin_files["entryPoint"] = variant->declaring_file;
     }
     if (settings.additional_arguments) {
         configuration.additional_arguments = *settings.additional_arguments;
+        configuration.setting_origins["additionalArguments"] = "variant " + variant->name;
+        configuration.setting_origin_files["additionalArguments"] = variant->declaring_file;
     }
     if (!settings.additional_include_directories.empty()) {
         combine_include_directories(configuration.additional_include_directories,
                                     settings.additional_include_directories);
+        configuration.setting_origins["includeDirectories"] = "variant " + variant->name;
+        configuration.setting_origin_files["includeDirectories"] = variant->declaring_file;
     }
     if (settings.dxc_runtime_directory) {
         configuration.dxc_runtime_directory = settings.dxc_runtime_directory;
+        configuration.setting_origins["dxcRuntimeDirectory"] = "variant " + variant->name;
+        configuration.setting_origin_files["dxcRuntimeDirectory"] = variant->declaring_file;
     }
     return VariantSelection::applied;
 }

@@ -69,6 +69,7 @@ struct VariantSettings {
 struct ResolvedVariant {
     std::string name;
     std::string description;
+    std::filesystem::path declaring_file;
     bool is_default{};
     bool applicable{true};
     VariantSettings settings;
@@ -99,6 +100,12 @@ struct WorkspaceConfiguration {
     // variant's file patterns match the shader. Selecting a variant applies its
     // settings on top of the file-derived configuration.
     std::vector<ResolvedVariant> variants;
+    // Human-readable provenance retained alongside effective values for
+    // diagnostics and explorer UIs. These fields never affect compilation.
+    std::map<std::string, std::string, std::less<>> definition_origins;
+    std::map<std::string, std::string, std::less<>> setting_origins;
+    std::map<std::string, std::filesystem::path, std::less<>> definition_origin_files;
+    std::map<std::string, std::filesystem::path, std::less<>> setting_origin_files;
 
     [[nodiscard]] dxc::CompilerOptions compiler_options() const;
 };

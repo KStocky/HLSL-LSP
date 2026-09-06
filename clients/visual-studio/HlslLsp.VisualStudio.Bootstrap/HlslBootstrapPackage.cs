@@ -22,6 +22,7 @@ namespace HlslLsp.VisualStudio.Bootstrap;
 [ProvideToolWindow(typeof(MemoryLayoutToolWindow))]
 [ProvideToolWindow(typeof(CompilationInfoToolWindow))]
 [ProvideToolWindow(typeof(ResourceBindingsToolWindow))]
+[ProvideToolWindow(typeof(PreprocessorExplorerToolWindow))]
 [ProvideOptionPage(
     typeof(HlslOptionsPage),
     "HLSL-LSP",
@@ -40,6 +41,8 @@ public sealed class HlslBootstrapPackage : AsyncPackage
     private int explicitCompilationInfoRequests;
     private long resourceBindingsRequestGeneration;
     private int explicitResourceBindingsRequests;
+    private long preprocessorExplorerRequestGeneration;
+    private int explicitPreprocessorExplorerRequests;
     public const string PackageGuidString = "5ac7fbe7-1b9f-45eb-bca6-ffb9ae1ab67f";
 
     private static readonly object Gate = new();
@@ -126,6 +129,12 @@ public sealed class HlslBootstrapPackage : AsyncPackage
                         () => ShowResourceBindingsAsync(DisposalToken))
                     .FileAndForget("HlslLsp/ShowResourceBindings"),
                 new CommandID(commandSet, 0x0103)));
+        commands.AddCommand(
+            new OleMenuCommand(
+                (_, _) => JoinableTaskFactory.RunAsync(
+                        () => ShowPreprocessorExplorerAsync(DisposalToken))
+                    .FileAndForget("HlslLsp/ShowPreprocessorExplorer"),
+                new CommandID(commandSet, 0x0104)));
     }
 
     private async Task ShowMemoryLayoutAsync(CancellationToken cancellationToken)
@@ -466,6 +475,154 @@ public sealed class HlslBootstrapPackage : AsyncPackage
             return;
         }
         await ShowResourceBindingsAsync(
+            window.DocumentUri,
+            cancellationToken,
+            window,
+            cancellationToken);
+    }
+
+    private async Task ShowPreprocessorExplorerAsync(CancellationToken cancellationToken)
+    {
+        var uri = await GetActiveDocumentUriAsync(cancellationToken);
+        if (uri == null)
+        {
+            await ShowInformationAsync(
+                "Open an HLSL document, then run Tools > HLSL Preprocessor Explorer.",
+                cancellationToken);
+            return;
+        }
+        Interlocked.Increment(ref explicitPreprocessorExplorerRequests);
+        try
+        {
+            using (var requestCancellation =
+                   CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+            {
+                requestCancellation.CancelAfter(TimeSpan.FromSeconds(30));
+                await ShowPreprocessorExplorerAsync(
+                    uri,
+                    requestCancellation.Token,
+                    null,
+                    cancellationToken);
+            }
+        }
+        finally
+        {
+            Interlocked.Decrement(ref explicitPreprocessorExplorerRequests);
+        }
+    }
+
+    // Mirrors ShowCompilationInfoAsync/ShowResourceBindingsAsync: the
+    // generation guard ensures a stale response (e.g. from a superseded
+    // variant change or an earlier command invocation) can never overwrite
+    // a newer one. A failed or cancelled request never regresses the window
+    // to the "open a document" placeholder or leaves it stuck: it keeps the
+    // last successful content when one exists, and otherwise shows an
+    // explicit error. Issues its own hlsl/preprocessorExplorer request
+    // through PreprocessorExplorerBridge -- a distinct protocol request from
+    // CompilationInfoBridge, unlike Resource Bindings which reuses it.
+    private async Task ShowPreprocessorExplorerAsync(
+        Uri uri,
+        CancellationToken cancellationToken,
+        PreprocessorExplorerToolWindow existingWindow = null,
+        CancellationToken ambientCancellationToken = default)
+    {
+        var generation = Interlocked.Increment(ref preprocessorExplorerRequestGeneration);
+        PreprocessorExplorerModel report = null;
+        string failureMessage = null;
+        try
+        {
+            report = await PreprocessorExplorerBridge.RequestAsync(uri, cancellationToken);
+        }
+        catch (OperationCanceledException) when (ambientCancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (OperationCanceledException)
+        {
+            failureMessage = "The preprocessor explorer request was cancelled.";
+        }
+        catch (Exception error)
+        {
+            failureMessage =
+                "Could not retrieve preprocessor explorer information: " + error.Message;
+        }
+        if (generation != Interlocked.Read(ref preprocessorExplorerRequestGeneration))
+        {
+            return;
+        }
+        // The request token may represent the bounded RPC timeout. Once a
+        // result or failure message is ready, use only the ambient package
+        // token for presentation so a timeout can still be shown to the user.
+        await JoinableTaskFactory.SwitchToMainThreadAsync(ambientCancellationToken);
+        var window = existingWindow;
+        if (window == null)
+        {
+            window = await ShowToolWindowAsync(
+                typeof(PreprocessorExplorerToolWindow),
+                0,
+                true,
+                ambientCancellationToken) as PreprocessorExplorerToolWindow;
+        }
+        if (generation != Interlocked.Read(ref preprocessorExplorerRequestGeneration))
+        {
+            return;
+        }
+        if (failureMessage != null)
+        {
+            window?.SetError(uri, failureMessage, existingWindow != null);
+            return;
+        }
+        if (report == null)
+        {
+            window?.SetError(
+                uri,
+                "The HLSL language server is not ready to provide preprocessor explorer information.",
+                existingWindow != null);
+            return;
+        }
+        window?.SetReport(uri, report);
+    }
+
+    // Invoked after an active-variant selection or a document save. Only
+    // refreshes an already-open window, and only for a save whose saved file
+    // matches the window's tracked document, so this cannot start a request
+    // storm from unrelated documents or from opening the window for the
+    // first time.
+    public async Task RefreshPreprocessorExplorerIfOpenAsync(
+        string savedFilePath,
+        CancellationToken cancellationToken)
+    {
+        // A background save/variant refresh must never supersede an explicit
+        // Tools command that the user is waiting for.
+        if (Volatile.Read(ref explicitPreprocessorExplorerRequests) != 0)
+        {
+            return;
+        }
+        await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+        if (await FindToolWindowAsync(
+                    typeof(PreprocessorExplorerToolWindow),
+                    0,
+                    false,
+                    cancellationToken)
+                is not PreprocessorExplorerToolWindow window ||
+            window.DocumentUri == null)
+        {
+            return;
+        }
+        if (savedFilePath != null &&
+            (!Uri.TryCreate(savedFilePath, UriKind.Absolute, out var savedUri) ||
+             !savedUri.IsFile ||
+             !window.DocumentUri.Equals(savedUri)))
+        {
+            return;
+        }
+        // Re-check after the asynchronous UI/tool-window lookup. An explicit
+        // command may have started while this background refresh was yielding.
+        if (Volatile.Read(ref explicitPreprocessorExplorerRequests) != 0)
+        {
+            return;
+        }
+        await ShowPreprocessorExplorerAsync(
             window.DocumentUri,
             cancellationToken,
             window,

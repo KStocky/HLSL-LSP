@@ -156,6 +156,7 @@ public sealed class HlslLspActivator :
             OnActiveVariantChangedFromServerAsync);
         MemoryLayoutBridge.Register(languageClient.GetMemoryLayoutAsync);
         CompilationInfoBridge.Register(languageClient.GetCompilationInfoAsync);
+        PreprocessorExplorerBridge.Register(languageClient.GetPreprocessorExplorerAsync);
         VariantBridge.Register(
             languageClient.GetVariantsAsync,
             OnActiveVariantSelectedAsync);
@@ -399,6 +400,11 @@ public sealed class HlslLspActivator :
         joinableTaskFactory.RunAsync(
                 () => host.RefreshResourceBindingsIfOpenAsync(null, cancellationToken))
             .FileAndForget("HlslLsp/RefreshResourceBindings");
+        // The Preprocessor Explorer window issues its own request and is
+        // refreshed independently, mirroring the other two windows above.
+        joinableTaskFactory.RunAsync(
+                () => host.RefreshPreprocessorExplorerIfOpenAsync(null, cancellationToken))
+            .FileAndForget("HlslLsp/RefreshPreprocessorExplorer");
     }
 
     // A saved HLSL document may change what the server would compile, so a
@@ -439,6 +445,12 @@ public sealed class HlslLspActivator :
             joinableTaskFactory.RunAsync(
                     () => host.RefreshResourceBindingsIfOpenAsync(moniker, disposalToken))
                 .FileAndForget("HlslLsp/RefreshResourceBindingsOnSave");
+            // The Preprocessor Explorer window is refreshed independently on
+            // the same save, matching the same non-file/unrelated-document
+            // filtering performed inside RefreshPreprocessorExplorerIfOpenAsync.
+            joinableTaskFactory.RunAsync(
+                    () => host.RefreshPreprocessorExplorerIfOpenAsync(moniker, disposalToken))
+                .FileAndForget("HlslLsp/RefreshPreprocessorExplorerOnSave");
             return VSConstants.S_OK;
         }
         finally

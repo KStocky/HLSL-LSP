@@ -303,6 +303,39 @@ internal sealed class HlslLanguageClient :
             .ConfigureAwait(false);
     }
 
+    // Mirrors GetCompilationInfoAsync: the server analyzes the document's
+    // current (possibly unsaved) snapshot and its active variant, so no
+    // position or variant parameter is sent here. This is a distinct
+    // protocol request (hlsl/preprocessorExplorer), not a different
+    // presentation of hlsl/compilationInfo's response.
+    internal async Task<PreprocessorExplorerModel> GetPreprocessorExplorerAsync(
+        Uri documentUri,
+        CancellationToken cancellationToken)
+    {
+        var currentRpc = Volatile.Read(ref rpc);
+        if (currentRpc == null)
+        {
+            await rpcAttached.WaitAsync(cancellationToken).ConfigureAwait(false);
+            currentRpc = Volatile.Read(ref rpc);
+            if (currentRpc == null)
+            {
+                throw new InvalidOperationException(
+                    "The HLSL language server connection is unavailable.");
+            }
+        }
+        return await currentRpc.InvokeWithParameterObjectAsync<PreprocessorExplorerModel>(
+                "hlsl/preprocessorExplorer",
+                new
+                {
+                    textDocument = new
+                    {
+                        uri = documentUri.AbsoluteUri,
+                    },
+                },
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
     public async Task OnLoadedAsync()
     {
         if (StartAsync != null)

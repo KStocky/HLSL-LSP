@@ -85,6 +85,12 @@ struct SourceRange {
     friend bool operator==(const SourceRange&, const SourceRange&) = default;
 };
 
+struct MacroDefinition {
+    std::string name;
+    std::string value;
+    SourceLocation location;
+};
+
 // A textual replacement DXC itself considers a safe, deterministic fix for a
 // diagnostic ("fix-it"). `range` is the exact byte span in the diagnostic's
 // file to replace with `replacement_text`. DXC's IntelliSense fix-it support
@@ -596,6 +602,10 @@ class TranslationUnit final {
     [[nodiscard]] std::vector<Signature> signatures_at(std::string_view path, std::uint32_t line,
                                                        std::uint32_t column) const;
     [[nodiscard]] std::vector<Token> tokens(std::string_view path) const;
+    // Returns conditional-compilation regions that DXC excluded for every
+    // source in the current unsaved translation-unit snapshot.
+    [[nodiscard]] std::vector<SourceRange> skipped_ranges() const;
+    [[nodiscard]] std::vector<MacroDefinition> macro_definitions() const;
     [[nodiscard]] std::vector<Symbol> symbols() const;
 
     void reparse(std::vector<SourceFile> files);

@@ -19,6 +19,12 @@ import {
   resolveResourceBindingsRefresh,
 } from "./resourceBindings";
 import {
+  openPreprocessorLocationCommand,
+  parsePreprocessorLocationCommandArg,
+  PreprocessorExplorerReport,
+  resolvePreprocessorExplorerRefresh,
+} from "./preprocessorExplorer";
+import {
   HlslServerSettings,
   readActiveVariant,
   readDefaultLanguageVersion,
@@ -51,6 +57,9 @@ interface ManagedClient extends LifecycleClient {
     position: vscode.Position,
   ): Promise<MemoryLayout | null>;
   compilationInfo(uri: vscode.Uri): Promise<CompilationInfo | null>;
+  preprocessorExplorer(
+    uri: vscode.Uri,
+  ): Promise<PreprocessorExplorerReport | null>;
   dxcRuntime(): Promise<DxcRuntimeInfo | null>;
   variants(uri: vscode.Uri | undefined): Promise<VariantList | null>;
 }
@@ -134,12 +143,29 @@ let resourceBindingsState: ResourceBindingsViewState | undefined;
 let resourceBindingsGeneration = 0;
 let resourceBindingsDebounce: NodeJS.Timeout | undefined;
 
+// Independently tracked from the other two panels: all three can be open
+// for different documents at the same time, and none may interfere with
+// another's generation counter or debounce timer.
+interface PreprocessorExplorerViewState {
+  readonly panel: vscode.WebviewPanel;
+  uri: vscode.Uri;
+  hasContent: boolean;
+}
+
+let preprocessorExplorerState: PreprocessorExplorerViewState | undefined;
+let preprocessorExplorerGeneration = 0;
+let preprocessorExplorerDebounce: NodeJS.Timeout | undefined;
+
 function compilationInfoLoadingHtml(): string {
   return `<!doctype html><html><body style="color:var(--vscode-foreground);background:var(--vscode-editor-background);font-family:var(--vscode-font-family);padding:1rem 1.5rem;"><p>Compiling…</p></body></html>`;
 }
 
 function resourceBindingsLoadingHtml(): string {
   return `<!doctype html><html><body style="color:var(--vscode-foreground);background:var(--vscode-editor-background);font-family:var(--vscode-font-family);padding:1rem 1.5rem;"><p>Analyzing resource bindings…</p></body></html>`;
+}
+
+function preprocessorExplorerLoadingHtml(): string {
+  return `<!doctype html><html><body style="color:var(--vscode-foreground);background:var(--vscode-editor-background);font-family:var(--vscode-font-family);padding:1rem 1.5rem;"><p>Analyzing preprocessor state…</p></body></html>`;
 }
 
 // Fetches the current compilation info for the tracked document and applies it
@@ -216,6 +242,45 @@ async function refreshResourceBindings(
   }
   if (outcome.html !== undefined) {
     resourceBindingsState.panel.webview.html = outcome.html;
+  }
+}
+
+// Mirrors refreshCompilationInfo/refreshResourceBindings, but issues its
+// own `hlsl/preprocessorExplorer` request (a distinct protocol request,
+// unlike Resource Bindings which reuses hlsl/compilationInfo) against its
+// own independently tracked panel/generation.
+async function refreshPreprocessorExplorer(
+  lifecycle: ClientLifecycle<ManagedClient>,
+  uri: vscode.Uri,
+): Promise<void> {
+  const generation = ++preprocessorExplorerGeneration;
+  let report: PreprocessorExplorerReport | null | undefined;
+  let failureMessage: string | undefined;
+  try {
+    report = await lifecycle.withClient((client) =>
+      client.preprocessorExplorer(uri),
+    );
+  } catch (error) {
+    failureMessage =
+      error instanceof Error ? error.message : "The request failed.";
+  }
+  if (
+    generation !== preprocessorExplorerGeneration ||
+    preprocessorExplorerState?.uri.toString() !== uri.toString()
+  ) {
+    return;
+  }
+  const outcome = resolvePreprocessorExplorerRefresh(
+    preprocessorExplorerState.hasContent,
+    report,
+    failureMessage,
+  );
+  preprocessorExplorerState.hasContent = outcome.hasContent;
+  if (outcome.title !== undefined) {
+    preprocessorExplorerState.panel.title = outcome.title;
+  }
+  if (outcome.html !== undefined) {
+    preprocessorExplorerState.panel.webview.html = outcome.html;
   }
 }
 
@@ -427,6 +492,15 @@ class VscodeLanguageClient implements ManagedClient {
   public compilationInfo(uri: vscode.Uri): Promise<CompilationInfo | null> {
     return this.client.sendRequest<CompilationInfo | null>(
       "hlsl/compilationInfo",
+      { textDocument: { uri: uri.toString() } },
+    );
+  }
+
+  public preprocessorExplorer(
+    uri: vscode.Uri,
+  ): Promise<PreprocessorExplorerReport | null> {
+    return this.client.sendRequest<PreprocessorExplorerReport | null>(
+      "hlsl/preprocessorExplorer",
       { textDocument: { uri: uri.toString() } },
     );
   }
@@ -955,6 +1029,105 @@ export async function activate(
         }
       },
     ),
+    vscode.commands.registerCommand(
+      "hlsl.showPreprocessorExplorer",
+      async () => {
+        const editor = vscode.window.activeTextEditor;
+        if (editor?.document.languageId !== "hlsl") {
+          await vscode.window.showInformationMessage(
+            "Open an HLSL document to inspect its preprocessor state.",
+          );
+          return;
+        }
+        const uri = editor.document.uri;
+        if (preprocessorExplorerState !== undefined) {
+          const switchingDocument =
+            preprocessorExplorerState.uri.toString() !== uri.toString();
+          preprocessorExplorerState.uri = uri;
+          if (switchingDocument) {
+            // Only the loading placeholder for a different document
+            // replaces what is on screen; a same-document refresh keeps
+            // showing the last successful content until the new result (or
+            // an explicit error, on failure) is ready.
+            preprocessorExplorerState.hasContent = false;
+            preprocessorExplorerState.panel.webview.html =
+              preprocessorExplorerLoadingHtml();
+          }
+          preprocessorExplorerState.panel.reveal(vscode.ViewColumn.Beside);
+        } else {
+          const panel = vscode.window.createWebviewPanel(
+            "hlslPreprocessorExplorer",
+            "Preprocessor Explorer",
+            vscode.ViewColumn.Beside,
+            {
+              enableScripts: false,
+              // No script execution is used for navigation: file/include/
+              // macro/skipped-region links go through plain `command:`
+              // URIs, and this allowlists only the one command they may
+              // invoke -- never `true` (which would let static HTML trigger
+              // arbitrary commands).
+              enableCommandUris: [openPreprocessorLocationCommand],
+            },
+          );
+          panel.webview.html = preprocessorExplorerLoadingHtml();
+          panel.onDidDispose(() => {
+            if (preprocessorExplorerState?.panel === panel) {
+              preprocessorExplorerState = undefined;
+            }
+          });
+          preprocessorExplorerState = { panel, uri, hasContent: false };
+        }
+        await refreshPreprocessorExplorer(lifecycle, uri);
+      },
+    ),
+    vscode.commands.registerCommand(
+      openPreprocessorLocationCommand,
+      async (rawArgument: unknown) => {
+        const location = parsePreprocessorLocationCommandArg(rawArgument);
+        if (location === undefined) {
+          await vscode.window.showErrorMessage(
+            "Unable to navigate: the preprocessor location was missing or malformed.",
+          );
+          return;
+        }
+        let targetUri: vscode.Uri;
+        try {
+          targetUri = vscode.Uri.parse(location.uri, true);
+        } catch {
+          await vscode.window.showErrorMessage(
+            "Unable to navigate: the preprocessor location's URI could not be parsed.",
+          );
+          return;
+        }
+        const range = new vscode.Range(
+          new vscode.Position(
+            location.range.start.line,
+            location.range.start.character,
+          ),
+          new vscode.Position(
+            location.range.end.line,
+            location.range.end.character,
+          ),
+        );
+        try {
+          const document = await vscode.workspace.openTextDocument(targetUri);
+          const editor = await vscode.window.showTextDocument(document, {
+            preserveFocus: false,
+            selection: range,
+          });
+          editor.revealRange(
+            range,
+            vscode.TextEditorRevealType.InCenterIfOutsideViewport,
+          );
+        } catch (error) {
+          await vscode.window.showErrorMessage(
+            `Unable to navigate to the preprocessor location: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+      },
+    ),
     vscode.commands.registerCommand("hlsl.selectVariant", async () => {
       const editor = vscode.window.activeTextEditor;
       const documentUri =
@@ -1087,6 +1260,15 @@ export async function activate(
       ) {
         await refreshResourceBindings(lifecycle, resourceBindingsState.uri);
       }
+      if (
+        event.affectsConfiguration("hlsl.activeVariant", resource) &&
+        preprocessorExplorerState !== undefined
+      ) {
+        await refreshPreprocessorExplorer(
+          lifecycle,
+          preprocessorExplorerState.uri,
+        );
+      }
     }),
     vscode.workspace.onDidChangeWorkspaceFolders(restart),
     vscode.workspace.onDidSaveTextDocument((document) => {
@@ -1095,6 +1277,14 @@ export async function activate(
       }
       if (document.uri.toString() === resourceBindingsState?.uri.toString()) {
         void refreshResourceBindings(lifecycle, resourceBindingsState.uri);
+      }
+      if (
+        document.uri.toString() === preprocessorExplorerState?.uri.toString()
+      ) {
+        void refreshPreprocessorExplorer(
+          lifecycle,
+          preprocessorExplorerState.uri,
+        );
       }
     }),
     vscode.workspace.onDidChangeTextDocument((event) => {
@@ -1121,6 +1311,22 @@ export async function activate(
         resourceBindingsDebounce = setTimeout(() => {
           if (resourceBindingsState !== undefined) {
             void refreshResourceBindings(lifecycle, resourceBindingsState.uri);
+          }
+        }, 500);
+      }
+      if (
+        event.document.uri.toString() ===
+        preprocessorExplorerState?.uri.toString()
+      ) {
+        if (preprocessorExplorerDebounce !== undefined) {
+          clearTimeout(preprocessorExplorerDebounce);
+        }
+        preprocessorExplorerDebounce = setTimeout(() => {
+          if (preprocessorExplorerState !== undefined) {
+            void refreshPreprocessorExplorer(
+              lifecycle,
+              preprocessorExplorerState.uri,
+            );
           }
         }, 500);
       }
@@ -1172,5 +1378,10 @@ export async function deactivate(): Promise<void> {
     resourceBindingsDebounce = undefined;
   }
   resourceBindingsState = undefined;
+  if (preprocessorExplorerDebounce !== undefined) {
+    clearTimeout(preprocessorExplorerDebounce);
+    preprocessorExplorerDebounce = undefined;
+  }
+  preprocessorExplorerState = undefined;
   await lifecycle?.stop();
 }

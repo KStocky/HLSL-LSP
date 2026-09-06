@@ -1692,6 +1692,10 @@ void Server::register_handlers() {
     dispatcher_.register_request_handler(
         "hlsl/memoryLayout",
         [this](const auto& params, const auto& context) { return memory_layout(params, context); });
+    dispatcher_.register_request_handler("hlsl/preprocessorExplorer",
+                                         [this](const auto& params, const auto& context) {
+                                             return preprocessor_explorer(params, context);
+                                         });
     dispatcher_.register_request_handler("hlsl/compilationInfo",
                                          [this](const auto& params, const auto& context) {
                                              return compilation_info(params, context);
@@ -2435,6 +2439,210 @@ Json Server::memory_layout(const std::optional<Json>& params,
     return layout.has_value() ? memory_layout_json(*layout) : Json(nullptr);
 }
 
+Json Server::preprocessor_explorer(const std::optional<Json>& params,
+                                   const json_rpc::RequestContext& context) {
+    require_running();
+    const auto& value = object_params(params);
+    const auto uri = string_member(object_member(value, "textDocument"), "uri");
+
+    const auto snapshot = [&] {
+        std::scoped_lock state_lock{state_mutex_};
+        try {
+            const auto& state = documents_.document(uri);
+            if (!state.open) {
+                invalid_params("Preprocessor explorer document is not open");
+            }
+            return documents_.snapshot(uri);
+        } catch (const workspace::DocumentError& error) {
+            invalid_params(error.what());
+        }
+    }();
+    std::vector<workspace::SourceSnapshot> open_documents;
+    ConfigurationState configuration_state;
+    {
+        std::scoped_lock state_lock{state_mutex_};
+        open_documents = documents_.open_snapshots();
+        configuration_state =
+            ConfigurationState{.editor_settings = editor_settings_,
+                               .client_default_language_version = client_default_language_version_,
+                               .active_variant = active_variant_,
+                               .workspace_folders = workspace_folders_};
+    }
+    context.cancellation.throw_if_cancellation_requested();
+
+    const auto configuration = configuration_for(snapshot, configuration_state);
+    auto resolution = workspace::resolve_includes(snapshot, open_documents, configuration);
+    analyze_and_publish(snapshot.uri());
+    const auto skipped = analysis_.skipped_ranges(snapshot.document_uri().identity(),
+                                                  snapshot.version(), context.cancellation);
+    const auto compiler_macros = analysis_.macro_definitions(
+        snapshot.document_uri().identity(), snapshot.version(), context.cancellation);
+
+    std::unordered_map<std::string, std::string> compiler_source_texts;
+    for (const auto& source : resolution.sources) {
+        compiler_source_texts.try_emplace(
+            std::filesystem::path{source.path}.lexically_normal().generic_string(), source.text);
+    }
+
+    const auto status_name = [](workspace::IncludeResolution::Status status) {
+        switch (status) {
+        case workspace::IncludeResolution::Status::resolved:
+            return "resolved";
+        case workspace::IncludeResolution::Status::missing:
+            return "missing";
+        case workspace::IncludeResolution::Status::cyclic:
+            return "cyclic";
+        case workspace::IncludeResolution::Status::dynamic:
+            return "dynamic";
+        }
+        return "missing";
+    };
+
+    Json files = Json::array();
+    for (const auto& file : resolution.files) {
+        Json includes = Json::array();
+        for (const auto& include : file.includes) {
+            workspace::Position include_position{};
+            if (include.path_offset <= file.source_text.size()) {
+                include_position =
+                    workspace::lsp_position_at(file.source_text, include.path_offset);
+            }
+            Json item{{"path", include.requested_path},
+                      {"line", include_position.line},
+                      {"character", include_position.character},
+                      {"kind", include.status == workspace::IncludeResolution::Status::dynamic
+                                   ? "macro"
+                               : include.quoted ? "quoted"
+                                                : "angled"},
+                      {"status", status_name(include.status)}};
+            if (!include.resolved_path.empty()) {
+                item["resolvedUri"] =
+                    workspace::DocumentUri::from_path(include.resolved_path).uri();
+                item["logicalPath"] = include.logical_path;
+            }
+            if (!include.virtual_mapping.empty()) {
+                item["mapping"] = include.virtual_mapping;
+            }
+            includes.push_back(std::move(item));
+        }
+        files.push_back({{"uri", workspace::DocumentUri::from_path(file.physical_path).uri()},
+                         {"logicalPath", file.logical_path},
+                         {"physicalPath", file.physical_path},
+                         {"source", file.open ? "open" : "disk"},
+                         {"includes", std::move(includes)}});
+    }
+
+    Json skipped_regions = Json::array();
+    for (const auto& range : skipped) {
+        const auto path =
+            std::filesystem::path{range.start.path}.lexically_normal().generic_string();
+        const auto text = compiler_source_texts.find(path);
+        workspace::Position start{};
+        workspace::Position end{};
+        if (text != compiler_source_texts.end() && range.start.offset <= text->second.size() &&
+            range.end.offset <= text->second.size()) {
+            start = workspace::lsp_position_at(text->second, range.start.offset);
+            end = workspace::lsp_position_at(text->second, range.end.offset);
+        } else {
+            start = {.line = range.start.line > 0 ? range.start.line - 1 : 0,
+                     .character = range.start.column > 0 ? range.start.column - 1 : 0};
+            end = {.line = range.end.line > 0 ? range.end.line - 1 : 0,
+                   .character = range.end.column > 0 ? range.end.column - 1 : 0};
+        }
+        skipped_regions.push_back(
+            {{"uri", workspace::DocumentUri::from_path(range.start.path).uri()},
+             {"start", lsp_position(start)},
+             {"end", lsp_position(end)}});
+    }
+
+    const auto setting_origin = [&configuration](std::string_view name,
+                                                 std::string_view fallback) -> std::string_view {
+        const auto found = configuration.setting_origins.find(name);
+        return found != configuration.setting_origins.end() ? std::string_view{found->second}
+                                                            : fallback;
+    };
+    Json macros = Json::array();
+    for (const auto& macro : compiler_macros) {
+        macros.push_back(
+            {{"name", macro.name},
+             {"value", macro.value},
+             {"source", "compiler"},
+             {"origin", macro.location.path},
+             {"uri", workspace::DocumentUri::from_path(macro.location.path).uri()},
+             {"line", macro.location.line > 0 ? macro.location.line - 1 : 0},
+             {"character", macro.location.column > 0 ? macro.location.column - 1 : 0}});
+    }
+    for (const auto& [name, macro_value] : configuration.preprocessor_definitions) {
+        const auto origin = configuration.definition_origins.find(name);
+        Json macro{{"name", name},
+                   {"value", macro_value},
+                   {"source", "configuration"},
+                   {"origin", origin != configuration.definition_origins.end() ? origin->second
+                                                                               : "configuration"}};
+        if (const auto origin_file = configuration.definition_origin_files.find(name);
+            origin_file != configuration.definition_origin_files.end()) {
+            macro["originUri"] =
+                workspace::DocumentUri::from_path(origin_file->second.generic_string()).uri();
+        }
+        macros.push_back(std::move(macro));
+    }
+
+    Json settings = Json::array();
+    const auto add_setting = [&settings, &configuration](std::string_view name,
+                                                         const Json& setting_value,
+                                                         std::string_view origin) {
+        Json setting{{"name", name}, {"value", setting_value}, {"origin", std::string{origin}}};
+        if (const auto origin_file = configuration.setting_origin_files.find(name);
+            origin_file != configuration.setting_origin_files.end()) {
+            setting["originUri"] =
+                workspace::DocumentUri::from_path(origin_file->second.generic_string()).uri();
+        }
+        settings.push_back(std::move(setting));
+    };
+    add_setting("languageVersion", configuration.language_version.value_or("2021"),
+                setting_origin("languageVersion", "built-in default"));
+    add_setting("targetProfile", configuration.target_profile.value_or(""),
+                setting_origin("targetProfile", "not configured"));
+    add_setting("entryPoint", configuration.entry_point.value_or(""),
+                setting_origin("entryPoint", "not configured"));
+    Json include_directories = Json::array();
+    for (const auto& directory : configuration.additional_include_directories) {
+        include_directories.push_back(directory.generic_string());
+    }
+    add_setting("includeDirectories", include_directories,
+                setting_origin("includeDirectories", "not configured"));
+    Json virtual_mappings = Json::object();
+    for (const auto& [prefix, directory] : configuration.virtual_directory_mappings) {
+        virtual_mappings[prefix] = directory.generic_string();
+    }
+    add_setting("virtualDirectoryMappings", virtual_mappings,
+                setting_origin("virtualDirectoryMappings", "not configured"));
+    add_setting("additionalArguments", configuration.additional_arguments,
+                setting_origin("additionalArguments", "not configured"));
+
+    Json diagnostics = Json::array();
+    if (resolution.has_dynamic_includes) {
+        diagnostics.push_back(
+            "Macro-based includes are compiler-owned; their expressions are shown without "
+            "fabricating a resolved path.");
+    }
+
+    {
+        std::scoped_lock state_lock{state_mutex_};
+        if (!documents_.contains(snapshot.uri()) ||
+            documents_.snapshot(snapshot.uri()).version() != snapshot.version()) {
+            throw HandlerError{json_rpc::content_modified_code,
+                               "Preprocessor explorer was superseded"};
+        }
+    }
+    return {{"rootUri", snapshot.uri()},
+            {"files", std::move(files)},
+            {"skippedRegions", std::move(skipped_regions)},
+            {"macros", std::move(macros)},
+            {"settings", std::move(settings)},
+            {"diagnostics", std::move(diagnostics)}};
+}
+
 Json Server::compilation_info(const std::optional<Json>& params,
                               const json_rpc::RequestContext& context) {
     require_running();
@@ -3077,6 +3285,7 @@ Server::base_configuration_for(const workspace::SourceSnapshot& snapshot,
     }
     if (!configuration.language_version && client_default_language_version) {
         configuration.language_version = client_default_language_version;
+        configuration.setting_origins["languageVersion"] = "client defaults";
     }
     return configuration;
 }

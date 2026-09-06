@@ -379,6 +379,31 @@ class TaskCursors final {
     unsigned count_{};
 };
 
+class TaskRanges final {
+  public:
+    TaskRanges(IDxcSourceRange** ranges, unsigned count) : ranges_{ranges}, count_{count} {}
+
+    TaskRanges(const TaskRanges&) = delete;
+    auto operator=(const TaskRanges&) -> TaskRanges& = delete;
+
+    ~TaskRanges() {
+        for (unsigned index = 0; index < count_; ++index) {
+            if (ranges_[index] != nullptr) {
+                ranges_[index]->Release();
+            }
+        }
+        ::CoTaskMemFree(reinterpret_cast<void*>(ranges_));
+    }
+
+    [[nodiscard]] IDxcSourceRange* operator[](unsigned index) const noexcept {
+        return ranges_[index];
+    }
+
+  private:
+    IDxcSourceRange** ranges_{};
+    unsigned count_{};
+};
+
 [[nodiscard]] auto make_source_location(IDxcSourceLocation& location) -> SourceLocation {
     ComPtr<IDxcFile> file;
     unsigned line{};
@@ -1164,7 +1189,10 @@ struct TranslationUnit::Impl final {
                   root_path.c_str(), argument_pointers.data(),
                   static_cast<int>(argument_pointers.size()), file_pointers.data(),
                   static_cast<unsigned>(file_pointers.size()),
-                  DxcTranslationUnitFlags_UseCallerThread, translation_unit.put()),
+                  static_cast<DxcTranslationUnitFlags>(
+                      DxcTranslationUnitFlags_UseCallerThread |
+                      DxcTranslationUnitFlags_DetailedPreprocessingRecord),
+                  translation_unit.put()),
               "ParseTranslationUnit");
     }
 };
@@ -1351,6 +1379,11 @@ auto TranslationUnit::references_at(std::string_view path, std::uint32_t line,
     ComPtr<IDxcCursor> referenced;
     check(cursor->GetReferencedCursor(referenced.put()), "GetReferencedCursor");
     auto* target = is_null_cursor(referenced.get()) ? cursor.get() : referenced.get();
+    DxcCursorKind target_kind{DxcCursor_UnexposedDecl};
+    check(target->GetKind(&target_kind), "GetKind");
+    if (target_kind == DxcCursor_MacroDefinition || target_kind == DxcCursor_MacroExpansion) {
+        return {};
+    }
 
     constexpr unsigned page_size = 256;
     std::vector<Reference> result;
@@ -1778,6 +1811,65 @@ auto TranslationUnit::tokens(std::string_view path) const -> std::vector<Token> 
                           .length = token_end - token_start,
                           .kind = map_token_kind(kind),
                           .cursor_kind = cursor_kind});
+    }
+    return result;
+}
+
+auto TranslationUnit::skipped_ranges() const -> std::vector<SourceRange> {
+    if (!implementation_) {
+        throw std::logic_error{"Translation unit is not initialized"};
+    }
+
+    std::vector<SourceRange> result;
+    for (const auto& source : implementation_->sources) {
+        ComPtr<IDxcFile> file;
+        check(implementation_->translation_unit->GetFile(source.path.c_str(), file.put()),
+              "GetFile");
+        unsigned count{};
+        IDxcSourceRange** ranges{};
+        check(implementation_->translation_unit->GetSkippedRanges(file.get(), &count, &ranges),
+              "GetSkippedRanges");
+        TaskRanges owned_ranges{ranges, count};
+        for (unsigned index = 0; index < count; ++index) {
+            if (auto range = safe_source_range(owned_ranges[index])) {
+                result.push_back(std::move(*range));
+            }
+        }
+    }
+    return result;
+}
+
+auto TranslationUnit::macro_definitions() const -> std::vector<MacroDefinition> {
+    if (!implementation_) {
+        throw std::logic_error{"Translation unit is not initialized"};
+    }
+
+    std::vector<MacroDefinition> result;
+    for (const auto& symbol : symbols()) {
+        if (symbol.cursor_kind != static_cast<std::uint32_t>(DxcCursor_MacroDefinition)) {
+            continue;
+        }
+        const auto source =
+            std::ranges::find(implementation_->sources, symbol.location.path, &SourceFile::path);
+        if (source == implementation_->sources.end() || symbol.end_offset > source->text.size() ||
+            symbol.start_offset > symbol.end_offset) {
+            continue;
+        }
+        auto declaration = std::string_view{source->text}.substr(
+            symbol.start_offset, symbol.end_offset - symbol.start_offset);
+        const auto name_offset = declaration.find(symbol.name);
+        if (name_offset == std::string_view::npos) {
+            continue;
+        }
+        auto value = declaration.substr(name_offset + symbol.name.size());
+        while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front())) != 0) {
+            value.remove_prefix(1);
+        }
+        while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back())) != 0) {
+            value.remove_suffix(1);
+        }
+        result.push_back(
+            {.name = symbol.name, .value = std::string{value}, .location = symbol.location});
     }
     return result;
 }

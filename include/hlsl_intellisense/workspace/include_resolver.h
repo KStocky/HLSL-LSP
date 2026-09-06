@@ -22,8 +22,14 @@ struct IncludeDirective {
     bool quoted{};
 };
 
+struct DynamicIncludeDirective {
+    std::string expression;
+    std::size_t expression_offset{};
+};
+
 struct IncludeMetadata {
     std::vector<IncludeDirective> directives;
+    std::vector<DynamicIncludeDirective> dynamic_directives;
     bool has_dynamic{};
 };
 
@@ -63,6 +69,28 @@ struct IncludeResolution {
     std::vector<dxc::SourceFile> sources;
     std::unordered_set<std::string> dependency_identities;
     bool has_dynamic_includes{};
+    enum class Status : std::uint8_t { resolved, missing, cyclic, dynamic };
+
+    struct Edge {
+        std::string source_path;
+        std::string requested_path;
+        std::size_t path_offset{};
+        bool quoted{};
+        Status status{Status::missing};
+        std::string resolved_path;
+        std::string logical_path;
+        std::string virtual_mapping;
+    };
+
+    struct File {
+        std::string physical_path;
+        std::string logical_path;
+        bool open{};
+        std::vector<Edge> includes;
+        std::string source_text;
+    };
+
+    std::vector<File> files;
 };
 
 [[nodiscard]] IncludeResolution resolve_includes(const SourceSnapshot& root,
