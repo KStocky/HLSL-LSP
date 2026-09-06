@@ -150,6 +150,7 @@ TEST_CASE("LSP handler enforces lifecycle and invalid parameters", "[lsp][handle
           Json::array({"(", ","}));
     CHECK(response->result["capabilities"]["signatureHelpProvider"]["retriggerCharacters"] ==
           Json::array({")"}));
+    CHECK(response->result["capabilities"]["inlayHintProvider"] == true);
     CHECK(response->result["capabilities"]["documentSymbolProvider"] == true);
     CHECK(response->result["capabilities"]["workspaceSymbolProvider"] == true);
     CHECK(response->result["capabilities"]["workspace"]["workspaceFolders"]["supported"] == true);
@@ -885,6 +886,257 @@ TEST_CASE("Hover and signature help reparse unsaved edits", "[lsp][hover][signat
     CHECK(signature_response->result["activeParameter"] == 1);
     CHECK(signature_response->result["signatures"][0]["label"] ==
           "float newFunction(float value, float bias)");
+}
+
+TEST_CASE("Server filters and refreshes compiler-backed inlay hints",
+          "[lsp][inlay-hints][configuration][integration]") {
+    const auto uri = shader_uri();
+    const std::string source = "float shade(float value, float bias) { return value + bias; }\n"
+                               "float4 main() : SV_Target {\n"
+                               "  auto first = shade(1.0, 2.0);\n"
+                               "  auto second = shade(3.0, 4.0);\n"
+                               "  return (first + second).xxxx;\n"
+                               "}\n";
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    std::vector<hlsl_intellisense::json_rpc::Request> outbound_requests;
+    hlsl_intellisense::lsp::Server server{
+        [&notifications](const auto& value) { notifications.push_back(value); },
+        {},
+        {},
+        [&outbound_requests](const auto& value) { outbound_requests.push_back(value); }};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1},
+        .method = "initialize",
+        .params =
+            Json{{"capabilities", {{"workspace", {{"inlayHint", {{"refreshSupport", true}}}}}}},
+                 {"initializationOptions", {{"hlsl", {{"languageVersion", "202x"}}}}}}}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params =
+            Json{{"textDocument",
+                  {{"uri", uri}, {"languageId", "hlsl"}, {"version", 1}, {"text", source}}}}}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "hlsl/didChangeActiveVariant", .params = Json{{"variant", "Debug"}}}));
+    REQUIRE(outbound_requests.size() == 1);
+    CHECK(outbound_requests.back().method == "workspace/inlayHint/refresh");
+    CHECK_FALSE(outbound_requests.back().params.has_value());
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "hlsl/didChangeActiveVariant", .params = Json{{"variant", "Debug"}}}));
+    CHECK(outbound_requests.size() == 1);
+
+    const auto request_hints = [&server, &uri](std::int64_t id, const Json& requested_range) {
+        const auto response = server.handle(hlsl_intellisense::json_rpc::Request{
+            .id = id,
+            .method = "textDocument/inlayHint",
+            .params = Json{{"textDocument", {{"uri", uri}}}, {"range", requested_range}}});
+        REQUIRE(response.has_value());
+        const auto* result = std::get_if<hlsl_intellisense::json_rpc::Response>(&*response);
+        REQUIRE(result != nullptr);
+        return result->result;
+    };
+
+    const Json first_declaration_range{{"start", {{"line", 2}, {"character", 0}}},
+                                       {"end", {{"line", 3}, {"character", 0}}}};
+    const auto first_hints = request_hints(2, first_declaration_range);
+    REQUIRE_FALSE(first_hints.empty());
+    CHECK(std::ranges::all_of(first_hints,
+                              [](const auto& hint) { return hint["position"]["line"] == 2; }));
+    CHECK(std::ranges::any_of(first_hints, [](const auto& hint) {
+        return hint["label"] == ": float" && hint["kind"] == 1;
+    }));
+    CHECK(std::ranges::any_of(first_hints, [](const auto& hint) {
+        return hint["label"] == "value:" && hint["kind"] == 2;
+    }));
+    CHECK(std::ranges::any_of(first_hints, [](const auto& hint) {
+        return hint["label"] == "bias:" && hint["kind"] == 2;
+    }));
+    CHECK_FALSE(std::ranges::any_of(
+        first_hints, [](const auto& hint) { return hint["label"] == "variant: Debug"; }));
+
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "workspace/didChangeConfiguration",
+        .params = Json{{"settings",
+                        {{"hlsl.languageVersion", "202x"},
+                         {"hlsl.inlayHints.types", false},
+                         {"hlsl.inlayHints.parameters", false},
+                         {"hlsl.inlayHints.activeVariant", false}}}}}));
+    REQUIRE(outbound_requests.size() == 2);
+    CHECK(outbound_requests.back().method == "workspace/inlayHint/refresh");
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "workspace/didChangeConfiguration",
+        .params = Json{{"settings",
+                        {{"hlsl.languageVersion", "202x"},
+                         {"hlsl.inlayHints.types", false},
+                         {"hlsl.inlayHints.parameters", false},
+                         {"hlsl.inlayHints.activeVariant", false}}}}}));
+    CHECK(outbound_requests.size() == 2);
+    CHECK(request_hints(3, first_declaration_range).empty());
+
+    const std::string edited =
+        "float shade(float intensity, float offset) { return intensity + offset; }\n"
+        "float4 main() : SV_Target { auto updated = shade(5.0, 6.0); return updated.xxxx; }\n";
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didChange",
+        .params = Json{{"textDocument", {{"uri", uri}, {"version", 2}}},
+                       {"contentChanges", Json::array({Json{{"text", edited}}})}}}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "workspace/didChangeConfiguration",
+        .params =
+            Json{{"settings",
+                  {{"hlsl",
+                    {{"languageVersion", "202x"},
+                     {"inlayHints",
+                      {{"types", false}, {"parameters", true}, {"activeVariant", true}}}}}}}}}));
+    REQUIRE(outbound_requests.size() == 3);
+    CHECK(outbound_requests[0].id != outbound_requests[1].id);
+    CHECK(outbound_requests[1].id != outbound_requests[2].id);
+    const Json full_range{{"start", {{"line", 0}, {"character", 0}}},
+                          {"end", {{"line", 2}, {"character", 0}}}};
+    const auto edited_hints = request_hints(4, full_range);
+    CHECK(std::ranges::any_of(edited_hints, [](const auto& hint) {
+        return hint["label"] == "intensity:" && hint["kind"] == 2;
+    }));
+    CHECK(std::ranges::any_of(edited_hints, [](const auto& hint) {
+        return hint["label"] == "offset:" && hint["kind"] == 2;
+    }));
+    CHECK_FALSE(std::ranges::any_of(edited_hints,
+                                    [](const auto& hint) { return hint["label"] == ": float"; }));
+    CHECK(std::ranges::any_of(edited_hints, [](const auto& hint) {
+        return hint["label"] == "variant: Debug" && !hint.contains("kind") &&
+               hint["position"]["line"] == 0 && hint["position"]["character"] == 0;
+    }));
+}
+
+TEST_CASE("Inlay hint refresh requests require advertised client support",
+          "[lsp][inlay-hints][refresh]") {
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    std::vector<hlsl_intellisense::json_rpc::Request> outbound_requests;
+    hlsl_intellisense::lsp::Server server{
+        [&notifications](const auto& value) { notifications.push_back(value); },
+        {},
+        {},
+        [&outbound_requests](const auto& value) { outbound_requests.push_back(value); }};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "workspace/didChangeConfiguration",
+        .params = Json{{"settings", {{"hlsl.inlayHints.types", false}}}}}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "hlsl/didChangeActiveVariant", .params = Json{{"variant", "Debug"}}}));
+    CHECK(outbound_requests.empty());
+}
+
+TEST_CASE("Inlay hints cover bounded chunks beyond one MiB",
+          "[lsp][inlay-hints][range][integration]") {
+    const auto uri = shader_uri();
+    std::string source = "float shade(float value) { return value; }\n"
+                         "float4 main() : SV_Target {\n"
+                         "  auto nearValue = shade(1.0);\n";
+    source.append(1100U * 1024U, ' ');
+    source += "auto distantValue = shade(2.0);\n"
+              "return (nearValue + distantValue).xxxx;\n"
+              "}\n";
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    hlsl_intellisense::lsp::Server server{
+        [&notifications](const auto& value) { notifications.push_back(value); }};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1},
+        .method = "initialize",
+        .params = Json{{"initializationOptions", {{"hlsl", {{"languageVersion", "202x"}}}}}}}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params =
+            Json{{"textDocument",
+                  {{"uri", uri}, {"languageId", "hlsl"}, {"version", 1}, {"text", source}}}}}));
+
+    const auto response = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{2},
+        .method = "textDocument/inlayHint",
+        .params = Json{
+            {"textDocument", {{"uri", uri}}},
+            {"range",
+             {{"start", position_at(source, 0)}, {"end", position_at(source, source.size())}}}}});
+    REQUIRE(response.has_value());
+    const auto* result = std::get_if<hlsl_intellisense::json_rpc::Response>(&*response);
+    REQUIRE(result != nullptr);
+    const auto near_argument = position_at(source, source.find("1.0"));
+    const auto distant_argument = position_at(source, source.find("2.0"));
+    CHECK(std::ranges::any_of(result->result, [&](const auto& hint) {
+        return hint["label"] == "value:" && hint["position"] == near_argument;
+    }));
+    CHECK(std::ranges::any_of(result->result, [&](const auto& hint) {
+        return hint["label"] == "value:" && hint["position"] == distant_argument;
+    }));
+}
+
+TEST_CASE("Inlay hints reject settings generations superseded during analysis",
+          "[lsp][inlay-hints][stale][concurrency]") {
+    const auto check_superseded = [](bool change_variant) {
+        const auto uri = shader_uri();
+        const std::string source = "float shade(float value) { return value; }\n"
+                                   "float4 main() : SV_Target { return shade(1.0).xxxx; }\n";
+        auto hooks = std::make_shared<hlsl_intellisense::analysis::AnalysisHooks>();
+        std::promise<void> entered;
+        std::promise<void> release;
+        auto released = release.get_future().share();
+        hooks->before_interactive = [&](std::string_view) {
+            entered.set_value();
+            released.wait();
+        };
+        hlsl_intellisense::lsp::ServerOptions options;
+        options.background_analysis = true;
+        options.analysis_hooks = hooks;
+        std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+        hlsl_intellisense::lsp::Server server{
+            [&notifications](const auto& value) { notifications.push_back(value); }, {}, options};
+        static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+            .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+        static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+            .method = "initialized", .params = Json::object()}));
+        static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+            .method = "textDocument/didOpen",
+            .params =
+                Json{{"textDocument",
+                      {{"uri", uri}, {"languageId", "hlsl"}, {"version", 1}, {"text", source}}}}}));
+        server.wait_for_analysis();
+
+        const hlsl_intellisense::json_rpc::Request request{
+            .id = std::string{"inlay"},
+            .method = "textDocument/inlayHint",
+            .params = Json{{"textDocument", {{"uri", uri}}},
+                           {"range",
+                            {{"start", position_at(source, 0)},
+                             {"end", position_at(source, source.size())}}}}};
+        const auto cancellation = server.begin_request(request.id);
+        auto response =
+            std::async(std::launch::async, [&] { return server.handle(request, cancellation); });
+        entered.get_future().wait();
+        if (change_variant) {
+            static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+                .method = "hlsl/didChangeActiveVariant",
+                .params = Json{{"variant", "SupersedingVariant"}}}));
+        } else {
+            static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+                .method = "workspace/didChangeConfiguration",
+                .params = Json{{"settings", {{"hlsl.inlayHints.parameters", false}}}}}));
+        }
+        release.set_value();
+
+        const auto result = response.get();
+        const auto* error = std::get_if<hlsl_intellisense::json_rpc::ErrorResponse>(&result);
+        REQUIRE(error != nullptr);
+        CHECK(error->error.code == hlsl_intellisense::json_rpc::content_modified_code);
+        server.wait_for_analysis();
+    };
+
+    check_superseded(false);
+    check_superseded(true);
 }
 
 TEST_CASE("References and rename preserve identity across open roots and disk includes",

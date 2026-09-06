@@ -10,6 +10,8 @@ with:
 - DXC diagnostics for open HLSL documents
 - DXC-backed code completion
 - DXC-backed hover and signature help
+- Native shader-aware inlay hints for inferred types, parameter names, variants,
+  layouts, and resource bindings
 - Natural structure and constant-buffer memory layout inspection
 - DXC-backed shader compilation inspection: effective configuration,
   diagnostics, reflection, and compiler-generated disassembly
@@ -79,6 +81,15 @@ behavior, and DXIL/SPIR-V differences are documented in
 
 In Visual Studio, run **Tools > HLSL Shader Compilation**. In Visual Studio
 Code, run **HLSL: Show Shader Compilation** from the Command Palette.
+
+### Inlay hints
+
+Both editors use their native inlay-hint surfaces to show DXC-authoritative
+inferred types and unambiguous parameter names. Optional categories expose
+matrix orientation, resource registers, constant-buffer packed offsets, and
+array strides; a selected compilation variant can also be shown. Each category
+is independently configurable. See
+[`docs/inlay-hints.md`](docs/inlay-hints.md) for settings and guarantees.
 
 The pinned DXC `1.9.2607.13` API exposes no callable constructor overloads or
 parameter cursors. Scalar casts resolve to an unnamed initializer expression;

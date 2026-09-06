@@ -200,6 +200,48 @@
           "default": "",
           "scope": "window",
           "description": "Name of the active shader compilation variant declared under hlsl.variants in shadertoolsconfig.json. The variant's entry point, target profile, macros, and platform settings are applied when analyzing matching documents. Use the \"HLSL: Select Shader Variant\" command to change it. Empty selects no variant. Changing it reanalyzes open documents (and restarts only if the variant selects a different DXC runtime)."
+        },
+        "hlsl.inlayHints.types": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "description": "Show compiler-inferred type hints."
+        },
+        "hlsl.inlayHints.parameters": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "description": "Show unambiguous overload parameter-name hints at call sites."
+        },
+        "hlsl.inlayHints.matrixOrientation": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "description": "Show compiler-derived row-major or column-major matrix orientation hints."
+        },
+        "hlsl.inlayHints.registers": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "description": "Show reflected resource register and space hints."
+        },
+        "hlsl.inlayHints.packedOffsets": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "description": "Show compiler-derived constant-buffer packed-offset hints."
+        },
+        "hlsl.inlayHints.arrayStrides": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "description": "Show compiler-derived array-stride hints."
+        },
+        "hlsl.inlayHints.activeVariant": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "description": "Show the selected compilation variant where it affects the current shader."
         }
       }
     }

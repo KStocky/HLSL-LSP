@@ -152,6 +152,7 @@ public sealed class HlslLspActivator :
             initialOptions.LanguageVersion,
             lastRuntimeDirectory,
             workspaceActiveVariant,
+            initialOptions.InlayHints,
             OnServerRuntimeRestartRequestedAsync,
             OnActiveVariantChangedFromServerAsync);
         MemoryLayoutBridge.Register(languageClient.GetMemoryLayoutAsync);
@@ -302,6 +303,7 @@ public sealed class HlslLspActivator :
         {
             await languageClient.UpdateLanguageVersionAsync(options.LanguageVersion);
         }
+        await languageClient.UpdateInlayHintsAsync(options.InlayHints);
     }
 
     private string EffectiveRuntimeDirectory(HlslOptionsSnapshot options)

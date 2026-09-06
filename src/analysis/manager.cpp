@@ -646,6 +646,22 @@ std::vector<dxc::Signature> Manager::signatures(std::string root_identity, std::
         });
 }
 
+std::vector<dxc::InlayHint> Manager::inlay_hints(std::string root_identity, std::int64_t version,
+                                                 std::string path, std::uint32_t start_offset,
+                                                 std::uint32_t end_offset,
+                                                 std::vector<dxc::InlayCall> calls,
+                                                 dxc::InlayHintOptions options,
+                                                 const json_rpc::CancellationToken& cancellation) {
+    return implementation_->query<std::vector<dxc::InlayHint>>(
+        std::move(root_identity), version, cancellation,
+        [requested_path = std::move(path), start_offset, end_offset, calls = std::move(calls),
+         options](Impl::Entry& entry) {
+            static_cast<void>(requested_path);
+            return entry.translation_unit.inlay_hints(entry.root_path, start_offset, end_offset,
+                                                      calls, options);
+        });
+}
+
 std::vector<dxc::Token> Manager::tokens(std::string root_identity, std::int64_t version,
                                         std::string path,
                                         const json_rpc::CancellationToken& cancellation) {

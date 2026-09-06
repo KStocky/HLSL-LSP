@@ -589,6 +589,36 @@ struct Token {
     std::uint32_t cursor_kind{};
 };
 
+enum class InlayHintCategory : std::uint8_t {
+    type,
+    parameter,
+    matrix_orientation,
+    register_binding,
+    packed_offset,
+    array_stride
+};
+
+struct InlayHintOptions {
+    bool types{true};
+    bool parameters{true};
+    bool matrix_orientation{};
+    bool registers{};
+    bool packed_offsets{};
+    bool array_strides{};
+};
+
+struct InlayCall {
+    std::uint32_t line{};
+    std::uint32_t column{};
+    std::vector<std::uint32_t> argument_offsets;
+};
+
+struct InlayHint {
+    std::uint32_t offset{};
+    std::string label;
+    InlayHintCategory category{InlayHintCategory::type};
+};
+
 class TranslationUnit final {
   public:
     TranslationUnit(TranslationUnit&&) noexcept;
@@ -615,6 +645,9 @@ class TranslationUnit final {
     [[nodiscard]] CompilationInfo compilation_info() const;
     [[nodiscard]] std::vector<Signature> signatures_at(std::string_view path, std::uint32_t line,
                                                        std::uint32_t column) const;
+    [[nodiscard]] std::vector<InlayHint>
+    inlay_hints(std::string_view path, std::uint32_t start_offset, std::uint32_t end_offset,
+                const std::vector<InlayCall>& calls, const InlayHintOptions& options) const;
     [[nodiscard]] std::vector<Token> tokens(std::string_view path) const;
     // Returns conditional-compilation regions that DXC excluded for every
     // source in the current unsaved translation-unit snapshot.

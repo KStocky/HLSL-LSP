@@ -24,6 +24,15 @@ export interface HlslServerSettings {
   entryPoint?: string;
   additionalArguments?: readonly string[];
   dxcRuntimeDirectory?: string;
+  inlayHints?: {
+    types?: boolean;
+    parameters?: boolean;
+    matrixOrientation?: boolean;
+    registers?: boolean;
+    packedOffsets?: boolean;
+    arrayStrides?: boolean;
+    activeVariant?: boolean;
+  };
 }
 
 const configuredValue = (
@@ -54,7 +63,20 @@ export function readServerSettings(
     .filter((entry) => {
       return entry[1] !== undefined;
     });
-  return Object.fromEntries(entries);
+  const result: HlslServerSettings = Object.fromEntries(entries);
+  const inlayHintKeys = [
+    "types",
+    "parameters",
+    "matrixOrientation",
+    "registers",
+    "packedOffsets",
+    "arrayStrides",
+    "activeVariant",
+  ] as const;
+  const inlayHints = Object.fromEntries(
+    inlayHintKeys.map((key) => [key, reader.get(`inlayHints.${key}`) === true]),
+  );
+  return { ...result, inlayHints };
 }
 
 export function readDefaultLanguageVersion(

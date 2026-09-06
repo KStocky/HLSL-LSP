@@ -21,6 +21,7 @@ internal sealed class HlslLanguageClient :
     private string languageVersion;
     private string dxcRuntimeDirectory;
     private string activeVariant;
+    private InlayHintOptionsSnapshot inlayHints;
     private JsonRpc rpc;
     private readonly AsyncManualResetEvent rpcAttached = new();
     private readonly HlslCustomMessageTarget customMessageTarget;
@@ -31,10 +32,28 @@ internal sealed class HlslLanguageClient :
         string activeVariant,
         Func<string, string, Task> onRuntimeRestartRequested,
         Func<string, Task> onActiveVariantChangedFromServer)
+        : this(
+            languageVersion,
+            dxcRuntimeDirectory,
+            activeVariant,
+            new InlayHintOptionsSnapshot(true, true, false, false, false, false, true),
+            onRuntimeRestartRequested,
+            onActiveVariantChangedFromServer)
+    {
+    }
+
+    internal HlslLanguageClient(
+        string languageVersion,
+        string dxcRuntimeDirectory,
+        string activeVariant,
+        InlayHintOptionsSnapshot inlayHints,
+        Func<string, string, Task> onRuntimeRestartRequested,
+        Func<string, Task> onActiveVariantChangedFromServer)
     {
         this.languageVersion = languageVersion;
         this.dxcRuntimeDirectory = dxcRuntimeDirectory ?? string.Empty;
         this.activeVariant = activeVariant ?? string.Empty;
+        this.inlayHints = inlayHints ?? throw new ArgumentNullException(nameof(inlayHints));
         customMessageTarget = new HlslCustomMessageTarget(
             onRuntimeRestartRequested,
             async variant =>
@@ -62,6 +81,7 @@ internal sealed class HlslLanguageClient :
         get
         {
             var variant = Volatile.Read(ref activeVariant);
+            var hints = Volatile.Read(ref inlayHints);
             return new
             {
                 hlsl = new
@@ -69,6 +89,7 @@ internal sealed class HlslLanguageClient :
                     languageVersion = Volatile.Read(ref languageVersion),
                     dxcRuntimeDirectory = Volatile.Read(ref dxcRuntimeDirectory),
                     activeVariant = string.IsNullOrEmpty(variant) ? null : variant,
+                    inlayHints = HintSettings(hints),
                 },
             };
         }
@@ -112,6 +133,40 @@ internal sealed class HlslLanguageClient :
                     },
                 });
     }
+
+    internal Task UpdateInlayHintsAsync(InlayHintOptionsSnapshot value)
+    {
+        Volatile.Write(
+            ref inlayHints,
+            value ?? throw new ArgumentNullException(nameof(value)));
+        var currentRpc = Volatile.Read(ref rpc);
+        return currentRpc == null
+            ? Task.CompletedTask
+            : currentRpc.NotifyAsync(
+                "workspace/didChangeConfiguration",
+                new
+                {
+                    settings = new
+                    {
+                        hlsl = new
+                        {
+                            inlayHints = HintSettings(value),
+                        },
+                    },
+                });
+    }
+
+    private static object HintSettings(InlayHintOptionsSnapshot value)
+        => new
+        {
+            types = value.Types,
+            parameters = value.Parameters,
+            matrixOrientation = value.MatrixOrientation,
+            registers = value.Registers,
+            packedOffsets = value.PackedOffsets,
+            arrayStrides = value.ArrayStrides,
+            activeVariant = value.ActiveVariant,
+        };
 
     // The active variant is remembered so it is reapplied through
     // InitializationOptions after a runtime restart. Changing it only notifies the

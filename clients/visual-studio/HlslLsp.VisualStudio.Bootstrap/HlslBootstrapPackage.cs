@@ -74,7 +74,15 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         return new HlslOptionsSnapshot(
             page.FileExtensions,
             page.LanguageVersion,
-            page.DxcRuntimeDirectory);
+            page.DxcRuntimeDirectory,
+            new InlayHintOptionsSnapshot(
+                page.InlayHintTypes,
+                page.InlayHintParameters,
+                page.InlayHintMatrixOrientation,
+                page.InlayHintRegisters,
+                page.InlayHintPackedOffsets,
+                page.InlayHintArrayStrides,
+                page.InlayHintActiveVariant));
     }
 
     protected override async Task InitializeAsync(
@@ -790,11 +798,13 @@ public sealed class HlslOptionsSnapshot
     public HlslOptionsSnapshot(
         string fileExtensions,
         string languageVersion,
-        string dxcRuntimeDirectory)
+        string dxcRuntimeDirectory,
+        InlayHintOptionsSnapshot inlayHints)
     {
         FileExtensions = fileExtensions;
         LanguageVersion = languageVersion;
         DxcRuntimeDirectory = dxcRuntimeDirectory;
+        InlayHints = inlayHints;
     }
 
     public string FileExtensions { get; }
@@ -802,6 +812,37 @@ public sealed class HlslOptionsSnapshot
     public string LanguageVersion { get; }
 
     public string DxcRuntimeDirectory { get; }
+
+    public InlayHintOptionsSnapshot InlayHints { get; }
+}
+
+public sealed class InlayHintOptionsSnapshot
+{
+    public InlayHintOptionsSnapshot(
+        bool types,
+        bool parameters,
+        bool matrixOrientation,
+        bool registers,
+        bool packedOffsets,
+        bool arrayStrides,
+        bool activeVariant)
+    {
+        Types = types;
+        Parameters = parameters;
+        MatrixOrientation = matrixOrientation;
+        Registers = registers;
+        PackedOffsets = packedOffsets;
+        ArrayStrides = arrayStrides;
+        ActiveVariant = activeVariant;
+    }
+
+    public bool Types { get; }
+    public bool Parameters { get; }
+    public bool MatrixOrientation { get; }
+    public bool Registers { get; }
+    public bool PackedOffsets { get; }
+    public bool ArrayStrides { get; }
+    public bool ActiveVariant { get; }
 }
 
 [TypeDescriptionProvider(typeof(HlslOptionsTypeDescriptionProvider))]
@@ -810,6 +851,13 @@ public sealed class HlslOptionsPage : DialogPage
     private string fileExtensions = ".hlsl;.hlsli;.usf";
     private string languageVersion = "2021";
     private string dxcRuntimeDirectory = "";
+    private bool inlayHintTypes = true;
+    private bool inlayHintParameters = true;
+    private bool inlayHintMatrixOrientation;
+    private bool inlayHintRegisters;
+    private bool inlayHintPackedOffsets;
+    private bool inlayHintArrayStrides;
+    private bool inlayHintActiveVariant = true;
 
     [Category("Files")]
     [System.ComponentModel.DisplayName("HLSL file extensions")]
@@ -868,6 +916,79 @@ public sealed class HlslOptionsPage : DialogPage
             dxcRuntimeDirectory = value;
             HlslBootstrapPackage.NotifyOptionsChanged();
         }
+    }
+
+    [Category("Inlay hints")]
+    [System.ComponentModel.DisplayName("Inferred types")]
+    [Description("Show compiler-inferred type hints.")]
+    public bool InlayHintTypes
+    {
+        get => inlayHintTypes;
+        set => SetOption(ref inlayHintTypes, value);
+    }
+
+    [Category("Inlay hints")]
+    [System.ComponentModel.DisplayName("Parameter names")]
+    [Description("Show unambiguous overload parameter-name hints at call sites.")]
+    public bool InlayHintParameters
+    {
+        get => inlayHintParameters;
+        set => SetOption(ref inlayHintParameters, value);
+    }
+
+    [Category("Inlay hints")]
+    [System.ComponentModel.DisplayName("Matrix orientation")]
+    [Description("Show compiler-derived row-major or column-major matrix orientation hints.")]
+    public bool InlayHintMatrixOrientation
+    {
+        get => inlayHintMatrixOrientation;
+        set => SetOption(ref inlayHintMatrixOrientation, value);
+    }
+
+    [Category("Inlay hints")]
+    [System.ComponentModel.DisplayName("Resource registers")]
+    [Description("Show reflected resource register and space hints.")]
+    public bool InlayHintRegisters
+    {
+        get => inlayHintRegisters;
+        set => SetOption(ref inlayHintRegisters, value);
+    }
+
+    [Category("Inlay hints")]
+    [System.ComponentModel.DisplayName("Packed offsets")]
+    [Description("Show compiler-derived constant-buffer packed-offset hints.")]
+    public bool InlayHintPackedOffsets
+    {
+        get => inlayHintPackedOffsets;
+        set => SetOption(ref inlayHintPackedOffsets, value);
+    }
+
+    [Category("Inlay hints")]
+    [System.ComponentModel.DisplayName("Array strides")]
+    [Description("Show compiler-derived array-stride hints.")]
+    public bool InlayHintArrayStrides
+    {
+        get => inlayHintArrayStrides;
+        set => SetOption(ref inlayHintArrayStrides, value);
+    }
+
+    [Category("Inlay hints")]
+    [System.ComponentModel.DisplayName("Active variant")]
+    [Description("Show the selected compilation variant where it affects the current shader.")]
+    public bool InlayHintActiveVariant
+    {
+        get => inlayHintActiveVariant;
+        set => SetOption(ref inlayHintActiveVariant, value);
+    }
+
+    private static void SetOption(ref bool field, bool value)
+    {
+        if (field == value)
+        {
+            return;
+        }
+        field = value;
+        HlslBootstrapPackage.NotifyOptionsChanged();
     }
 
     internal sealed class HlslOptionsTypeDescriptionProvider : TypeDescriptionProvider
@@ -942,6 +1063,20 @@ public sealed class HlslOptionsPage : DialogPage
                         return "hlslLsp.general.languageVersion";
                     case nameof(HlslOptionsPage.DxcRuntimeDirectory):
                         return "hlslLsp.general.dxcRuntimeDirectory";
+                    case nameof(HlslOptionsPage.InlayHintTypes):
+                        return "hlslLsp.general.inlayHintTypes";
+                    case nameof(HlslOptionsPage.InlayHintParameters):
+                        return "hlslLsp.general.inlayHintParameters";
+                    case nameof(HlslOptionsPage.InlayHintMatrixOrientation):
+                        return "hlslLsp.general.inlayHintMatrixOrientation";
+                    case nameof(HlslOptionsPage.InlayHintRegisters):
+                        return "hlslLsp.general.inlayHintRegisters";
+                    case nameof(HlslOptionsPage.InlayHintPackedOffsets):
+                        return "hlslLsp.general.inlayHintPackedOffsets";
+                    case nameof(HlslOptionsPage.InlayHintArrayStrides):
+                        return "hlslLsp.general.inlayHintArrayStrides";
+                    case nameof(HlslOptionsPage.InlayHintActiveVariant):
+                        return "hlslLsp.general.inlayHintActiveVariant";
                     default:
                         return null;
                 }

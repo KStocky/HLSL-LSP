@@ -125,6 +125,11 @@ class Manager final {
     signatures(std::string root_identity, std::int64_t version, std::string path,
                std::uint32_t line, std::uint32_t column,
                const json_rpc::CancellationToken& cancellation);
+    [[nodiscard]] std::vector<dxc::InlayHint>
+    inlay_hints(std::string root_identity, std::int64_t version, std::string path,
+                std::uint32_t start_offset, std::uint32_t end_offset,
+                std::vector<dxc::InlayCall> calls, dxc::InlayHintOptions options,
+                const json_rpc::CancellationToken& cancellation);
     [[nodiscard]] std::vector<dxc::Token> tokens(std::string root_identity, std::int64_t version,
                                                  std::string path,
                                                  const json_rpc::CancellationToken& cancellation);

@@ -32,12 +32,26 @@ struct ServerOptions {
     std::shared_ptr<analysis::AnalysisHooks> analysis_hooks;
 };
 
+struct InlayHintSettings {
+    bool types{true};
+    bool parameters{true};
+    bool matrix_orientation{};
+    bool registers{};
+    bool packed_offsets{};
+    bool array_strides{};
+    bool active_variant{true};
+
+    bool operator==(const InlayHintSettings&) const = default;
+};
+
 class Server final {
   public:
     using NotificationSender = std::function<void(const json_rpc::Notification&)>;
+    using RequestSender = std::function<void(const json_rpc::Request&)>;
     using Logger = std::function<void(std::string_view)>;
 
-    explicit Server(NotificationSender sender, Logger logger = {}, ServerOptions options = {});
+    explicit Server(NotificationSender sender, Logger logger = {}, ServerOptions options = {},
+                    RequestSender request_sender = {});
     ~Server();
 
     [[nodiscard]] std::optional<json_rpc::DispatchResponse>
@@ -96,6 +110,8 @@ class Server final {
                                                        const json_rpc::RequestContext& context);
     [[nodiscard]] json_rpc::Json signature_help(const std::optional<json_rpc::Json>& params,
                                                 const json_rpc::RequestContext& context);
+    [[nodiscard]] json_rpc::Json inlay_hints(const std::optional<json_rpc::Json>& params,
+                                             const json_rpc::RequestContext& context);
     [[nodiscard]] json_rpc::Json document_symbols(const std::optional<json_rpc::Json>& params,
                                                   const json_rpc::RequestContext& context);
     [[nodiscard]] json_rpc::Json workspace_symbols(const std::optional<json_rpc::Json>& params,
@@ -131,6 +147,7 @@ class Server final {
     // deduplicated window/showMessage; a variant change reanalyzes rather than
     // restarts, so this never triggers a restart on its own.
     void reevaluate_variant_selection();
+    void request_inlay_hint_refresh();
     [[nodiscard]] std::string loaded_runtime_directory() const;
     void analysis_completed(const workspace::SourceSnapshot& snapshot,
                             const std::vector<dxc::Diagnostic>& diagnostics,
@@ -222,7 +239,12 @@ class Server final {
     // open document for which it is defined and applicable. Empty selects the
     // file-derived configuration with no variant.
     std::optional<std::string> active_variant_;
+    InlayHintSettings inlay_hint_settings_;
+    std::uint64_t inlay_hint_generation_{};
+    std::atomic<std::int64_t> next_outbound_request_id_{1};
+    bool client_inlay_hint_refresh_{};
     NotificationSender sender_;
+    RequestSender request_sender_;
     Logger logger_;
     ServerOptions options_;
     analysis::Manager analysis_;
