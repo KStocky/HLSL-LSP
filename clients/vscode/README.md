@@ -105,16 +105,26 @@ reference for the schema and behavior.
 
 Run **HLSL: Show Shader Compilation** to open a combined view of the active
 HLSL document's effective compiler configuration, compiler success/failure
-and diagnostics, output type and size, DXC reflection (signatures, resource
-bindings, and thread-group size), and include directories/resolved include
-paths. The request always analyzes the document's current unsaved content and
-active variant; there is no separate parameter to select either. If the view
-is already open, it refreshes automatically when the active variant changes,
+and diagnostics, output type and size, the compiler's own disassembly of the
+compiled output, DXC reflection (signatures, resource bindings, and
+thread-group size), and include directories/resolved include paths. The
+request always analyzes the document's current unsaved content and active
+variant; there is no separate parameter to select either. If the view is
+already open, it refreshes automatically when the active variant changes,
 when the document is saved, and (debounced) shortly after further edits, so
 it cannot fall behind or cause a request per keystroke. See
 [`../../docs/compilation-info.md`](../../docs/compilation-info.md) for the
 full protocol, including DXIL vs SPIR-V reflection availability and compiler
 failure reporting.
+
+When disassembly is available, the view shows it in a bounded, scrollable
+listing and reports when the compiler's own output was truncated for
+display (the server retains at most 4 MiB of text; see
+[`../../docs/compilation-info.md`](../../docs/compilation-info.md) for the
+exact limit and truncation semantics). **Copy Disassembly** and **Save
+Disassembly…** links act on exactly the retained text from the most recently
+rendered result for that panel, never on anything supplied by the link
+itself; Save suggests a `.ll` file name for DXIL and `.spvasm` for SPIR-V.
 
 ## Resource bindings
 

@@ -1075,6 +1075,14 @@ TEST_CASE("Compilation info reflects effective configuration and DXIL resource r
     REQUIRE(info.output.has_value());
     CHECK(info.output->type == "dxil");
     CHECK(info.output->size > 0);
+    REQUIRE(info.disassembly.has_value());
+    CHECK(info.disassembly->available);
+    CHECK(info.disassembly->format == "dxil");
+    CHECK_FALSE(info.disassembly->text.empty());
+    CHECK(info.disassembly->text.find("define") != std::string::npos);
+    CHECK_FALSE(info.disassembly->truncated);
+    CHECK(info.disassembly->displayed_size == info.disassembly->text.size());
+    CHECK(info.disassembly->original_size == info.disassembly->displayed_size);
     REQUIRE(info.reflection.has_value());
     CHECK(info.reflection->available);
 
@@ -1189,6 +1197,7 @@ TEST_CASE("Compilation info reports structured diagnostics on failure without fa
         return diagnostic.location.line > 0 && diagnostic.location.column > 0;
     }));
     CHECK_FALSE(info.output.has_value());
+    CHECK_FALSE(info.disassembly.has_value());
     CHECK_FALSE(info.reflection.has_value());
 }
 
@@ -1209,6 +1218,12 @@ TEST_CASE("Compilation info reports SPIR-V output as successful without fabricat
     REQUIRE(info.output.has_value());
     CHECK(info.output->type == "spirv");
     CHECK(info.output->size > 0);
+    REQUIRE(info.disassembly.has_value());
+    CHECK_FALSE(info.disassembly->available);
+    CHECK(info.disassembly->format == "spirv");
+    CHECK(info.disassembly->text.empty());
+    CHECK_FALSE(info.disassembly->unavailable_reason.empty());
+    CHECK_FALSE(info.disassembly->truncated);
     REQUIRE(info.reflection.has_value());
     CHECK_FALSE(info.reflection->available);
     CHECK_FALSE(info.reflection->unavailable_reason.empty());

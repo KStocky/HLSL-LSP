@@ -790,6 +790,17 @@ compilation_info_json(const dxc::CompilationInfo& info,
     } else {
         result["output"] = nullptr;
     }
+    if (info.disassembly.has_value()) {
+        result["disassembly"] = Json{{"available", info.disassembly->available},
+                                     {"text", info.disassembly->text},
+                                     {"unavailableReason", info.disassembly->unavailable_reason},
+                                     {"truncated", info.disassembly->truncated},
+                                     {"originalSize", info.disassembly->original_size},
+                                     {"displayedSize", info.disassembly->displayed_size},
+                                     {"format", info.disassembly->format}};
+    } else {
+        result["disassembly"] = nullptr;
+    }
     if (info.reflection.has_value()) {
         result["reflection"] =
             compilation_reflection_json(*info.reflection, resource_location_texts);

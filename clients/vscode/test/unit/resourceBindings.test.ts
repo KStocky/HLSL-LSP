@@ -41,6 +41,7 @@ function baseInfo(overrides: Partial<CompilationInfo> = {}): CompilationInfo {
     success: true,
     diagnostics: [],
     output: { type: "dxil", size: 1024 },
+    disassembly: null,
     reflection: baseReflection(),
     rootSignature: {
       availability: "absent",

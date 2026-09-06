@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -35,6 +36,13 @@ public sealed class CompilationInfoModel
         Array.Empty<CompilationDiagnosticModel>();
 
     public CompilationOutputModel Output { get; set; }
+
+    // Present exactly when Output is present (both reflect "a compiled
+    // object exists to describe"): null only when compilation produced no
+    // output at all (for example, a failed compilation). See
+    // CompilationDisassemblyModel for the available/unavailable/truncated
+    // shape.
+    public CompilationDisassemblyModel Disassembly { get; set; }
 
     public CompilationReflectionModel Reflection { get; set; }
 
@@ -78,6 +86,29 @@ public sealed class CompilationOutputModel
     public string Type { get; set; }
 
     public long Size { get; set; }
+}
+
+// Text emitted by DXC's own disassembler for the compiled object (see
+// docs/compilation-info.md). The server bounds retained text to 4 MiB, so
+// Text may be shorter than OriginalSize reports; Truncated says so
+// explicitly rather than leaving a client to compare the two sizes itself.
+// Never decoded, reconstructed, or annotated beyond that by this client.
+public sealed class CompilationDisassemblyModel
+{
+    public bool Available { get; set; }
+
+    public string Text { get; set; }
+
+    public string UnavailableReason { get; set; }
+
+    public bool Truncated { get; set; }
+
+    public long OriginalSize { get; set; }
+
+    public long DisplayedSize { get; set; }
+
+    // "dxil" or "spirv", matching CompilationOutputModel.Type.
+    public string Format { get; set; }
 }
 
 public sealed class CompilationSignatureParameterModel
@@ -409,6 +440,51 @@ public sealed class CompilationCompatibilityModel
 
     public IReadOnlyList<ResourceCompatibilityIssueModel> Issues { get; set; } =
         Array.Empty<ResourceCompatibilityIssueModel>();
+}
+
+// Pure, unit-testable logic for the Save Disassembly dialog's suggested
+// file name: keeps the source document's own base name and swaps in the
+// extension conventional for the compiler's output format, so DXIL and
+// SPIR-V disassembly are never saved with the wrong tooling association
+// (and a document with no recognizable name still gets a sensible default).
+public static class DisassemblyFileNaming
+{
+    public const string DxilExtension = ".ll";
+    public const string SpirvExtension = ".spvasm";
+
+    public static string SuggestedFileName(string documentPath, string format)
+    {
+        string baseName = null;
+        if (!string.IsNullOrEmpty(documentPath))
+        {
+            try
+            {
+                baseName = System.IO.Path.GetFileNameWithoutExtension(documentPath);
+            }
+            catch (ArgumentException)
+            {
+                // documentPath contains characters that are invalid for a
+                // file name (for example, an untitled buffer's scheme-only
+                // "uri"); fall through to the generic default below.
+            }
+        }
+        if (string.IsNullOrEmpty(baseName))
+        {
+            baseName = "shader";
+        }
+        var extension = string.Equals(format, "spirv", StringComparison.OrdinalIgnoreCase)
+            ? SpirvExtension
+            : DxilExtension;
+        return baseName + extension;
+    }
+}
+
+internal static class DisassemblyFileContent
+{
+    private static readonly Encoding Utf8WithoutBom = new UTF8Encoding(false);
+
+    internal static byte[] Encode(string text)
+        => Utf8WithoutBom.GetBytes(text ?? string.Empty);
 }
 
 // The bridge decouples the WPF tool window (Bootstrap assembly) from the

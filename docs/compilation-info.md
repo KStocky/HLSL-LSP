@@ -46,6 +46,15 @@ shape:
   "success": true,
   "diagnostics": [],
   "output": { "type": "dxil", "size": 2048 },
+  "disassembly": {
+    "available": true,
+    "text": "; DXIL disassembly...",
+    "unavailableReason": "",
+    "truncated": false,
+    "originalSize": 16384,
+    "displayedSize": 16384,
+    "format": "dxil"
+  },
   "reflection": {
     "available": true,
     "unavailableReason": "",
@@ -96,6 +105,27 @@ contains one entry per compiler error or warning (`severity`, `message`,
 because no compiled output exists to describe or reflect. Editors should
 treat a `null` `output`/`reflection` as "no output was produced", distinct
 from a successful compile whose reflection is merely unavailable (see below).
+`disassembly` is also `null` when no output was produced.
+
+### Compiler-generated disassembly
+
+For successful compilations, `disassembly` reports text produced by DXC's
+`IDxcCompiler3::Disassemble` API. HLSL-LSP does not decode, reconstruct, or
+annotate compiler IR itself. The pinned DXC runtime produces this text for
+DXIL; its disassembler rejects SPIR-V binaries, which is reported explicitly
+rather than replaced with non-compiler output.
+
+`available` is `false` when the selected DXC runtime cannot disassemble the
+compiled object, with `unavailableReason` explaining why. Otherwise `text`
+contains the compiler output and `format` matches `output.type`. To keep LSP
+messages and editor rendering bounded, the server retains at most 4 MiB of
+UTF-8 text. `originalSize` is the compiler's byte count, `displayedSize` is
+the retained byte count, and `truncated` explicitly reports when they differ.
+
+Both editor views display the retained text and provide copy and save actions.
+DXIL defaults to an `.ll` filename and SPIR-V to `.spvasm`. Source navigation
+is intentionally unavailable unless DXC supplies reliable debug/source
+mappings; the clients never infer mappings by parsing disassembly text.
 
 ### DXIL vs SPIR-V reflection availability
 

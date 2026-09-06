@@ -348,6 +348,19 @@ struct CompilationOutput {
     std::string type; // "dxil", "spirv", or "none" when no output was produced
 };
 
+// Text emitted by DXC's own disassembler for the compiled object. The server
+// bounds retained text so editor rendering and protocol serialization remain
+// predictable even for unusually large shaders.
+struct CompilationDisassembly {
+    bool available{};
+    std::string text;
+    std::string unavailable_reason;
+    bool truncated{};
+    std::size_t original_size{};
+    std::size_t displayed_size{};
+    std::string format; // "dxil" or "spirv"
+};
+
 // Whether an embedded root signature is present in the compiled DXIL
 // container (DXC_PART_ROOT_SIGNATURE, DXIL container FourCC 'RTS0'), and if
 // so, whether this platform can deserialize its details. Presence/absence
@@ -517,6 +530,7 @@ struct CompilationInfo {
     bool success{};
     std::vector<Diagnostic> diagnostics;
     std::optional<CompilationOutput> output;
+    std::optional<CompilationDisassembly> disassembly;
     std::optional<CompilationReflection> reflection;
     // Populated whenever compilation succeeds and produces non-empty
     // compiler output, for both DXIL and SPIR-V (absent only when

@@ -11,6 +11,22 @@ export interface CompilationOutput {
   readonly size: number;
 }
 
+// Text emitted by DXC's own disassembler for the compiled object (see
+// docs/compilation-info.md). The server bounds retained text to 4 MiB, so
+// `text` may be shorter than `originalSize` reports; `truncated` says so
+// explicitly rather than leaving a client to compare the two sizes itself.
+// This client never decodes, reconstructs, or annotates the text beyond
+// HTML-escaping it for display: it is rendered and exported verbatim.
+export interface CompilationDisassembly {
+  readonly available: boolean;
+  readonly text: string;
+  readonly unavailableReason: string;
+  readonly truncated: boolean;
+  readonly originalSize: number;
+  readonly displayedSize: number;
+  readonly format: string; // "dxil" or "spirv", matching CompilationOutput.type
+}
+
 export interface CompilationSignatureParameter {
   readonly semanticName: string;
   readonly semanticIndex: number;
@@ -302,6 +318,11 @@ export interface CompilationInfo {
   readonly success: boolean;
   readonly diagnostics: readonly CompilationDiagnostic[];
   readonly output: CompilationOutput | null;
+  // Non-null exactly when `output` is non-null (both reflect "a compiled
+  // object exists to describe"): `null` only when compilation produced no
+  // output at all (for example, a failed compilation). See
+  // CompilationDisassembly for the available/unavailable/truncated shape.
+  readonly disassembly: CompilationDisassembly | null;
   readonly reflection: CompilationReflection | null;
   // Populated whenever `output` exists, for both DXIL and SPIR-V output;
   // SPIR-V is represented as availability "notApplicable" rather than by
@@ -320,6 +341,36 @@ export interface CompilationInfo {
   // only when compilation produced no output at all (for example, a
   // failed compilation).
   readonly compatibility: CompilationCompatibility | null;
+}
+
+// The two commands the Shader Compilation webview may invoke through plain
+// `command:` URIs. Webview panels pass
+// `enableCommandUris: [copyDisassemblyCommand, saveDisassemblyCommand]`
+// (never `true`) so no other command can ever be triggered from this
+// view's static HTML, and `enableScripts` stays `false` throughout. Neither
+// link carries any URI argument: both commands read the disassembly text
+// to copy/save from the extension's own last-rendered CompilationInfo for
+// this panel, never from anything a `command:` URI could supply, so a
+// malicious or stale link can at most no-op rather than exfiltrate or
+// forge disassembly content.
+export const copyDisassemblyCommand = "hlsl.compilationInfo.copyDisassembly";
+export const saveDisassemblyCommand = "hlsl.compilationInfo.saveDisassembly";
+
+// The conventional file extension for saving a disassembly listing, chosen
+// from the compiled output's own format rather than guessed from the
+// document. `documentPath` is a `vscode.Uri.path` (posix-style, may include
+// no extension); kept as a plain string parameter (not a vscode.Uri) so
+// this stays a pure, unit-testable function.
+export function disassemblyFileName(
+  documentPath: string,
+  format: string,
+): string {
+  const segments = documentPath.split("/");
+  const last = segments[segments.length - 1] ?? "";
+  const dot = last.lastIndexOf(".");
+  const base = (dot > 0 ? last.slice(0, dot) : last) || "shader";
+  const extension = format === "spirv" ? "spvasm" : "ll";
+  return `${base}.${extension}`;
 }
 
 export function escapeHtml(value: string): string {
@@ -412,6 +463,48 @@ ${body}
 </section>`;
 }
 
+// Renders the compiler-generated disassembly text produced by DXC's own
+// disassembler (see docs/compilation-info.md). Never reconstructed,
+// decoded, or annotated by this client; `text` is HTML-escaped and shown
+// verbatim in a bounded, scrollable <pre> so an unusually large listing
+// cannot blow out the rest of the panel. Copy/Save links are rendered only
+// when disassembly text actually exists to act on, and never carry the
+// disassembly text itself as a `command:` URI argument -- both commands
+// source the text from the extension's own last-rendered result instead
+// (see copyDisassemblyCommand/saveDisassemblyCommand).
+function disassemblySection(info: CompilationInfo): string {
+  const disassembly = info.disassembly;
+  if (disassembly === null) {
+    return `<section>
+<h2>Disassembly</h2>
+<p class="muted">Disassembly is not available because no compiled output was produced.</p>
+</section>`;
+  }
+  if (!disassembly.available) {
+    return `<section>
+<h2>Disassembly</h2>
+<p class="unavailable">Disassembly is unavailable: ${escapeHtml(disassembly.unavailableReason || "unknown reason")}</p>
+</section>`;
+  }
+  const sizeText = disassembly.truncated
+    ? `${String(disassembly.displayedSize)} of ${String(disassembly.originalSize)} bytes (truncated for display)`
+    : `${String(disassembly.displayedSize)} bytes`;
+  const truncatedNotice = disassembly.truncated
+    ? `<p class="unavailable">The compiler's disassembly output was truncated; Copy and Save operate on the same retained text shown below, not the compiler's full output.</p>`
+    : "";
+  const actions =
+    disassembly.text === ""
+      ? ""
+      : `<p class="actions"><a href="command:${copyDisassemblyCommand}">Copy Disassembly</a> · <a href="command:${saveDisassemblyCommand}">Save Disassembly…</a></p>`;
+  return `<section>
+<h2>Disassembly</h2>
+<table><tr><th>Format</th><td>${escapeHtml(disassembly.format)}</td></tr><tr><th>Size</th><td>${sizeText}</td></tr></table>
+${truncatedNotice}
+${actions}
+<pre class="disassembly">${escapeHtml(disassembly.text)}</pre>
+</section>`;
+}
+
 function signatureTable(
   title: string,
   parameters: readonly CompilationSignatureParameter[],
@@ -501,6 +594,8 @@ export function compilationInfoHtml(info: CompilationInfo): string {
   .unavailable { border-left: 3px solid var(--vscode-editorWarning-foreground); padding-left: .75rem; }
   code { font-family: var(--vscode-editor-font-family); }
   ul { margin: 0; padding-left: 1.25rem; }
+  p.actions { margin: .25rem 0 .5rem; }
+  pre.disassembly { max-height: 24rem; overflow: auto; margin: 0 0 .5rem; padding: .75rem; border-radius: 4px; background: var(--vscode-textCodeBlock-background, rgba(127,127,127,.14)); font-family: var(--vscode-editor-font-family); font-size: var(--vscode-editor-font-size, 13px); white-space: pre; }
 </style>
 </head>
 <body>
@@ -508,6 +603,7 @@ export function compilationInfoHtml(info: CompilationInfo): string {
 ${configurationSection(info)}
 ${diagnosticsSection(info)}
 ${outputSection(info)}
+${disassemblySection(info)}
 ${reflectionSection(info)}
 </body>
 </html>`;
@@ -543,6 +639,14 @@ export interface CompilationInfoRefreshOutcome {
   readonly html: string | undefined;
   readonly hasContent: boolean;
   readonly title: string | undefined;
+  // The CompilationInfo just rendered, or undefined when this attempt
+  // failed/was cancelled and nothing new was rendered (mirrors `html`'s
+  // "leave alone" contract). Callers should retain whatever they already
+  // had in that case, so a panel's Copy/Save Disassembly actions always
+  // read from the most recently *rendered* result for that panel/document,
+  // never from a stale value overwritten by a slower, superseded request,
+  // and never from anything supplied by the webview itself.
+  readonly info: CompilationInfo | undefined;
 }
 
 // Pure decision logic for how a Shader Compilation panel should react to one
@@ -558,7 +662,12 @@ export function resolveCompilationInfoRefresh(
 ): CompilationInfoRefreshOutcome {
   if (info === null || info === undefined) {
     if (hasContent) {
-      return { html: undefined, hasContent: true, title: undefined };
+      return {
+        html: undefined,
+        hasContent: true,
+        title: undefined,
+        info: undefined,
+      };
     }
     return {
       html: compilationInfoErrorHtml(
@@ -567,11 +676,13 @@ export function resolveCompilationInfoRefresh(
       ),
       hasContent: false,
       title: undefined,
+      info: undefined,
     };
   }
   return {
     html: compilationInfoHtml(info),
     hasContent: true,
     title: `Shader Compilation: ${info.entryPoint || "(default entry point)"}`,
+    info,
   };
 }

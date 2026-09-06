@@ -11,7 +11,10 @@ import {
 
 import {
   CompilationInfo,
+  copyDisassemblyCommand,
+  disassemblyFileName,
   resolveCompilationInfoRefresh,
+  saveDisassemblyCommand,
 } from "./compilationInfo";
 import {
   openResourceLocationCommand,
@@ -124,6 +127,13 @@ interface CompilationInfoViewState {
   // decides whether a failure keeps the last content or shows an explicit
   // error instead.
   hasContent: boolean;
+  // The CompilationInfo most recently rendered into this panel, or
+  // undefined before the first successful render (or after switching to a
+  // different document, until its own first successful render). Copy/Save
+  // Disassembly read the disassembly text from here rather than from
+  // anything a `command:` URI could supply, so a stale or crafted link can
+  // never exfiltrate or forge disassembly content for another document.
+  lastInfo: CompilationInfo | undefined;
 }
 
 let compilationInfoState: CompilationInfoViewState | undefined;
@@ -199,6 +209,9 @@ async function refreshCompilationInfo(
     failureMessage,
   );
   compilationInfoState.hasContent = outcome.hasContent;
+  if (outcome.info !== undefined) {
+    compilationInfoState.lastInfo = outcome.info;
+  }
   if (outcome.title !== undefined) {
     compilationInfoState.panel.title = outcome.title;
   }
@@ -913,6 +926,7 @@ export async function activate(
           // last successful content until the new result (or an explicit
           // error, on failure) is ready.
           compilationInfoState.hasContent = false;
+          compilationInfoState.lastInfo = undefined;
           compilationInfoState.panel.webview.html =
             compilationInfoLoadingHtml();
         }
@@ -922,7 +936,15 @@ export async function activate(
           "hlslCompilationInfo",
           "Shader Compilation",
           vscode.ViewColumn.Beside,
-          { enableScripts: false },
+          {
+            enableScripts: false,
+            // No script execution is used for Copy/Save: the panel's
+            // action links go through plain `command:` URIs, and this
+            // allowlists only the two commands they may invoke -- never
+            // `true` (which would let static HTML trigger arbitrary
+            // commands).
+            enableCommandUris: [copyDisassemblyCommand, saveDisassemblyCommand],
+          },
         );
         panel.webview.html = compilationInfoLoadingHtml();
         panel.onDidDispose(() => {
@@ -930,9 +952,74 @@ export async function activate(
             compilationInfoState = undefined;
           }
         });
-        compilationInfoState = { panel, uri, hasContent: false };
+        compilationInfoState = {
+          panel,
+          uri,
+          hasContent: false,
+          lastInfo: undefined,
+        };
       }
       await refreshCompilationInfo(lifecycle, uri);
+    }),
+    vscode.commands.registerCommand(copyDisassemblyCommand, async () => {
+      const disassembly = compilationInfoState?.lastInfo?.disassembly;
+      if (
+        disassembly === null ||
+        disassembly === undefined ||
+        !disassembly.available ||
+        disassembly.text === ""
+      ) {
+        await vscode.window.showInformationMessage(
+          "No disassembly is available to copy for the current shader compilation.",
+        );
+        return;
+      }
+      await vscode.env.clipboard.writeText(disassembly.text);
+      await vscode.window.showInformationMessage(
+        "Disassembly copied to the clipboard.",
+      );
+    }),
+    vscode.commands.registerCommand(saveDisassemblyCommand, async () => {
+      const state = compilationInfoState;
+      const disassembly = state?.lastInfo?.disassembly;
+      if (
+        state === undefined ||
+        disassembly === null ||
+        disassembly === undefined ||
+        !disassembly.available ||
+        disassembly.text === ""
+      ) {
+        await vscode.window.showInformationMessage(
+          "No disassembly is available to save for the current shader compilation.",
+        );
+        return;
+      }
+      const suggestedName = disassemblyFileName(
+        state.uri.path,
+        disassembly.format,
+      );
+      const defaultUri = vscode.Uri.joinPath(state.uri, "..", suggestedName);
+      const filters =
+        disassembly.format === "spirv"
+          ? { "SPIR-V Assembly": ["spvasm"] }
+          : { "DXIL Disassembly": ["ll"] };
+      const target = await vscode.window.showSaveDialog({
+        defaultUri,
+        filters,
+      });
+      if (target === undefined) {
+        return;
+      }
+      try {
+        await vscode.workspace.fs.writeFile(
+          target,
+          Buffer.from(disassembly.text, "utf8"),
+        );
+      } catch (error) {
+        await vscode.window.showErrorMessage(
+          `Unable to save disassembly: ${errorMessage(error)}`,
+        );
+      }
     }),
     vscode.commands.registerCommand("hlsl.showResourceBindings", async () => {
       const editor = vscode.window.activeTextEditor;

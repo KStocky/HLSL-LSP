@@ -544,6 +544,24 @@ export async function run(): Promise<void> {
       "DXIL output should report available reflection",
     );
     assert(
+      initialInfo.disassembly?.available === true,
+      "DXIL output should report available disassembly",
+    );
+    assert.strictEqual(initialInfo.disassembly.format, "dxil");
+    assert(
+      initialInfo.disassembly.text.length > 0,
+      "Available disassembly should carry non-empty text",
+    );
+    assert(
+      !initialInfo.disassembly.truncated,
+      "This small fixture shader should not need disassembly truncation",
+    );
+    assert.strictEqual(
+      initialInfo.disassembly.originalSize,
+      initialInfo.disassembly.displayedSize,
+      "An untruncated disassembly should report matching original/displayed sizes",
+    );
+    assert(
       Array.isArray(initialInfo.reflection.bindingAnalysis.groups),
       "reflection.bindingAnalysis.groups should be present for available reflection",
     );
@@ -623,6 +641,15 @@ export async function run(): Promise<void> {
     // Compilation.
     await vscode.commands.executeCommand("hlsl.showResourceBindings");
     await vscode.commands.executeCommand("hlsl.showCompilationInfo");
+
+    // Copy/Save Disassembly are not exercised end-to-end here: both touch
+    // OS-level surfaces (the system clipboard and a native save dialog)
+    // that are unreliable or blocking in a headless test harness. Their
+    // command-reads-from-panel-state behavior (never from a `command:` URI
+    // argument) and their HTML rendering are covered by the pure unit
+    // tests in test/unit/compilationInfo.test.ts instead; the assertions
+    // above already confirm the underlying disassembly data these commands
+    // would act on is present and well-formed for this document.
 
     // Selecting a variant must be reflected on the next request without
     // reopening the document or restarting the server.

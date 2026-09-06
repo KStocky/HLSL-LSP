@@ -1,10 +1,13 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 using Microsoft.VisualStudio.Shell;
+using Microsoft.VisualStudio.Shell.Interop;
+using Microsoft.Win32;
 
 namespace HlslLsp.VisualStudio.Bootstrap;
 
@@ -28,7 +31,7 @@ public sealed class CompilationInfoToolWindow : ToolWindowPane
     internal void SetInfo(Uri uri, CompilationInfoModel info)
     {
         DocumentUri = uri;
-        control.SetInfo(info);
+        control.SetInfo(uri, info);
     }
 
     // A failed or cancelled request must never regress this window to the
@@ -60,10 +63,10 @@ internal sealed class CompilationInfoControl : UserControl
             HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
             Content = content,
         };
-        SetInfo(null);
+        SetInfo(null, null);
     }
 
-    internal void SetInfo(CompilationInfoModel info)
+    internal void SetInfo(Uri documentUri, CompilationInfoModel info)
     {
         hasContent = info != null;
         content.Children.Clear();
@@ -86,6 +89,7 @@ internal sealed class CompilationInfoControl : UserControl
         {
             AddSection("Output", () => AddOutput(info.Output));
         }
+        AddSection("Disassembly", () => AddDisassembly(documentUri, info.Disassembly));
         AddSection("Reflection", () => AddReflection(info.Reflection));
     }
 
@@ -190,6 +194,160 @@ internal sealed class CompilationInfoControl : UserControl
     {
         AddKeyValue("Type", output.Type);
         AddKeyValue("Size", $"{output.Size} bytes");
+    }
+
+    // Renders the compiler-generated disassembly text produced by DXC's own
+    // disassembler (see docs/compilation-info.md). Never reconstructed,
+    // decoded, or annotated by this client; shown verbatim in a bounded,
+    // scrollable read-only text box so an unusually large listing cannot
+    // blow out the rest of the window. Copy/Save buttons are added only
+    // when disassembly text actually exists to act on, and always close
+    // over this exact rendered CompilationDisassemblyModel instance -- a
+    // later refresh replaces the whole content tree (and its buttons)
+    // rather than mutating it, so a button can never act on a stale or
+    // different document's text.
+    private void AddDisassembly(Uri documentUri, CompilationDisassemblyModel disassembly)
+    {
+        if (disassembly == null)
+        {
+            content.Children.Add(new TextBlock
+            {
+                Text = "Disassembly is unavailable because compilation did not " +
+                       "produce output.",
+                TextWrapping = TextWrapping.Wrap,
+                Opacity = 0.75,
+            });
+            return;
+        }
+        if (!disassembly.Available)
+        {
+            content.Children.Add(new TextBlock
+            {
+                Text = string.IsNullOrEmpty(disassembly.UnavailableReason)
+                    ? "Disassembly is unavailable for this output."
+                    : disassembly.UnavailableReason,
+                TextWrapping = TextWrapping.Wrap,
+                Foreground = Brushes.Goldenrod,
+            });
+            return;
+        }
+
+        AddKeyValue("Format", disassembly.Format);
+        AddKeyValue(
+            "Size",
+            disassembly.Truncated
+                ? $"{disassembly.DisplayedSize} of {disassembly.OriginalSize} bytes (truncated for display)"
+                : $"{disassembly.DisplayedSize} bytes");
+        if (disassembly.Truncated)
+        {
+            content.Children.Add(new TextBlock
+            {
+                Text = "The compiler's disassembly output was truncated; Copy " +
+                       "and Save operate on the same retained text shown " +
+                       "below, not the compiler's full output.",
+                TextWrapping = TextWrapping.Wrap,
+                Foreground = Brushes.Goldenrod,
+                Margin = new Thickness(0, 0, 0, 6),
+            });
+        }
+
+        if (!string.IsNullOrEmpty(disassembly.Text))
+        {
+            var buttons = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Margin = new Thickness(0, 0, 0, 6),
+            };
+            var copyButton = new Button
+            {
+                Content = "Copy Disassembly",
+                Padding = new Thickness(8, 2, 8, 2),
+                Margin = new Thickness(0, 0, 8, 0),
+            };
+            copyButton.Click += (_, _) => CopyDisassembly(disassembly.Text);
+            var saveButton = new Button
+            {
+                Content = "Save Disassembly\u2026",
+                Padding = new Thickness(8, 2, 8, 2),
+            };
+            saveButton.Click += (_, _) => SaveDisassembly(documentUri, disassembly);
+            buttons.Children.Add(copyButton);
+            buttons.Children.Add(saveButton);
+            content.Children.Add(buttons);
+        }
+
+        content.Children.Add(new TextBox
+        {
+            Text = disassembly.Text,
+            IsReadOnly = true,
+            IsReadOnlyCaretVisible = true,
+            TextWrapping = TextWrapping.NoWrap,
+            AcceptsReturn = true,
+            FontFamily = new FontFamily("Consolas"),
+            MaxHeight = 320,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
+            Margin = new Thickness(0, 0, 0, 4),
+        });
+    }
+
+    // Clipboard access can throw (for example, another process transiently
+    // holding the clipboard open), so failure is surfaced explicitly rather
+    // than silently discarded.
+    private static void CopyDisassembly(string text)
+    {
+        try
+        {
+            Clipboard.SetText(text);
+        }
+        catch (Exception ex) when (ex is COMException or ExternalException)
+        {
+            ShowDisassemblyError($"Unable to copy disassembly to the clipboard: {ex.Message}");
+        }
+    }
+
+    // documentUri may be null (or non-file) for an unsaved/virtual buffer;
+    // DisassemblyFileNaming.SuggestedFileName handles that by falling back
+    // to a generic name rather than throwing.
+    private static void SaveDisassembly(Uri documentUri, CompilationDisassemblyModel disassembly)
+    {
+        var suggestedName = DisassemblyFileNaming.SuggestedFileName(
+            documentUri?.IsFile == true ? documentUri.LocalPath : null,
+            disassembly.Format);
+        var isSpirv = string.Equals(disassembly.Format, "spirv", StringComparison.OrdinalIgnoreCase);
+        var dialog = new SaveFileDialog
+        {
+            FileName = suggestedName,
+            DefaultExt = isSpirv
+                ? DisassemblyFileNaming.SpirvExtension
+                : DisassemblyFileNaming.DxilExtension,
+            Filter = isSpirv
+                ? "SPIR-V Assembly (*.spvasm)|*.spvasm|All Files (*.*)|*.*"
+                : "DXIL Disassembly (*.ll)|*.ll|All Files (*.*)|*.*",
+        };
+        if (dialog.ShowDialog() != true)
+        {
+            return;
+        }
+        try
+        {
+            File.WriteAllBytes(dialog.FileName, DisassemblyFileContent.Encode(disassembly.Text));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            ShowDisassemblyError($"Unable to save disassembly: {ex.Message}");
+        }
+    }
+
+    private static void ShowDisassemblyError(string message)
+    {
+        VsShellUtilities.ShowMessageBox(
+            ServiceProvider.GlobalProvider,
+            message,
+            "HLSL Shader Compilation",
+            OLEMSGICON.OLEMSGICON_WARNING,
+            OLEMSGBUTTON.OLEMSGBUTTON_OK,
+            OLEMSGDEFBUTTON.OLEMSGDEFBUTTON_FIRST);
     }
 
     private void AddReflection(CompilationReflectionModel reflection)
