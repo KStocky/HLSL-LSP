@@ -19,17 +19,28 @@ namespace hlsl_intellisense::workspace {
 struct IncludeDirective {
     std::string path;
     std::size_t path_offset{};
+    std::size_t source_offset{};
+    std::size_t source_length{};
     bool quoted{};
 };
 
 struct DynamicIncludeDirective {
     std::string expression;
     std::size_t expression_offset{};
+    std::size_t source_offset{};
+    std::size_t source_length{};
+};
+
+struct SourceMacroDirective {
+    std::string name;
+    std::size_t directive_offset{};
+    bool state_unknown{};
 };
 
 struct IncludeMetadata {
     std::vector<IncludeDirective> directives;
     std::vector<DynamicIncludeDirective> dynamic_directives;
+    std::vector<SourceMacroDirective> source_macro_directives;
     bool has_dynamic{};
 };
 
@@ -69,17 +80,25 @@ struct IncludeResolution {
     std::vector<dxc::SourceFile> sources;
     std::unordered_set<std::string> dependency_identities;
     bool has_dynamic_includes{};
+    bool has_rewritten_sources{};
     enum class Status : std::uint8_t { resolved, missing, cyclic, dynamic };
 
     struct Edge {
         std::string source_path;
         std::string requested_path;
         std::size_t path_offset{};
+        std::size_t source_offset{};
+        std::size_t source_length{};
         bool quoted{};
         Status status{Status::missing};
         std::string resolved_path;
         std::string logical_path;
         std::string virtual_mapping;
+        bool macro_expanded{};
+        std::string expanded_path;
+        std::string configuration_macro;
+        std::string configuration_origin;
+        std::string configuration_origin_file;
     };
 
     struct File {
@@ -103,8 +122,9 @@ resolve_include_at(const SourceSnapshot& root, std::span<const SourceSnapshot> o
                    const WorkspaceConfiguration& configuration, std::size_t utf8_offset,
                    IncludeMetadataCache* cache = nullptr);
 
-// Returns true when `utf8_offset` falls within an `#include` directive's path
-// span in `text`, using only lightweight textual include-directive parsing:
+// Returns true when `utf8_offset` falls within an `#include` directive's
+// literal path or macro-expression span in `text`, using only lightweight
+// textual include-directive parsing:
 // no `WorkspaceConfiguration` (and therefore no filesystem access) is
 // required. Lets callers cheaply pre-filter candidates -- e.g. deciding
 // whether a diagnostic is even structurally on an include path -- before

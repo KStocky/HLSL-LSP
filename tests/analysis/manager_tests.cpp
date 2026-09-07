@@ -1,7 +1,7 @@
 #include <hlsl_intellisense/analysis/manager.h>
 
+#include <algorithm>
 #include <catch2/catch_test_macros.hpp>
-
 #include <condition_variable>
 #include <filesystem>
 #include <fstream>
@@ -243,6 +243,100 @@ TEST_CASE("Dependency metadata invalidates only dependent roots",
               "#include \"shared.hlsli\"\nfloat4 main() : SV_Target { return sharedValue; }\n"));
     manager.wait_idle();
     CHECK(manager.metrics().reparse_count == 1);
+}
+
+TEST_CASE("Configured macro includes participate in dependency invalidation",
+          "[analysis][dependencies][includes][macros]") {
+    TestDirectory directory;
+    const auto include_path = directory.path() / "configured.hlsli";
+    {
+        std::ofstream include{include_path};
+        REQUIRE(include);
+        include << "static const float4 configuredValue = 1.0.xxxx;\n";
+    }
+    const auto include = workspace::DocumentUri::from_path(include_path.string());
+    const auto root = workspace::DocumentUri::from_path((directory.path() / "root.hlsl").string());
+    workspace::WorkspaceConfiguration configuration;
+    configuration.preprocessor_definitions.emplace("CONFIGURED_HEADER", "\"configured.hlsli\"");
+    analysis::Manager manager{[](const auto&, const auto&, std::uint64_t) {}, test_options()};
+    manager.analyze(input(root, 1,
+                          "#include CONFIGURED_HEADER\n"
+                          "float4 main() : SV_Target { return configuredValue; }\n",
+                          configuration));
+    manager.wait_idle();
+
+    const auto roots = manager.roots();
+    REQUIRE(roots.size() == 1);
+    CHECK_FALSE(roots.front().has_dynamic_includes);
+    CHECK(roots.front().dependency_identities.contains(include.identity()));
+    const std::unordered_set changed{include.identity()};
+    const auto affected = manager.dependent_root_uris(changed);
+    REQUIRE(affected.size() == 1);
+    CHECK(affected.front() == root.uri());
+
+    {
+        std::ofstream changed_include{include_path, std::ios::trunc};
+        REQUIRE(changed_include);
+        changed_include << "static const float4 configuredValue = 2.0.xxxx;\n";
+    }
+    manager.invalidate_include_metadata(changed);
+    manager.analyze(input(root, 1,
+                          "#include CONFIGURED_HEADER\n"
+                          "float4 main() : SV_Target { return configuredValue; }\n",
+                          configuration));
+    manager.wait_idle();
+    CHECK(manager.metrics().reparse_count == 1);
+}
+
+TEST_CASE("Later DXC macro definitions keep configured include dependencies dynamic",
+          "[analysis][dependencies][includes][macros][arguments][integration]") {
+    TestDirectory directory;
+    std::filesystem::create_directories(directory.path() / "Configured");
+    const auto configured_path = directory.path() / "Configured" / "configured.hlsli";
+    {
+        std::ofstream configured{configured_path};
+        REQUIRE(configured);
+        configured << "static const float4 configuredValue = 1.0.xxxx;\n";
+    }
+    {
+        std::ofstream runtime{directory.path() / "runtime.hlsli"};
+        REQUIRE(runtime);
+        runtime << "static const float4 runtimeValue = 2.0.xxxx;\n";
+    }
+
+    const auto root = workspace::DocumentUri::from_path((directory.path() / "root.hlsl").string());
+    const auto configured = workspace::DocumentUri::from_path(configured_path.string());
+    workspace::WorkspaceConfiguration configuration;
+    configuration.preprocessor_definitions.emplace("HEADER", "HEADER_TARGET");
+    configuration.preprocessor_definitions.emplace("HEADER_TARGET",
+                                                   "\"/Configured/configured.hlsli\"");
+    configuration.virtual_directory_mappings.emplace("/Configured",
+                                                     directory.path() / "Configured");
+    configuration.additional_arguments = {"-DHEADER=\"runtime.hlsli\""};
+
+    std::vector<std::string> diagnostics;
+    analysis::Manager manager{
+        [&](const workspace::SourceSnapshot&, const auto& items, std::uint64_t) {
+            diagnostics.clear();
+            for (const auto& item : items) {
+                diagnostics.push_back(item.message);
+            }
+        },
+        test_options()};
+    manager.analyze(input(root, 1,
+                          "#include HEADER\n"
+                          "float4 main() : SV_Target { return runtimeValue; }\n",
+                          configuration));
+    manager.wait_idle();
+
+    const auto roots = manager.roots();
+    REQUIRE(roots.size() == 1);
+    CHECK(roots.front().has_dynamic_includes);
+    CHECK_FALSE(roots.front().dependency_identities.contains(configured.identity()));
+    CHECK(std::ranges::none_of(diagnostics, [](const auto& message) {
+        return message.find("runtimeValue") != std::string::npos ||
+               message.find("runtime.hlsli") != std::string::npos;
+    }));
 }
 
 TEST_CASE("Interactive analysis cancellation returns before blocked worker cleanup",

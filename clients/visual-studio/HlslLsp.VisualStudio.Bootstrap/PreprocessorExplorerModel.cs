@@ -22,8 +22,27 @@ public sealed class PreprocessorExplorerModel
     public IReadOnlyList<PreprocessorSettingModel> Settings { get; set; } =
         Array.Empty<PreprocessorSettingModel>();
 
+    public PreprocessorCompilerAnalysisModel CompilerAnalysis { get; set; } =
+        new PreprocessorCompilerAnalysisModel();
+
     public IReadOnlyList<string> Diagnostics { get; set; } =
         Array.Empty<string>();
+}
+
+public sealed class PreprocessorCompilerAnalysisModel
+{
+    public PreprocessorAnalysisCapabilityModel SkippedRegions { get; set; } =
+        new PreprocessorAnalysisCapabilityModel();
+
+    public PreprocessorAnalysisCapabilityModel CompilerMacros { get; set; } =
+        new PreprocessorAnalysisCapabilityModel();
+}
+
+public sealed class PreprocessorAnalysisCapabilityModel
+{
+    public bool Available { get; set; } = true;
+
+    public string Reason { get; set; }
 }
 
 public sealed class PreprocessorFileModel
@@ -53,8 +72,7 @@ public sealed class PreprocessorIncludeModel
 
     public long Character { get; set; }
 
-    // "quoted", "angled", or "macro" (a macro-expanded include expression
-    // whose target the compiler cannot statically resolve).
+    // "quoted", "angled", or "macro".
     public string Kind { get; set; }
 
     // "resolved", "missing", "cyclic", or "dynamic".
@@ -71,6 +89,48 @@ public sealed class PreprocessorIncludeModel
     // virtualDirectoryMappings entry in PreprocessorSettingModel) was used
     // to resolve this include; null otherwise.
     public string Mapping { get; set; }
+
+    public string ExpandedPath { get; set; }
+
+    public string ConfigurationMacro { get; set; }
+
+    public string ConfigurationOrigin { get; set; }
+
+    public string ConfigurationOriginUri { get; set; }
+}
+
+internal sealed class PreprocessorIncludePresentation
+{
+    public string TargetLabel { get; private set; }
+
+    public string ResolvedUri { get; private set; }
+
+    public string ExpandedPath { get; private set; }
+
+    public string Mapping { get; private set; }
+
+    public string ConfigurationOrigin { get; private set; }
+
+    public string ConfigurationOriginUri { get; private set; }
+
+    public static PreprocessorIncludePresentation Create(PreprocessorIncludeModel include)
+    {
+        if (include == null)
+        {
+            throw new ArgumentNullException(nameof(include));
+        }
+        return new PreprocessorIncludePresentation
+        {
+            TargetLabel = string.IsNullOrEmpty(include.ResolvedUri)
+                ? "-"
+                : include.LogicalPath ?? include.ResolvedUri,
+            ResolvedUri = include.ResolvedUri,
+            ExpandedPath = include.ExpandedPath,
+            Mapping = include.Mapping,
+            ConfigurationOrigin = include.ConfigurationOrigin,
+            ConfigurationOriginUri = include.ConfigurationOriginUri,
+        };
+    }
 }
 
 public sealed class PreprocessorSkippedRegionModel

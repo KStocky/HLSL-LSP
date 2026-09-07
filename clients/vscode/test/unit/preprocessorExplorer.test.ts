@@ -130,6 +130,40 @@ void test("preprocessor explorer HTML shows a macro-expanded include without a r
   assert.match(html, /macro-expanded/);
 });
 
+void test("preprocessor explorer HTML shows a resolved configured macro expansion and navigable origin", () => {
+  const html = preprocessorExplorerHtml(
+    baseReport({
+      files: [
+        {
+          uri: "file:///c:/scene/shader.hlsl",
+          logicalPath: "shader.hlsl",
+          physicalPath: "c:/scene/shader.hlsl",
+          source: "open",
+          includes: [
+            {
+              path: "PROJECT_HEADER",
+              line: 1,
+              character: 9,
+              kind: "macro",
+              status: "resolved",
+              expandedPath: "/Project/common.hlsli",
+              resolvedUri: "file:///c:/project/common.hlsli",
+              logicalPath: "/Project/common.hlsli",
+              configurationMacro: "PROJECT_HEADER",
+              configurationOrigin: "c:/scene/shadertoolsconfig.json",
+              configurationOriginUri: "file:///c:/scene/shadertoolsconfig.json",
+            },
+          ],
+        },
+      ],
+    }),
+  );
+  assert.match(html, /expands to \/Project\/common\.hlsli/);
+  assert.match(html, /configured by/);
+  assert.match(html, /shadertoolsconfig\.json/);
+  assert.match(html, /command:hlsl\.preprocessorExplorer\.openLocation\?/);
+});
+
 void test("preprocessor explorer HTML shows a virtual directory mapping used to resolve an include", () => {
   const html = preprocessorExplorerHtml(
     baseReport({
@@ -265,6 +299,23 @@ void test("preprocessor explorer HTML renders diagnostics when reported", () => 
     }),
   );
   assert.match(html, /Macro-based includes are compiler-owned/);
+});
+
+void test("preprocessor explorer distinguishes unavailable compiler sections from empty results", () => {
+  const html = preprocessorExplorerHtml(
+    baseReport({
+      compilerAnalysis: {
+        skippedRegions: {
+          available: false,
+          reason: "DXC skipped ranges are unsafe for rewritten sources.",
+        },
+        compilerMacros: { available: true },
+      },
+    }),
+  );
+  assert.match(html, /Unavailable: DXC skipped ranges are unsafe/);
+  assert.doesNotMatch(html, /No preprocessor-skipped regions were reported/);
+  assert.match(html, /No macros were reported/);
 });
 
 void test("preprocessor explorer HTML escapes untrusted text", () => {

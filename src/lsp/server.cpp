@@ -3526,8 +3526,21 @@ Json Server::preprocessor_explorer(const std::optional<Json>& params,
     const auto configuration = configuration_for(snapshot, configuration_state);
     auto resolution = workspace::resolve_includes(snapshot, open_documents, configuration);
     analyze_and_publish(snapshot.uri());
-    const auto skipped = analysis_.skipped_ranges(snapshot.document_uri().identity(),
-                                                  snapshot.version(), context.cancellation);
+    bool skipped_regions_available = true;
+    std::string skipped_regions_unavailable_reason;
+    if (resolution.has_rewritten_sources && !dxc::supports_skipped_ranges_for_rewritten_sources()) {
+        skipped_regions_available = false;
+        skipped_regions_unavailable_reason =
+            "Compiler skipped-region analysis is unavailable because DXC 1.9's Linux "
+            "GetSkippedRanges API is unsafe for source buffers whose virtual includes were "
+            "rewritten to physical paths. Resolver include metadata, configured macro "
+            "provenance, compiler-reported source macros, and effective settings remain "
+            "available.";
+    }
+    const auto skipped = skipped_regions_available
+                             ? analysis_.skipped_ranges(snapshot.document_uri().identity(),
+                                                        snapshot.version(), context.cancellation)
+                             : std::vector<dxc::SourceRange>{};
     const auto compiler_macros = analysis_.macro_definitions(
         snapshot.document_uri().identity(), snapshot.version(), context.cancellation);
 
@@ -3563,11 +3576,23 @@ Json Server::preprocessor_explorer(const std::optional<Json>& params,
             Json item{{"path", include.requested_path},
                       {"line", include_position.line},
                       {"character", include_position.character},
-                      {"kind", include.status == workspace::IncludeResolution::Status::dynamic
-                                   ? "macro"
-                               : include.quoted ? "quoted"
-                                                : "angled"},
+                      {"kind", include.macro_expanded ? "macro"
+                               : include.quoted       ? "quoted"
+                                                      : "angled"},
                       {"status", status_name(include.status)}};
+            if (!include.expanded_path.empty()) {
+                item["expandedPath"] = include.expanded_path;
+            }
+            if (!include.configuration_macro.empty()) {
+                item["configurationMacro"] = include.configuration_macro;
+            }
+            if (!include.configuration_origin.empty()) {
+                item["configurationOrigin"] = include.configuration_origin;
+            }
+            if (!include.configuration_origin_file.empty()) {
+                item["configurationOriginUri"] =
+                    workspace::DocumentUri::from_path(include.configuration_origin_file).uri();
+            }
             if (!include.resolved_path.empty()) {
                 item["resolvedUri"] =
                     workspace::DocumentUri::from_path(include.resolved_path).uri();
@@ -3676,9 +3701,23 @@ Json Server::preprocessor_explorer(const std::optional<Json>& params,
     Json diagnostics = Json::array();
     if (resolution.has_dynamic_includes) {
         diagnostics.push_back(
-            "Macro-based includes are compiler-owned; their expressions are shown without "
+            "Source-defined, function-like, undefined, cyclic, malformed, oversized, or "
+            "multi-token include expressions, and configured macros changed or obscured by "
+            "additional compiler arguments, remain compiler-owned and are shown without "
             "fabricating a resolved path.");
     }
+    if (!skipped_regions_available) {
+        diagnostics.push_back(skipped_regions_unavailable_reason);
+    }
+
+    Json skipped_regions_capability{{"available", skipped_regions_available}};
+    if (!skipped_regions_available) {
+        skipped_regions_capability["reason"] = skipped_regions_unavailable_reason;
+    }
+    Json compiler_analysis{
+        {"skippedRegions", std::move(skipped_regions_capability)},
+        {"compilerMacros", {{"available", true}}},
+    };
 
     {
         std::scoped_lock state_lock{state_mutex_};
@@ -3693,6 +3732,7 @@ Json Server::preprocessor_explorer(const std::optional<Json>& params,
             {"skippedRegions", std::move(skipped_regions)},
             {"macros", std::move(macros)},
             {"settings", std::move(settings)},
+            {"compilerAnalysis", std::move(compiler_analysis)},
             {"diagnostics", std::move(diagnostics)}};
 }
 

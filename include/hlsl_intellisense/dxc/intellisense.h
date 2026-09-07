@@ -47,6 +47,11 @@ class RuntimeError final : public std::runtime_error {
 // elsewhere).
 [[nodiscard]] std::string_view runtime_library_name() noexcept;
 
+// DXC 1.9's Linux IntelliSense implementation can crash in GetSkippedRanges
+// after an unsaved source buffer rewrites a virtual include to a physical path.
+// Windows does not exhibit the bug.
+[[nodiscard]] bool supports_skipped_ranges_for_rewritten_sources() noexcept;
+
 // Validates that `directory` contains a DXC runtime compatible with this
 // platform and returns the absolute path of the compiler library. Throws
 // RuntimeError with an actionable message when the directory is empty, missing,
