@@ -204,12 +204,11 @@ function locationLink(location: ComputeSourceLocation, label: string): string {
 function geometrySection(report: ComputeVisualization): string {
   return `<section>
 <h2>Dispatch geometry</h2>
-<p><a href="${configureComputeVisualizationCommand.startsWith("hlsl.") ? `command:${configureComputeVisualizationCommand}` : "#"}">Configure dispatch and hardware profile</a></p>
 <table>
 <tbody>
 <tr><th>Threads per group</th><td>${dimensions(report.threadGroupSize)}</td></tr>
-<tr><th>Dispatch dimensions</th><td>${dimensions(report.dispatchDimensions)}</td></tr>
-<tr><th>Thread groups</th><td>${dimensions(report.groupCount)}</td></tr>
+<tr><th>Logical workload (threads)</th><td>${dimensions(report.dispatchDimensions)}</td></tr>
+<tr><th>Required Dispatch() groups</th><td>${dimensions(report.groupCount)}</td></tr>
 <tr><th>Launched threads</th><td>${numberOrUnavailable(report.launchedThreads)}</td></tr>
 <tr><th>Inactive edge threads</th><td>${numberOrUnavailable(report.inactiveThreads)}</td></tr>
 </tbody>
@@ -238,14 +237,16 @@ function barriersSection(barriers: ComputeBarrierAnalysis): string {
     return `<section><h2>Barriers</h2><p class="unavailable">${escapeHtml(barriers.unavailableReason || "Barrier analysis is unavailable.")}</p></section>`;
   }
   const locations =
-    barriers.locations.length === 0
-      ? '<li class="muted">Source locations are not available.</li>'
-      : barriers.locations
-          .map((location, index) => {
-            const label = location.label ?? `Barrier ${String(index + 1)}`;
-            return `<li>${locationLink(location, label)}</li>`;
-          })
-          .join("");
+    barriers.instructionCount === 0
+      ? '<li class="muted">(no barrier instructions)</li>'
+      : barriers.locations.length === 0
+        ? '<li class="muted">Barrier source locations are not available.</li>'
+        : barriers.locations
+            .map((location, index) => {
+              const label = location.label ?? `Barrier ${String(index + 1)}`;
+              return `<li>${locationLink(location, label)}</li>`;
+            })
+            .join("");
   return `<section>
 <h2>Barriers</h2>
 <p>Compiler instruction count: ${numberOrUnavailable(barriers.instructionCount)}</p>
@@ -360,6 +361,7 @@ th { color: var(--vscode-descriptionForeground); }
 <body>
 <h1>Compute Visualization: ${label}</h1>
 <p class="muted">Entry point: ${escapeHtml(report.entryPoint || "(not resolved)")} | Target: ${escapeHtml(report.targetProfile || "(not configured)")}</p>
+<p><a href="command:${configureComputeVisualizationCommand}">Configure logical workload and hardware profile</a></p>
 ${body}
 </body>
 </html>`;

@@ -123,6 +123,8 @@ void test("compute visualization renders geometry and explicit unknown sections"
   const html = computeVisualizationHtml(report(), uri);
   assert.match(html, /8 x 4 x 1/);
   assert.match(html, /17 x 8 x 1/);
+  assert.match(html, /Logical workload \(threads\)/);
+  assert.match(html, /Required Dispatch\(\) groups/);
   assert.match(html, /192/);
   assert.match(html, /56/);
   assert.match(html, /SV_DispatchThreadID/);
@@ -138,6 +140,51 @@ void test("compute visualization renders geometry and explicit unknown sections"
     html,
     new RegExp(`command:${openComputeVisualizationLocationCommand}`),
   );
+});
+
+void test("compute visualization keeps configuration available when analysis is not applicable", () => {
+  const html = computeVisualizationHtml(
+    report({
+      applicable: false,
+      explanation: "The active target is a pixel shader.",
+    }),
+    uri,
+  );
+  assert.match(html, /active target is a pixel shader/);
+  assert.match(
+    html,
+    new RegExp(`command:${configureComputeVisualizationCommand}`),
+  );
+  assert.doesNotMatch(html, /System-value mapping/);
+});
+
+void test("zero compiler barriers is distinct from unavailable source locations", () => {
+  const noBarriers = computeVisualizationHtml(
+    report({
+      barriers: {
+        available: true,
+        unavailableReason: "",
+        instructionCount: 0,
+        locations: [],
+      },
+    }),
+    uri,
+  );
+  assert.match(noBarriers, /no barrier instructions/);
+  assert.doesNotMatch(noBarriers, /locations are not available/);
+
+  const unknownLocations = computeVisualizationHtml(
+    report({
+      barriers: {
+        available: true,
+        unavailableReason: "",
+        instructionCount: 2,
+        locations: [],
+      },
+    }),
+    uri,
+  );
+  assert.match(unknownLocations, /source locations are not available/);
 });
 
 void test("compute visualization labels occupancy as a hardware estimate", () => {

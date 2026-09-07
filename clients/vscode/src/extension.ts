@@ -247,9 +247,11 @@ function computeVisualizationLoadingHtml(): string {
 async function promptComputeLimit(
   title: string,
   value: number,
+  prompt?: string,
 ): Promise<number | undefined> {
   const input = await vscode.window.showInputBox({
     title,
+    ...(prompt === undefined ? {} : { prompt }),
     value: String(value),
     validateInput: (candidate) =>
       parsePositiveDimension(candidate) === undefined
@@ -263,15 +265,29 @@ async function configureComputeVisualization(
   current: ComputeVisualizationOptions,
 ): Promise<ComputeVisualizationOptions | null> {
   const currentDispatch = current.dispatchDimensions ?? { x: 1, y: 1, z: 1 };
-  const x = await promptComputeLimit("Dispatch threads: X", currentDispatch.x);
+  const workloadPrompt =
+    "Total logical workload threads/elements, not D3D Dispatch() group counts.";
+  const x = await promptComputeLimit(
+    "Logical workload threads: X",
+    currentDispatch.x,
+    workloadPrompt,
+  );
   if (x === undefined) {
     return null;
   }
-  const y = await promptComputeLimit("Dispatch threads: Y", currentDispatch.y);
+  const y = await promptComputeLimit(
+    "Logical workload threads: Y",
+    currentDispatch.y,
+    workloadPrompt,
+  );
   if (y === undefined) {
     return null;
   }
-  const z = await promptComputeLimit("Dispatch threads: Z", currentDispatch.z);
+  const z = await promptComputeLimit(
+    "Logical workload threads: Z",
+    currentDispatch.z,
+    workloadPrompt,
+  );
   if (z === undefined) {
     return null;
   }
@@ -1636,6 +1652,7 @@ export async function activate(
           const { panel, controller } = computeVisualizationState;
           const { switchingDocument } = controller.open(uri.toString());
           if (switchingDocument) {
+            computeVisualizationState.options = {};
             panel.webview.html = computeVisualizationLoadingHtml();
           }
           panel.reveal(vscode.ViewColumn.Beside);
