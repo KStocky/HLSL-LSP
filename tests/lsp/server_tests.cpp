@@ -3420,6 +3420,7 @@ TEST_CASE("Server compiles hlsl/compilationInfo using DXC and honors the active 
     CHECK(std::ranges::any_of(
         resources, [](const Json& resource) { return resource["name"] == "MainSampler"; }));
     CHECK(info["reflection"]["threadGroupSize"].is_null());
+    CHECK(info["reflection"]["barrierInstructionCount"] == 0);
 
     // hlsl/compilationInfo backward-compatibly extends each resource with
     // compiler-owned register class, raw reflection flags, range id, sample
@@ -6019,6 +6020,283 @@ TEST_CASE("Server cancellation returns RequestCancelled for hlsl/entryPointDataF
     entered.get_future().wait();
     static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
         .method = "$/cancelRequest", .params = Json{{"id", "entry-point-data-flow"}}}));
+
+    const auto result = response.get();
+    const auto* error = std::get_if<hlsl_intellisense::json_rpc::ErrorResponse>(&result);
+    REQUIRE(error != nullptr);
+    CHECK(error->error.code == hlsl_intellisense::json_rpc::request_cancelled_code);
+    release.set_value();
+    server.wait_for_analysis();
+}
+
+namespace {
+
+void write_compute_visualization_config(const TestDirectory& directory,
+                                        std::string_view target_profile = "cs_6_6",
+                                        std::string_view entry_point = "CSMain") {
+    std::ofstream config{directory.path() / "shadertoolsconfig.json"};
+    REQUIRE(config);
+    config << "{\n"
+              "  \"root\": true,\n"
+              "  \"hlsl.targetProfile\": \""
+           << target_profile
+           << "\",\n"
+              "  \"hlsl.variantsVersion\": 1,\n"
+              "  \"hlsl.variants\": [\n"
+              "    { \"name\": \"Configured\", \"hlsl.entryPoint\": \""
+           << entry_point
+           << "\" }\n"
+              "  ]\n"
+              "}\n";
+    REQUIRE(config);
+}
+
+[[nodiscard]] std::string compute_visualization_shader() {
+    return "RWStructuredBuffer<uint> Output : register(u0);\n"
+           "groupshared uint Tile[32];\n"
+           "[numthreads(8, 4, 1)]\n"
+           "void CSMain(uint3 dispatchThreadId : SV_DispatchThreadID,\n"
+           "            uint3 groupThreadId : SV_GroupThreadID) {\n"
+           "    Tile[groupThreadId.x] = dispatchThreadId.x;\n"
+           "    GroupMemoryBarrierWithGroupSync();\n"
+           "    Output[dispatchThreadId.x] = Tile[groupThreadId.x];\n"
+           "}\n";
+}
+
+[[nodiscard]] Json compute_visualization_result(hlsl_intellisense::lsp::Server& server,
+                                                std::int64_t id, const std::string& uri,
+                                                Json options = Json::object()) {
+    options["textDocument"] = Json{{"uri", uri}};
+    const auto response = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = id, .method = "hlsl/computeVisualization", .params = std::move(options)});
+    REQUIRE(response.has_value());
+    const auto* result = std::get_if<hlsl_intellisense::json_rpc::Response>(&*response);
+    REQUIRE(result != nullptr);
+    return result->result;
+}
+
+} // namespace
+
+TEST_CASE("hlsl/computeVisualization uses the configured compute variant and DXC reflection",
+          "[lsp][compute-visualization][integration]") {
+    TestDirectory directory;
+    write_compute_visualization_config(directory);
+    const auto document = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "compute.hlsl").string());
+    hlsl_intellisense::lsp::Server server{[](const auto&) {}};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params = Json{{"textDocument",
+                        {{"uri", document.uri()},
+                         {"languageId", "hlsl"},
+                         {"version", 1},
+                         {"text", compute_visualization_shader()}}}}}));
+
+    const auto not_configured = compute_visualization_result(server, 2, document.uri());
+    CHECK(not_configured["found"] == false);
+    CHECK(not_configured["applicable"] == false);
+    CHECK_FALSE(not_configured["explanation"].get<std::string>().empty());
+
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "hlsl/didChangeActiveVariant", .params = Json{{"variant", "Configured"}}}));
+    const auto result = compute_visualization_result(server, 3, document.uri());
+    INFO(result.dump());
+    CHECK(result["found"] == true);
+    CHECK(result["applicable"] == true);
+    CHECK(result["entryPoint"] == "CSMain");
+    CHECK(result["stage"] == "compute");
+    CHECK(result["targetProfile"] == "cs_6_6");
+    CHECK(result["threadGroupSize"] == Json{{"x", 8}, {"y", 4}, {"z", 1}});
+    CHECK(result["dispatchDimensions"] == Json{{"x", 8}, {"y", 4}, {"z", 1}});
+    CHECK(result["groupCount"] == Json{{"x", 1}, {"y", 1}, {"z", 1}});
+    CHECK(result["launchedThreads"] == 32);
+    CHECK(result["inactiveThreads"] == 0);
+    CHECK(result["systemValues"].size() == 4);
+    CHECK(result["barriers"]["available"] == true);
+    CHECK(result["barriers"]["instructionCount"] == 1);
+    CHECK(result["barriers"]["locationsAvailable"] == false);
+    CHECK_FALSE(result["barriers"]["locationsUnavailableReason"].get<std::string>().empty());
+    CHECK(result["groupShared"]["available"] == false);
+    CHECK_FALSE(result["groupShared"]["unavailableReason"].get<std::string>().empty());
+    CHECK(result["waveSize"]["known"] == false);
+    CHECK(result["occupancy"].is_null());
+}
+
+TEST_CASE("hlsl/computeVisualization computes exact and edge dispatch geometry and occupancy",
+          "[lsp][compute-visualization][geometry]") {
+    TestDirectory directory;
+    write_compute_visualization_config(directory);
+    const auto document = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "compute.hlsl").string());
+    hlsl_intellisense::lsp::Server server{[](const auto&) {}};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params = Json{{"textDocument",
+                        {{"uri", document.uri()},
+                         {"languageId", "hlsl"},
+                         {"version", 1},
+                         {"text", compute_visualization_shader()}}}}}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "hlsl/didChangeActiveVariant", .params = Json{{"variant", "Configured"}}}));
+
+    const auto exact = compute_visualization_result(
+        server, 2, document.uri(), Json{{"dispatchDimensions", {{"x", 16}, {"y", 8}, {"z", 1}}}});
+    CHECK(exact["groupCount"] == Json{{"x", 2}, {"y", 2}, {"z", 1}});
+    CHECK(exact["launchedThreads"] == 128);
+    CHECK(exact["inactiveThreads"] == 0);
+
+    const auto edge =
+        compute_visualization_result(server, 3, document.uri(),
+                                     Json{{"dispatchDimensions", {{"x", 17}, {"y", 9}, {"z", 1}}},
+                                          {"hardwareProfile",
+                                           {{"name", "Test GPU"},
+                                            {"waveSize", 32},
+                                            {"maxThreadsPerGroup", 1024},
+                                            {"maxThreadsPerComputeUnit", 2048},
+                                            {"maxGroupsPerComputeUnit", 8},
+                                            {"sharedMemoryBytesPerComputeUnit", 65536}}}});
+    CHECK(edge["groupCount"] == Json{{"x", 3}, {"y", 3}, {"z", 1}});
+    CHECK(edge["launchedThreads"] == 288);
+    CHECK(edge["inactiveThreads"] == 135);
+    REQUIRE(!edge["occupancy"].is_null());
+    CHECK(edge["occupancy"]["hardwareProfile"] == "Test GPU");
+    CHECK(edge["occupancy"]["estimatedResidentGroups"] == 8);
+    CHECK(edge["occupancy"]["estimatedResidentThreads"] == 256);
+    CHECK(edge["occupancy"]["estimatedResidentWaves"] == 8);
+    CHECK_FALSE(edge["occupancy"]["limitingFactors"].empty());
+    CHECK(edge["occupancy"]["assumptions"].size() >= 3);
+}
+
+TEST_CASE("hlsl/computeVisualization rejects malformed, non-positive, and overflowing inputs",
+          "[lsp][compute-visualization][validation]") {
+    TestDirectory directory;
+    write_compute_visualization_config(directory);
+    const auto document = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "compute.hlsl").string());
+    hlsl_intellisense::lsp::Server server{[](const auto&) {}};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params = Json{{"textDocument",
+                        {{"uri", document.uri()},
+                         {"languageId", "hlsl"},
+                         {"version", 1},
+                         {"text", compute_visualization_shader()}}}}}));
+
+    const std::vector<Json> invalid_options{
+        Json{{"dispatchDimensions", {{"x", 0}, {"y", 1}, {"z", 1}}}},
+        Json{{"dispatchDimensions", {{"x", 1.5}, {"y", 1}, {"z", 1}}}},
+        Json{{"dispatchDimensions", {{"x", 4'294'967'296ULL}, {"y", 1}, {"z", 1}}}},
+        Json{{"dispatchDimensions", {{"x", 4'294'967'295ULL}, {"y", 4'294'967'295ULL}, {"z", 1}}}},
+        Json{{"hardwareProfile",
+              {{"name", ""},
+               {"waveSize", 32},
+               {"maxThreadsPerGroup", 1024},
+               {"maxThreadsPerComputeUnit", 2048},
+               {"maxGroupsPerComputeUnit", 8},
+               {"sharedMemoryBytesPerComputeUnit", 65536}}}},
+        Json{{"hardwareProfile",
+              {{"name", "Bad GPU"},
+               {"waveSize", 0},
+               {"maxThreadsPerGroup", 1024},
+               {"maxThreadsPerComputeUnit", 2048},
+               {"maxGroupsPerComputeUnit", 8},
+               {"sharedMemoryBytesPerComputeUnit", 65536}}}}};
+    std::int64_t id = 2;
+    for (auto options : invalid_options) {
+        options["textDocument"] = Json{{"uri", document.uri()}};
+        const auto response = server.handle(hlsl_intellisense::json_rpc::Request{
+            .id = id++, .method = "hlsl/computeVisualization", .params = std::move(options)});
+        REQUIRE(response.has_value());
+        const auto* error = std::get_if<hlsl_intellisense::json_rpc::ErrorResponse>(&*response);
+        REQUIRE(error != nullptr);
+        CHECK(error->error.code == hlsl_intellisense::json_rpc::invalid_params_code);
+    }
+}
+
+TEST_CASE("hlsl/computeVisualization reports a configured non-compute shader as not applicable",
+          "[lsp][compute-visualization]") {
+    TestDirectory directory;
+    write_compute_visualization_config(directory, "ps_6_6", "PSMain");
+    const auto document = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "pixel.hlsl").string());
+    hlsl_intellisense::lsp::Server server{[](const auto&) {}};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params = Json{{"textDocument",
+                        {{"uri", document.uri()},
+                         {"languageId", "hlsl"},
+                         {"version", 1},
+                         {"text", "float4 PSMain() : SV_Target { return 1.0; }\n"}}}}}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "hlsl/didChangeActiveVariant", .params = Json{{"variant", "Configured"}}}));
+
+    const auto result = compute_visualization_result(server, 2, document.uri());
+    CHECK(result["found"] == true);
+    CHECK(result["applicable"] == false);
+    CHECK(result["stage"] == "pixel");
+    CHECK(result["threadGroupSize"].is_null());
+    CHECK(result["occupancy"].is_null());
+}
+
+TEST_CASE("Server cancellation returns RequestCancelled for hlsl/computeVisualization",
+          "[lsp][compute-visualization][cancellation]") {
+    TestDirectory directory;
+    write_compute_visualization_config(directory);
+    const auto document = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "compute.hlsl").string());
+    auto hooks = std::make_shared<hlsl_intellisense::analysis::AnalysisHooks>();
+    std::promise<void> entered;
+    std::promise<void> release;
+    const auto released = release.get_future().share();
+    hooks->before_interactive = [&](std::string_view) {
+        entered.set_value();
+        released.wait();
+    };
+    hlsl_intellisense::lsp::ServerOptions options;
+    options.background_analysis = true;
+    options.analysis_hooks = hooks;
+    hlsl_intellisense::lsp::Server server{[](const auto&) {}, {}, options};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params = Json{{"textDocument",
+                        {{"uri", document.uri()},
+                         {"languageId", "hlsl"},
+                         {"version", 1},
+                         {"text", compute_visualization_shader()}}}}}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "hlsl/didChangeActiveVariant", .params = Json{{"variant", "Configured"}}}));
+    server.wait_for_analysis();
+
+    const hlsl_intellisense::json_rpc::Request request{
+        .id = std::string{"compute-visualization"},
+        .method = "hlsl/computeVisualization",
+        .params = Json{{"textDocument", {{"uri", document.uri()}}}}};
+    const auto cancellation = server.begin_request(request.id);
+    auto response =
+        std::async(std::launch::async, [&] { return server.handle(request, cancellation); });
+    entered.get_future().wait();
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "$/cancelRequest", .params = Json{{"id", "compute-visualization"}}}));
 
     const auto result = response.get();
     const auto* error = std::get_if<hlsl_intellisense::json_rpc::ErrorResponse>(&result);

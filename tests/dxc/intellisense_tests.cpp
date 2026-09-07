@@ -1318,6 +1318,7 @@ TEST_CASE("Compilation info exposes compute thread group size", "[dxc][compilati
     const std::string source = "RWStructuredBuffer<float> Output : register(u0);\n"
                                "[numthreads(8, 4, 2)]\n"
                                "void main(uint3 id : SV_DispatchThreadID) {\n"
+                               "    GroupMemoryBarrierWithGroupSync();\n"
                                "    Output[id.x] = 1.0;\n"
                                "}\n";
     auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
@@ -1330,6 +1331,7 @@ TEST_CASE("Compilation info exposes compute thread group size", "[dxc][compilati
     CHECK(info.reflection->thread_group_size->x == 8);
     CHECK(info.reflection->thread_group_size->y == 4);
     CHECK(info.reflection->thread_group_size->z == 2);
+    CHECK(info.reflection->barrier_instruction_count == 1);
     const auto output =
         std::ranges::find(info.reflection->resources, "Output",
                           &hlsl_intellisense::dxc::CompilationResourceBinding::name);

@@ -342,6 +342,9 @@ struct CompilationReflection {
     std::vector<CompilationSignatureParameter> output_signature;
     std::vector<CompilationResourceBinding> resources;
     std::optional<CompilationThreadGroupSize> thread_group_size;
+    // Compiler-emitted barrier instruction count from
+    // D3D12_SHADER_DESC::cBarrierInstructions.
+    std::uint32_t barrier_instruction_count{};
     // Deterministic grouping/collision analysis over `resources`, computed
     // purely from the reflected register data above.
     ResourceBindingAnalysis binding_analysis;

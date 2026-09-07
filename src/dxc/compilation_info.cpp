@@ -1011,6 +1011,7 @@ CompilationInfo compilation_info_from_compile(DxcCreateInstanceProc create_insta
     }
 
     CompilationReflection reflection_result;
+    reflection_result.barrier_instruction_count = shader_desc.cBarrierInstructions;
 
     reflection_result.input_signature.reserve(shader_desc.InputParameters);
     for (unsigned index = 0; index < shader_desc.InputParameters; ++index) {

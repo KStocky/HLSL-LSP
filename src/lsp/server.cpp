@@ -90,6 +90,91 @@ using json_rpc::Json;
     return static_cast<std::uint64_t>(value);
 }
 
+constexpr std::uint64_t max_json_safe_integer = 9'007'199'254'740'991ULL;
+
+struct ComputeDimensions {
+    std::uint32_t x{};
+    std::uint32_t y{};
+    std::uint32_t z{};
+};
+
+struct ComputeHardwareProfile {
+    std::string name;
+    std::uint32_t wave_size{};
+    std::uint32_t max_threads_per_group{};
+    std::uint32_t max_threads_per_compute_unit{};
+    std::uint32_t max_groups_per_compute_unit{};
+    std::uint32_t shared_memory_bytes_per_compute_unit{};
+};
+
+[[nodiscard]] std::uint32_t positive_u32_member(const Json& object, std::string_view name) {
+    const auto& value = member(object, name);
+    std::uint64_t parsed{};
+    if (value.is_number_unsigned()) {
+        parsed = value.get<std::uint64_t>();
+    } else if (value.is_number_integer()) {
+        const auto signed_value = value.get<std::int64_t>();
+        if (signed_value <= 0) {
+            invalid_params(std::string{"Expected positive 32-bit integer: "} + std::string{name});
+        }
+        parsed = static_cast<std::uint64_t>(signed_value);
+    } else {
+        invalid_params(std::string{"Expected positive 32-bit integer: "} + std::string{name});
+    }
+    if (parsed == 0 || parsed > std::numeric_limits<std::uint32_t>::max()) {
+        invalid_params(std::string{"Expected positive 32-bit integer: "} + std::string{name});
+    }
+    return static_cast<std::uint32_t>(parsed);
+}
+
+[[nodiscard]] ComputeDimensions compute_dimensions(const Json& value, std::string_view name) {
+    if (!value.is_object()) {
+        invalid_params(std::string{"Expected object: "} + std::string{name});
+    }
+    return {.x = positive_u32_member(value, "x"),
+            .y = positive_u32_member(value, "y"),
+            .z = positive_u32_member(value, "z")};
+}
+
+[[nodiscard]] std::uint64_t checked_multiply(std::uint64_t left, std::uint64_t right,
+                                             std::string_view description) {
+    if (right != 0 && left > max_json_safe_integer / right) {
+        invalid_params(std::string{description} + " exceeds the protocol's exact integer bound");
+    }
+    return left * right;
+}
+
+[[nodiscard]] std::uint64_t dimension_product(const ComputeDimensions& dimensions,
+                                              std::string_view description) {
+    return checked_multiply(checked_multiply(dimensions.x, dimensions.y, description), dimensions.z,
+                            description);
+}
+
+[[nodiscard]] std::uint32_t ceil_divide(std::uint32_t numerator, std::uint32_t denominator) {
+    return numerator / denominator + (numerator % denominator == 0 ? 0U : 1U);
+}
+
+[[nodiscard]] Json compute_dimensions_json(const ComputeDimensions& dimensions) {
+    return {{"x", dimensions.x}, {"y", dimensions.y}, {"z", dimensions.z}};
+}
+
+[[nodiscard]] ComputeHardwareProfile compute_hardware_profile(const Json& value) {
+    if (!value.is_object()) {
+        invalid_params("Expected object: hardwareProfile");
+    }
+    auto name = string_member(value, "name");
+    if (name.empty()) {
+        invalid_params("hardwareProfile.name must not be empty");
+    }
+    return {.name = std::move(name),
+            .wave_size = positive_u32_member(value, "waveSize"),
+            .max_threads_per_group = positive_u32_member(value, "maxThreadsPerGroup"),
+            .max_threads_per_compute_unit = positive_u32_member(value, "maxThreadsPerComputeUnit"),
+            .max_groups_per_compute_unit = positive_u32_member(value, "maxGroupsPerComputeUnit"),
+            .shared_memory_bytes_per_compute_unit =
+                positive_u32_member(value, "sharedMemoryBytesPerComputeUnit")};
+}
+
 [[nodiscard]] workspace::Position position(const Json& value) {
     if (!value.is_object()) {
         invalid_params("Expected position object");
@@ -699,6 +784,7 @@ compilation_signature_parameter_json(const dxc::CompilationSignatureParameter& p
                 {"inputSignature", std::move(input_signature)},
                 {"outputSignature", std::move(output_signature)},
                 {"resources", std::move(resources)},
+                {"barrierInstructionCount", reflection.barrier_instruction_count},
                 {"bindingAnalysis", resource_binding_analysis_json(reflection.binding_analysis)}};
     if (reflection.thread_group_size.has_value()) {
         result["threadGroupSize"] = Json{{"x", reflection.thread_group_size->x},
@@ -2066,6 +2152,10 @@ void Server::register_handlers() {
     dispatcher_.register_request_handler("hlsl/compilationInfo",
                                          [this](const auto& params, const auto& context) {
                                              return compilation_info(params, context);
+                                         });
+    dispatcher_.register_request_handler("hlsl/computeVisualization",
+                                         [this](const auto& params, const auto& context) {
+                                             return compute_visualization(params, context);
                                          });
     dispatcher_.register_request_handler("textDocument/signatureHelp",
                                          [this](const auto& params, const auto& context) {
@@ -3800,6 +3890,220 @@ Json Server::compilation_info(const std::optional<Json>& params,
         }
     }
     return compilation_info_json(info, active_variant, resource_location_texts);
+}
+
+Json Server::compute_visualization(const std::optional<Json>& params,
+                                   const json_rpc::RequestContext& context) {
+    require_running();
+    const auto& value = object_params(params);
+    const auto uri = string_member(object_member(value, "textDocument"), "uri");
+    std::optional<ComputeDimensions> requested_dispatch;
+    if (const auto item = value.find("dispatchDimensions"); item != value.end()) {
+        requested_dispatch = compute_dimensions(*item, "dispatchDimensions");
+        static_cast<void>(dimension_product(*requested_dispatch, "dispatchDimensions"));
+    }
+    std::optional<ComputeHardwareProfile> hardware;
+    if (const auto item = value.find("hardwareProfile"); item != value.end()) {
+        hardware = compute_hardware_profile(*item);
+    }
+
+    workspace::SourceSnapshot snapshot = [&] {
+        std::scoped_lock state_lock{state_mutex_};
+        try {
+            const auto& state = documents_.document(uri);
+            if (!state.open) {
+                invalid_params("hlsl/computeVisualization document is not open");
+            }
+            return documents_.snapshot(uri);
+        } catch (const workspace::DocumentError& error) {
+            invalid_params(error.what());
+        }
+    }();
+
+    analyze_and_publish(snapshot.uri());
+    const auto info_with_generation = analysis_.compilation_info_with_generation(
+        snapshot.document_uri().identity(), snapshot.version(), snapshot.path(),
+        context.cancellation);
+    const auto& info = info_with_generation.value;
+    const auto generation = info_with_generation.generation;
+    const auto root_identity = snapshot.document_uri().identity();
+
+    {
+        std::scoped_lock state_lock{state_mutex_};
+        if (!documents_.contains(snapshot.uri()) ||
+            documents_.snapshot(snapshot.uri()).version() != snapshot.version()) {
+            throw HandlerError{json_rpc::content_modified_code,
+                               "hlsl/computeVisualization was superseded"};
+        }
+    }
+
+    const bool found = !info.entry_point.empty();
+    Json result{{"applicable", false},
+                {"found", found},
+                {"explanation", ""},
+                {"entryPoint", info.entry_point},
+                {"stage", info.stage},
+                {"targetProfile", info.target_profile},
+                {"threadGroupSize", nullptr},
+                {"dispatchDimensions", nullptr},
+                {"groupCount", nullptr},
+                {"launchedThreads", nullptr},
+                {"inactiveThreads", nullptr},
+                {"systemValues", Json::array()},
+                {"barriers",
+                 {{"available", false},
+                  {"unavailableReason",
+                   "Barrier instruction reflection is unavailable until a compute shader is "
+                   "successfully compiled to reflected DXIL."},
+                  {"instructionCount", nullptr},
+                  {"locationsAvailable", false},
+                  {"locationsUnavailableReason",
+                   "Barrier source locations are not exposed by the current DXC reflection and "
+                   "cursor interfaces."},
+                  {"locations", Json::array()}}},
+                {"groupShared",
+                 {{"available", false},
+                  {"unavailableReason",
+                   "Compiler-authoritative groupshared declaration sizes are not exposed by the "
+                   "current DXC reflection, cursor, type, or layout interfaces; source text is "
+                   "never parsed or guessed."},
+                  {"totalBytes", nullptr},
+                  {"declarations", Json::array()}}},
+                {"waveSize",
+                 {{"known", false},
+                  {"min", nullptr},
+                  {"max", nullptr},
+                  {"preferred", nullptr},
+                  {"explanation",
+                   "The current DXC shader reflection path does not expose compiler-authoritative "
+                   "wave-size requirements."}}},
+                {"occupancy", nullptr}};
+
+    if (!found) {
+        result["explanation"] =
+            "No effective entry point is configured for the open document or active variant.";
+    } else if (info.stage != "compute") {
+        result["explanation"] = "The effective configured entry point targets the '" + info.stage +
+                                "' stage, not compute.";
+    } else if (!info.success) {
+        result["explanation"] =
+            "DXC could not compile the effective configured compute entry point.";
+    } else if (!info.reflection.has_value() || !info.reflection->available) {
+        result["explanation"] =
+            info.reflection.has_value() && !info.reflection->unavailable_reason.empty()
+                ? info.reflection->unavailable_reason
+                : "DXC reflection is unavailable for the compiled compute entry point.";
+    } else if (!info.reflection->thread_group_size.has_value() ||
+               info.reflection->thread_group_size->x == 0 ||
+               info.reflection->thread_group_size->y == 0 ||
+               info.reflection->thread_group_size->z == 0) {
+        result["explanation"] = "DXC reflection did not provide a valid compute thread-group size.";
+    } else {
+        const auto& reflected = *info.reflection->thread_group_size;
+        const ComputeDimensions thread_group{.x = reflected.x, .y = reflected.y, .z = reflected.z};
+        const auto dispatch = requested_dispatch.value_or(thread_group);
+        const ComputeDimensions groups{.x = ceil_divide(dispatch.x, thread_group.x),
+                                       .y = ceil_divide(dispatch.y, thread_group.y),
+                                       .z = ceil_divide(dispatch.z, thread_group.z)};
+        const auto threads_per_group = dimension_product(thread_group, "threadGroupSize");
+        const auto logical_threads = dimension_product(dispatch, "dispatchDimensions");
+        const auto group_total = dimension_product(groups, "groupCount");
+        const auto launched_threads =
+            checked_multiply(group_total, threads_per_group, "launchedThreads");
+
+        result["applicable"] = true;
+        result["explanation"] =
+            "Computed from the effective configured entry point and DXC reflection.";
+        result["threadGroupSize"] = compute_dimensions_json(thread_group);
+        result["dispatchDimensions"] = compute_dimensions_json(dispatch);
+        result["groupCount"] = compute_dimensions_json(groups);
+        result["launchedThreads"] = launched_threads;
+        result["inactiveThreads"] = launched_threads - logical_threads;
+        result["systemValues"] = Json::array(
+            {Json{{"semantic", "SV_DispatchThreadID"},
+                  {"name", "dispatchThreadId"},
+                  {"formula", "groupId * numthreads + groupThreadId"},
+                  {"description", "Global dispatch-space thread coordinate."}},
+             Json{{"semantic", "SV_GroupID"},
+                  {"name", "groupId"},
+                  {"formula", "dispatch group coordinate"},
+                  {"description", "Zero-based thread-group coordinate."}},
+             Json{{"semantic", "SV_GroupThreadID"},
+                  {"name", "groupThreadId"},
+                  {"formula", "thread coordinate within [0, numthreads)"},
+                  {"description", "Zero-based coordinate within the current group."}},
+             Json{{"semantic", "SV_GroupIndex"},
+                  {"name", "groupIndex"},
+                  {"formula", "groupThreadId.x + groupThreadId.y * numthreads.x + "
+                              "groupThreadId.z * numthreads.x * numthreads.y"},
+                  {"description", "Flattened zero-based index within the current group."}}});
+        result["barriers"] =
+            Json{{"available", true},
+                 {"unavailableReason", ""},
+                 {"instructionCount", info.reflection->barrier_instruction_count},
+                 {"locationsAvailable", false},
+                 {"locationsUnavailableReason",
+                  "DXC reflection reports the compiled barrier instruction count but does not "
+                  "expose reliable source locations for those instructions; locations are never "
+                  "guessed from source text."},
+                 {"locations", Json::array()}};
+
+        if (hardware.has_value()) {
+            std::uint64_t resident_groups{};
+            Json limiting_factors = Json::array();
+            Json assumptions = Json::array();
+            if (threads_per_group > hardware->max_threads_per_group) {
+                limiting_factors.push_back(
+                    "The reflected thread group exceeds hardware maxThreadsPerGroup.");
+            } else {
+                const auto groups_by_threads =
+                    static_cast<std::uint64_t>(hardware->max_threads_per_compute_unit) /
+                    threads_per_group;
+                resident_groups =
+                    (std::min)(groups_by_threads,
+                               static_cast<std::uint64_t>(hardware->max_groups_per_compute_unit));
+                if (resident_groups == groups_by_threads) {
+                    limiting_factors.push_back("Maximum threads per compute unit.");
+                }
+                if (resident_groups == hardware->max_groups_per_compute_unit) {
+                    limiting_factors.push_back("Maximum groups per compute unit.");
+                }
+                if (resident_groups == 0) {
+                    limiting_factors.push_back(
+                        "One reflected thread group exceeds maxThreadsPerComputeUnit.");
+                }
+            }
+            assumptions.push_back(
+                "Register usage and register-file limits are unavailable and are not modeled.");
+            assumptions.push_back(
+                "Compiler-authoritative groupshared usage is unavailable, so the supplied " +
+                std::to_string(hardware->shared_memory_bytes_per_compute_unit) +
+                "-byte shared-memory limit is not applied.");
+            assumptions.push_back(
+                "Wave allocation uses the supplied hardware waveSize; no compiler wave-size "
+                "requirement is assumed.");
+            const auto resident_threads =
+                checked_multiply(resident_groups, threads_per_group, "estimatedResidentThreads");
+            const auto waves_per_group = threads_per_group / hardware->wave_size +
+                                         (threads_per_group % hardware->wave_size == 0 ? 0U : 1U);
+            const auto resident_waves =
+                checked_multiply(resident_groups, waves_per_group, "estimatedResidentWaves");
+            result["occupancy"] = Json{{"hardwareProfile", hardware->name},
+                                       {"estimatedResidentGroups", resident_groups},
+                                       {"estimatedResidentThreads", resident_threads},
+                                       {"estimatedResidentWaves", resident_waves},
+                                       {"limitingFactors", std::move(limiting_factors)},
+                                       {"assumptions", std::move(assumptions)}};
+        }
+    }
+
+    context.cancellation.throw_if_cancellation_requested();
+    if (analysis_.content_generation(root_identity, snapshot.version(), context.cancellation) !=
+        generation) {
+        throw HandlerError{json_rpc::content_modified_code,
+                           "hlsl/computeVisualization was superseded"};
+    }
+    return result;
 }
 
 Json Server::signature_help(const std::optional<Json>& params,

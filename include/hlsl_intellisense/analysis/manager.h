@@ -172,6 +172,10 @@ class Manager final {
     [[nodiscard]] dxc::CompilationInfo
     compilation_info(std::string root_identity, std::int64_t version, std::string path,
                      const json_rpc::CancellationToken& cancellation);
+    [[nodiscard]] WithGeneration<dxc::CompilationInfo>
+    compilation_info_with_generation(std::string root_identity, std::int64_t version,
+                                     std::string path,
+                                     const json_rpc::CancellationToken& cancellation);
     [[nodiscard]] std::vector<dxc::Signature>
     signatures(std::string root_identity, std::int64_t version, std::string path,
                std::uint32_t line, std::uint32_t column,

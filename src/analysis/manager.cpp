@@ -655,6 +655,20 @@ dxc::CompilationInfo Manager::compilation_info(std::string root_identity, std::i
         });
 }
 
+WithGeneration<dxc::CompilationInfo>
+Manager::compilation_info_with_generation(std::string root_identity, std::int64_t version,
+                                          std::string path,
+                                          const json_rpc::CancellationToken& cancellation) {
+    return implementation_->query<WithGeneration<dxc::CompilationInfo>>(
+        std::move(root_identity), version, cancellation,
+        [requested_path =
+             std::move(path)](Impl::Entry& entry) -> WithGeneration<dxc::CompilationInfo> {
+            static_cast<void>(requested_path);
+            return {.value = entry.translation_unit.compilation_info(),
+                    .generation = entry.generation};
+        });
+}
+
 std::vector<dxc::Signature> Manager::signatures(std::string root_identity, std::int64_t version,
                                                 std::string path, std::uint32_t line,
                                                 std::uint32_t column,
