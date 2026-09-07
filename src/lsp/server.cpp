@@ -3965,6 +3965,7 @@ Json Server::compute_visualization(const std::optional<Json>& params,
                    "successfully compiled to reflected DXIL."},
                   {"instructionCount", nullptr},
                   {"locationsAvailable", false},
+                  {"locationsTruncated", false},
                   {"locationsUnavailableReason",
                    "Barrier source locations are not exposed by the current DXC reflection and "
                    "cursor interfaces."},
@@ -3976,6 +3977,9 @@ Json Server::compute_visualization(const std::optional<Json>& params,
                    "current DXC reflection, cursor, type, or layout interfaces; source text is "
                    "never parsed or guessed."},
                   {"totalBytes", nullptr},
+                  {"totalBytesUnavailableReason",
+                   "Group-shared metadata is unavailable until a compute shader is analyzed."},
+                  {"truncated", false},
                   {"declarations", Json::array()}}},
                 {"waveSize",
                  {{"known", false},
@@ -4051,11 +4055,80 @@ Json Server::compute_visualization(const std::optional<Json>& params,
                  {"unavailableReason", ""},
                  {"instructionCount", info.reflection->barrier_instruction_count},
                  {"locationsAvailable", false},
+                 {"locationsTruncated", false},
                  {"locationsUnavailableReason",
                   "DXC reflection reports the compiled barrier instruction count but does not "
                   "expose reliable source locations for those instructions; locations are never "
                   "guessed from source text."},
                  {"locations", Json::array()}};
+
+        const auto text_for_path = [this](const std::string& path) {
+            const auto target_uri = workspace::DocumentUri::from_path(path).uri();
+            {
+                std::scoped_lock state_lock{state_mutex_};
+                if (documents_.contains(target_uri)) {
+                    return documents_.snapshot(target_uri).text();
+                }
+            }
+            std::ifstream stream{path, std::ios::binary};
+            return std::string{std::istreambuf_iterator<char>{stream},
+                               std::istreambuf_iterator<char>{}};
+        };
+        if (info.compute_metadata.has_value()) {
+            const auto& metadata = *info.compute_metadata;
+            Json locations = Json::array();
+            for (const auto& location : metadata.barrier_locations) {
+                const auto text = text_for_path(location.location.path);
+                locations.push_back(
+                    {{"label", location.label},
+                     {"uri", workspace::DocumentUri::from_path(location.location.path).uri()},
+                     {"range", lsp_range(text.empty() ? workspace::Range{}
+                                                      : offset_range(text, location.start_offset,
+                                                                     location.end_offset))}});
+            }
+            result["barriers"]["locationsAvailable"] = metadata.barrier_locations_available;
+            result["barriers"]["locationsTruncated"] = metadata.barrier_locations_truncated;
+            result["barriers"]["locationsUnavailableReason"] =
+                metadata.barrier_locations_unavailable_reason;
+            result["barriers"]["locations"] = std::move(locations);
+
+            Json declarations = Json::array();
+            for (const auto& declaration : metadata.group_shared_declarations) {
+                const auto text = text_for_path(declaration.location.path);
+                declarations.push_back(
+                    {{"name", declaration.name},
+                     {"type", declaration.type},
+                     {"declaration", declaration.declaration},
+                     {"bytes",
+                      declaration.bytes.has_value() ? Json(*declaration.bytes) : Json(nullptr)},
+                     {"sizeUnavailableReason", declaration.size_unavailable_reason},
+                     {"uri", workspace::DocumentUri::from_path(declaration.location.path).uri()},
+                     {"range", lsp_range(text.empty() ? workspace::Range{}
+                                                      : offset_range(text, declaration.start_offset,
+                                                                     declaration.end_offset))}});
+            }
+            result["groupShared"] = Json{
+                {"available", metadata.group_shared_available},
+                {"unavailableReason", metadata.group_shared_unavailable_reason},
+                {"totalBytes", metadata.group_shared_total_bytes.has_value()
+                                   ? Json(checked_json_integer(*metadata.group_shared_total_bytes,
+                                                               "groupShared.totalBytes"))
+                                   : Json(nullptr)},
+                {"totalBytesUnavailableReason",
+                 metadata.group_shared_total_bytes_unavailable_reason},
+                {"truncated", metadata.group_shared_truncated},
+                {"declarations", std::move(declarations)}};
+            result["waveSize"] =
+                Json{{"known", metadata.wave_size.known},
+                     {"min", metadata.wave_size.min.has_value() ? Json(*metadata.wave_size.min)
+                                                                : Json(nullptr)},
+                     {"max", metadata.wave_size.max.has_value() ? Json(*metadata.wave_size.max)
+                                                                : Json(nullptr)},
+                     {"preferred", metadata.wave_size.preferred.has_value()
+                                       ? Json(*metadata.wave_size.preferred)
+                                       : Json(nullptr)},
+                     {"explanation", metadata.wave_size.explanation}};
+        }
 
         if (hardware.has_value()) {
             std::uint64_t resident_groups{};
@@ -4065,18 +4138,28 @@ Json Server::compute_visualization(const std::optional<Json>& params,
                 limiting_factors.push_back(
                     "The reflected thread group exceeds hardware maxThreadsPerGroup.");
             } else {
-                const auto waves_per_group = threads_per_group / hardware->wave_size +
-                                             (threads_per_group % hardware->wave_size == 0 ? 0U
-                                                                                          : 1U);
-                const auto allocated_lanes_per_group =
-                    checked_multiply(waves_per_group, hardware->wave_size,
-                                     "allocatedWaveLanesPerGroup");
+                const auto waves_per_group =
+                    threads_per_group / hardware->wave_size +
+                    (threads_per_group % hardware->wave_size == 0 ? 0U : 1U);
+                const auto allocated_lanes_per_group = checked_multiply(
+                    waves_per_group, hardware->wave_size, "allocatedWaveLanesPerGroup");
                 const auto groups_by_threads =
                     static_cast<std::uint64_t>(hardware->max_threads_per_compute_unit) /
                     allocated_lanes_per_group;
                 resident_groups =
                     (std::min)(groups_by_threads,
                                static_cast<std::uint64_t>(hardware->max_groups_per_compute_unit));
+                if (info.compute_metadata.has_value() &&
+                    info.compute_metadata->group_shared_total_bytes.has_value() &&
+                    *info.compute_metadata->group_shared_total_bytes > 0) {
+                    const auto groups_by_shared =
+                        static_cast<std::uint64_t>(hardware->shared_memory_bytes_per_compute_unit) /
+                        *info.compute_metadata->group_shared_total_bytes;
+                    resident_groups = (std::min)(resident_groups, groups_by_shared);
+                    if (resident_groups == groups_by_shared) {
+                        limiting_factors.push_back("Group-shared memory per compute unit.");
+                    }
+                }
                 if (resident_groups == groups_by_threads) {
                     limiting_factors.push_back("Maximum threads per compute unit.");
                 }
@@ -4090,13 +4173,21 @@ Json Server::compute_visualization(const std::optional<Json>& params,
             }
             assumptions.push_back(
                 "Register usage and register-file limits are unavailable and are not modeled.");
-            assumptions.push_back(
-                "Compiler-authoritative groupshared usage is unavailable, so the supplied " +
-                std::to_string(hardware->shared_memory_bytes_per_compute_unit) +
-                "-byte shared-memory limit is not applied.");
-            assumptions.push_back(
-                "Wave allocation uses the supplied hardware waveSize; no compiler wave-size "
-                "requirement is assumed.");
+            if (!info.compute_metadata.has_value() ||
+                !info.compute_metadata->group_shared_total_bytes.has_value()) {
+                assumptions.push_back(
+                    "Not every compiler-formatted groupshared declaration has a reflected size, "
+                    "so the supplied shared-memory limit is not applied.");
+            }
+            if (info.compute_metadata.has_value() && info.compute_metadata->wave_size.known) {
+                assumptions.push_back(
+                    "Wave allocation uses the supplied hardware waveSize; the shader's "
+                    "compiler-formatted WaveSize requirement is reported separately.");
+            } else {
+                assumptions.push_back(
+                    "Wave allocation uses the supplied hardware waveSize; no compiler WaveSize "
+                    "requirement was found.");
+            }
             const auto resident_threads =
                 checked_multiply(resident_groups, threads_per_group, "estimatedResidentThreads");
             const auto waves_per_group = threads_per_group / hardware->wave_size +

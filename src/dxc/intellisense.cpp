@@ -12,6 +12,7 @@
 #include <dxcisense.h>
 
 #include <algorithm>
+#include <charconv>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -878,6 +879,86 @@ void attach_resource_source_locations(CompilationInfo& info,
     return std::string{TaskString{spelling}.view()};
 }
 
+[[nodiscard]] bool is_barrier_intrinsic(std::string_view name) {
+    static const std::unordered_set<std::string_view> names{
+        "AllMemoryBarrier",    "AllMemoryBarrierWithGroupSync",
+        "DeviceMemoryBarrier", "DeviceMemoryBarrierWithGroupSync",
+        "GroupMemoryBarrier",  "GroupMemoryBarrierWithGroupSync",
+    };
+    return names.contains(name);
+}
+
+[[nodiscard]] std::optional<std::uint32_t> exact_unsigned(std::string_view text) {
+    const auto normalized = trim(text);
+    if (normalized.empty()) {
+        return std::nullopt;
+    }
+    std::uint32_t value{};
+    const auto [end, error] =
+        std::from_chars(normalized.data(), normalized.data() + normalized.size(), value);
+    if (error != std::errc{} || end != normalized.data() + normalized.size() || value == 0) {
+        return std::nullopt;
+    }
+    return value;
+}
+
+[[nodiscard]] ComputeWaveSize wave_size_from_formatted_entry(std::string_view declaration) {
+    ComputeWaveSize result;
+    constexpr std::string_view prefix = "[wavesize(";
+    const auto begin = declaration.find(prefix);
+    if (begin == std::string_view::npos) {
+        result.explanation =
+            "The configured entry point's compiler-formatted declaration has no WaveSize "
+            "attribute.";
+        return result;
+    }
+    const auto arguments_begin = begin + prefix.size();
+    const auto arguments_end = declaration.find(")]", arguments_begin);
+    if (arguments_end == std::string_view::npos ||
+        declaration.find(prefix, arguments_end + 2) != std::string_view::npos) {
+        result.explanation =
+            "DXC's compiler-formatted WaveSize metadata was present but not recognized.";
+        return result;
+    }
+
+    std::vector<std::uint32_t> values;
+    auto remaining = declaration.substr(arguments_begin, arguments_end - arguments_begin);
+    while (true) {
+        const auto comma = remaining.find(',');
+        const auto value = exact_unsigned(remaining.substr(0, comma));
+        if (!value.has_value()) {
+            result.explanation =
+                "DXC's compiler-formatted WaveSize metadata contained an unsupported argument.";
+            return result;
+        }
+        values.push_back(*value);
+        if (comma == std::string_view::npos) {
+            break;
+        }
+        remaining.remove_prefix(comma + 1);
+        if (values.size() >= 3) {
+            result.explanation =
+                "DXC's compiler-formatted WaveSize metadata contained too many arguments.";
+            return result;
+        }
+    }
+    if (values.empty() || values.size() > 3 || (values.size() >= 2 && values[0] > values[1]) ||
+        (values.size() == 3 && (values[2] < values[0] || values[2] > values[1]))) {
+        result.explanation =
+            "DXC's compiler-formatted WaveSize metadata contained an unsupported range.";
+        return result;
+    }
+    result.known = true;
+    result.min = values[0];
+    result.max = values.size() == 1 ? values[0] : values[1];
+    if (values.size() == 3) {
+        result.preferred = values[2];
+    }
+    result.explanation =
+        "Extracted from DXC's compiler-formatted declaration for the configured entry point.";
+    return result;
+}
+
 [[nodiscard]] std::string inferred_cursor_type(IDxcCursor& declaration) {
     auto declared = cursor_type(declaration);
     if (!declared.empty() && declared.find("auto") == std::string::npos &&
@@ -1634,6 +1715,17 @@ class BodyScanner final {
     }
 
     [[nodiscard]] bool access_truncated() const noexcept { return access_truncated_; }
+    [[nodiscard]] std::vector<ComputeBarrierLocation> barrier_locations() const {
+        auto result = barrier_locations_;
+        std::ranges::sort(result, [](const auto& left, const auto& right) {
+            return std::tie(left.location.path, left.start_offset) <
+                   std::tie(right.location.path, right.start_offset);
+        });
+        return result;
+    }
+    [[nodiscard]] bool barrier_locations_truncated() const noexcept {
+        return barrier_locations_truncated_;
+    }
 
   private:
     void checkpoint() {
@@ -1724,6 +1816,39 @@ class BodyScanner final {
         outgoing_calls_[existing->second].call_sites.push_back(std::move(call_site));
     }
 
+    void record_barrier(IDxcCursor& call_expr, IDxcCursor& callee) {
+        const auto name = cursor_spelling(callee);
+        if (!is_barrier_intrinsic(name)) {
+            return;
+        }
+        ComPtr<IDxcSourceLocation> callee_location;
+        check(callee.GetLocation(callee_location.put()), "GetLocation");
+        if (callee_location.get() != nullptr) {
+            BOOL is_null{};
+            check(callee_location->IsNull(&is_null), "IsNull");
+            if (is_null == FALSE && !make_source_location(*callee_location.get()).path.empty()) {
+                return;
+            }
+        }
+        if (barrier_locations_.size() >= limits_.max_barrier_locations) {
+            barrier_locations_truncated_ = true;
+            return;
+        }
+        ComPtr<IDxcSourceLocation> location;
+        check(call_expr.GetLocation(location.put()), "GetLocation");
+        ComPtr<IDxcSourceRange> extent;
+        check(call_expr.GetExtent(extent.put()), "GetExtent");
+        unsigned start{};
+        unsigned end{};
+        check(extent->GetOffsets(&start, &end), "GetOffsets");
+        barrier_locations_.push_back(ComputeBarrierLocation{
+            .label = name,
+            .location = make_source_location(*location.get()),
+            .start_offset = start,
+            .end_offset = end,
+        });
+    }
+
     void walk(IDxcCursor& cursor, DxcCursorKind parent_kind, BareContext context,
               std::uint32_t depth, std::string_view suppress_key = {}) {
         if (depth > 4096) {
@@ -1767,6 +1892,7 @@ class BodyScanner final {
 
             std::string resource_suppress_key;
             if (!is_null_cursor(callee.get())) {
+                record_barrier(cursor, *callee.get());
                 record_call(cursor, *callee.get());
                 if (cursor_kind(*callee.get()) == DxcCursor_CXXMethod) {
                     const auto callee_name = cursor_spelling(*callee.get());
@@ -1843,6 +1969,8 @@ class BodyScanner final {
     std::function<void()> cancellation_checkpoint_;
     std::unordered_map<std::string, GlobalAccess> accesses_by_key_;
     bool access_truncated_{};
+    std::vector<ComputeBarrierLocation> barrier_locations_;
+    bool barrier_locations_truncated_{};
     std::unordered_map<std::string, std::size_t> outgoing_index_;
     std::vector<OutgoingCall> outgoing_calls_;
     std::uint64_t node_count_{};
@@ -2638,7 +2766,8 @@ auto TranslationUnit::memory_layout_at(std::string_view path, std::uint32_t line
                                             implementation_->root_path, probe_target);
 }
 
-auto TranslationUnit::compilation_info() const -> CompilationInfo {
+auto TranslationUnit::compilation_info(const ComputeMetadataLimits& limits) const
+    -> CompilationInfo {
     auto info = detail::compilation_info_from_compile(
         implementation_->owner->create_instance, implementation_->sources,
         implementation_->full_arguments, implementation_->root_path);
@@ -2647,6 +2776,118 @@ auto TranslationUnit::compilation_info() const -> CompilationInfo {
     // snapshot) already used for hover/go-to-definition/document symbols,
     // rather than re-parsing or inferring anything from raw text.
     attach_resource_source_locations(info, symbols());
+    if (info.stage != "compute") {
+        return info;
+    }
+
+    ComputeCompilerMetadata metadata;
+    EntryPointDataFlowLimits flow_limits;
+    flow_limits.max_barrier_locations = limits.max_barrier_locations;
+    const auto flow = entry_point_data_flow(flow_limits);
+    metadata.barrier_locations_available = flow.found;
+    metadata.barrier_locations_truncated = flow.barrier_locations_truncated ||
+                                           flow.functions_visited_truncated ||
+                                           flow.definitions_truncated;
+    metadata.barrier_locations = flow.barrier_locations;
+    if (!flow.found) {
+        metadata.barrier_locations_unavailable_reason = flow.explanation;
+    } else if (flow.definitions_truncated) {
+        metadata.barrier_locations_unavailable_reason =
+            "Entry-point definition collection was truncated, so barrier locations may be "
+            "incomplete.";
+    } else if (flow.functions_visited_truncated) {
+        metadata.barrier_locations_unavailable_reason =
+            "Reachable-function traversal was truncated, so barrier locations may be incomplete.";
+    } else if (flow.barrier_locations_truncated) {
+        metadata.barrier_locations_unavailable_reason =
+            "Barrier locations were truncated at the compiler-cursor result limit.";
+    }
+    if (flow.entry_point.has_value()) {
+        metadata.wave_size = wave_size_from_formatted_entry(flow.entry_point->signature);
+    } else {
+        metadata.wave_size.explanation = flow.explanation.empty()
+                                             ? "The configured entry point was not resolved."
+                                             : flow.explanation;
+    }
+
+    ComPtr<IDxcCursor> root;
+    check(implementation_->translation_unit->GetCursor(root.put()), "GetCursor");
+    std::vector<ComPtr<IDxcCursor>> pending;
+    pending.push_back(adopt_addref(root.get()));
+    bool all_sizes_known = true;
+    std::uint64_t total_bytes = 0;
+    while (!pending.empty() && !metadata.group_shared_truncated) {
+        auto parent = std::move(pending.back());
+        pending.pop_back();
+        for_each_child(*parent.get(), [&](IDxcCursor& child) {
+            if (metadata.group_shared_truncated) {
+                return;
+            }
+            const auto kind = cursor_kind(child);
+            if (kind == DxcCursor_Namespace) {
+                pending.push_back(adopt_addref(&child));
+                return;
+            }
+            if (kind != DxcCursor_VarDecl || !is_global_variable_cursor(child)) {
+                return;
+            }
+            const auto declaration = trim(cursor_formatted_name(child));
+            if (!declaration.starts_with("groupshared ")) {
+                return;
+            }
+            if (metadata.group_shared_declarations.size() >= limits.max_group_shared_declarations) {
+                metadata.group_shared_truncated = true;
+                all_sizes_known = false;
+                return;
+            }
+            ComPtr<IDxcSourceLocation> location;
+            check(child.GetLocation(location.put()), "GetLocation");
+            ComPtr<IDxcSourceRange> extent;
+            check(child.GetExtent(extent.put()), "GetExtent");
+            unsigned start{};
+            unsigned end{};
+            check(extent->GetOffsets(&start, &end), "GetOffsets");
+            const auto name = cursor_spelling(child);
+            const auto size = detail::group_shared_size_from_probe(
+                implementation_->owner->create_instance, implementation_->sources,
+                implementation_->arguments, implementation_->root_path, declaration, name);
+            ComputeGroupSharedDeclaration item{
+                .name = name,
+                .type = cursor_type(child),
+                .declaration = declaration,
+                .location = make_source_location(*location.get()),
+                .start_offset = start,
+                .end_offset = end,
+                .bytes = size.bytes,
+                .size_unavailable_reason = size.unavailable_reason,
+            };
+            if (item.bytes.has_value() &&
+                *item.bytes <= (std::numeric_limits<std::uint64_t>::max)() - total_bytes) {
+                total_bytes += *item.bytes;
+            } else {
+                all_sizes_known = false;
+            }
+            metadata.group_shared_declarations.push_back(std::move(item));
+        });
+    }
+    metadata.group_shared_available = true;
+    if (metadata.group_shared_truncated) {
+        metadata.group_shared_unavailable_reason =
+            "Group-shared declarations were truncated at the compiler-cursor result limit.";
+    }
+    std::ranges::sort(metadata.group_shared_declarations, [](const auto& left, const auto& right) {
+        return std::tie(left.location.path, left.start_offset) <
+               std::tie(right.location.path, right.start_offset);
+    });
+    if (all_sizes_known) {
+        metadata.group_shared_total_bytes = total_bytes;
+    } else {
+        metadata.group_shared_total_bytes_unavailable_reason =
+            metadata.group_shared_truncated
+                ? "The declaration list was truncated, so an exact total cannot be computed."
+                : "One or more compiler-formatted declarations could not be reflected exactly.";
+    }
+    info.compute_metadata = std::move(metadata);
     return info;
 }
 
@@ -3605,6 +3846,7 @@ auto TranslationUnit::entry_point_data_flow(
     }
 
     result.global_accesses = scanner.global_accesses();
+    result.barrier_locations = scanner.barrier_locations();
     bool unused_declarations_truncated = false;
     result.unused_declarations = unused_top_level_declarations(
         *implementation_->translation_unit.get(), *root.get(), implementation_->sources,
@@ -3612,6 +3854,7 @@ auto TranslationUnit::entry_point_data_flow(
     result.functions_visited_truncated = functions_visited_truncated;
     result.definitions_truncated = definitions_truncated;
     result.global_accesses_truncated = scanner.access_truncated();
+    result.barrier_locations_truncated = scanner.barrier_locations_truncated();
     result.unused_declarations_truncated = unused_declarations_truncated;
     result.truncated = result.functions_visited_truncated || result.definitions_truncated ||
                        result.global_accesses_truncated || result.unused_declarations_truncated;

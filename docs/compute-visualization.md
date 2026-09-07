@@ -77,22 +77,47 @@ superseded result rather than returning mixed-generation data.
     "available": true,
     "unavailableReason": "",
     "instructionCount": 1,
-    "locationsAvailable": false,
-    "locationsUnavailableReason": "DXC reflection reports the compiled barrier instruction count but does not expose reliable source locations for those instructions; locations are never guessed from source text.",
-    "locations": []
+    "locationsAvailable": true,
+    "locationsTruncated": false,
+    "locationsUnavailableReason": "",
+    "locations": [
+      {
+        "label": "GroupMemoryBarrierWithGroupSync",
+        "uri": "file:///C:/shaders/compute.hlsl",
+        "range": {
+          "start": { "line": 12, "character": 4 },
+          "end": { "line": 12, "character": 37 }
+        }
+      }
+    ]
   },
   "groupShared": {
-    "available": false,
-    "unavailableReason": "Compiler-authoritative groupshared declaration sizes are not exposed by the current DXC reflection, cursor, type, or layout interfaces; source text is never parsed or guessed.",
-    "totalBytes": null,
-    "declarations": []
+    "available": true,
+    "unavailableReason": "",
+    "totalBytes": 128,
+    "totalBytesUnavailableReason": "",
+    "truncated": false,
+    "declarations": [
+      {
+        "name": "Tile",
+        "type": "uint [32]",
+        "declaration": "groupshared uint Tile[32]",
+        "bytes": 128,
+        "sizeUnavailableReason": "",
+        "uri": "file:///C:/shaders/compute.hlsl",
+        "range": {
+          "start": { "line": 1, "character": 0 },
+          "end": { "line": 1, "character": 25 }
+        }
+      }
+    ]
   },
   "waveSize": {
-    "known": false,
-    "min": null,
-    "max": null,
-    "preferred": null,
-    "explanation": "The current DXC shader reflection path does not expose compiler-authoritative wave-size requirements."
+    "known": true,
+    "min": 32,
+    "max": 64,
+    "preferred": 64,
+    "explanation": "Extracted from DXC's compiler-formatted declaration for the configured entry point."
   },
   "occupancy": null
 }
@@ -121,33 +146,46 @@ source parameters.
 
 - `barriers.instructionCount` is
   `D3D12_SHADER_DESC::cBarrierInstructions`. `barriers.available` describes
-  availability of that compiler count. Source locations have their own
-  `locationsAvailable` and `locationsUnavailableReason`; current DXC
-  reflection/cursor APIs do not provide a safe instruction-to-source mapping,
-  so the server returns no guessed locations. These are independent signals:
-  `instructionCount: 0` authoritatively means the compiled shader contains no
-  barrier instructions even when `locationsAvailable` is false. An empty
-  `locations` array alone must never be interpreted as a zero barrier count.
-- Current DXC cursor/type/reflection interfaces do not safely expose complete
-  `groupshared` declarations and their layout. `groupShared.available` is
-  therefore false, `totalBytes` is null, and declarations are empty. The
-  schema reserves declaration names, types, optional sizes, URIs, and ranges
-  for a future compiler-backed implementation.
-- Current shader reflection does not expose authoritative wave-size
-  requirements. `waveSize.known` remains false with an explanation. A
-  hardware profile's `waveSize` is an occupancy assumption, not a shader
-  requirement.
+  availability of that compiler count. Locations are independently collected
+  from call-expression extents in functions reachable from the configured
+  entry point. A call is accepted only when DXC resolves its callee to one of
+  the six HLSL barrier intrinsics and that callee has no user source location;
+  a user function reusing an intrinsic spelling is not classified as a
+  barrier. `locationsTruncated` reports the dedicated 256-location bound.
+  The compiled instruction count and cursor locations remain independent:
+  optimization may make them differ, and an empty location array is not a
+  substitute for `instructionCount`.
+- `groupShared.declarations` enumerates global `VarDecl` cursors whose
+  DXC-formatted declaration begins with normalized `groupshared `. Names,
+  compiler type spellings, declarations, URIs, and source extents all come
+  from DXC cursors. Each byte count is obtained by converting that
+  compiler-formatted declaration into a member of a collision-resistant
+  synthetic wrapper struct and compiling the existing StructuredBuffer
+  reflection probe. No raw HLSL source is parsed. An unsupported or ambiguous
+  compiler formatting leaves that declaration's `bytes` null and explains
+  why in `sizeUnavailableReason`; `totalBytes` is null unless every retained
+  declaration has an exact size, with `totalBytesUnavailableReason` explaining
+  why. `truncated` reports the 256-declaration bound.
+- `waveSize` is read only from the configured entry point cursor's
+  compiler-formatted declaration. Pinned DXC normalizes the attribute to
+  `[wavesize(...)]`; one, two, and three exact positive unsigned arguments
+  represent fixed, min/max, and min/max/preferred forms respectively.
+  Absent or unrecognized compiler metadata produces `known: false`. Raw
+  source text is never scanned. A hardware profile's `waveSize` remains an
+  occupancy assumption, not the shader requirement.
 - Without `hardwareProfile`, `occupancy` is always null. The server never
   guesses a device.
 
 When a hardware profile is supplied, occupancy is explicitly an estimate.
-Resident groups are bounded by `maxGroupsPerComputeUnit` and
+Resident groups are bounded by `maxGroupsPerComputeUnit`,
 `maxThreadsPerComputeUnit / allocatedWaveLanesPerGroup`, where
 `allocatedWaveLanesPerGroup = ceil(threadsPerGroup / waveSize) * waveSize`;
-partial waves cannot be shared between groups. A group larger than
+and, when `groupShared.totalBytes` is known and non-zero,
+`sharedMemoryBytesPerComputeUnit / groupShared.totalBytes`. Partial waves
+cannot be shared between groups. A group larger than
 `maxThreadsPerGroup` yields zero resident groups. Resident active threads and
 allocated waves are derived with checked arithmetic. The result always lists
 limiting factors and assumptions. Register pressure is not available. Because
-compiler-authoritative groupshared usage is currently unavailable,
-`sharedMemoryBytesPerComputeUnit` is reported as an unapplied assumption and
-does not fabricate a shared-memory occupancy limit.
+the shared-memory limit is applied only when every declaration size is known,
+an incomplete or unsupported declaration set is reported as an unapplied
+assumption rather than fabricating a limit.

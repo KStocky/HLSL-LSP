@@ -6118,10 +6118,23 @@ TEST_CASE("hlsl/computeVisualization uses the configured compute variant and DXC
     CHECK(result["systemValues"].size() == 4);
     CHECK(result["barriers"]["available"] == true);
     CHECK(result["barriers"]["instructionCount"] == 1);
-    CHECK(result["barriers"]["locationsAvailable"] == false);
-    CHECK_FALSE(result["barriers"]["locationsUnavailableReason"].get<std::string>().empty());
-    CHECK(result["groupShared"]["available"] == false);
-    CHECK_FALSE(result["groupShared"]["unavailableReason"].get<std::string>().empty());
+    CHECK(result["barriers"]["locationsAvailable"] == true);
+    CHECK(result["barriers"]["locationsTruncated"] == false);
+    REQUIRE(result["barriers"]["locations"].size() == 1);
+    CHECK(result["barriers"]["locations"][0]["label"] == "GroupMemoryBarrierWithGroupSync");
+    CHECK(result["barriers"]["locations"][0]["uri"] == document.uri());
+    CHECK(result["barriers"]["locations"][0]["range"]["start"] ==
+          Json{{"line", 6}, {"character", 4}});
+    CHECK(result["groupShared"]["available"] == true);
+    CHECK(result["groupShared"]["truncated"] == false);
+    CHECK(result["groupShared"]["totalBytes"] == 128);
+    REQUIRE(result["groupShared"]["declarations"].size() == 1);
+    CHECK(result["groupShared"]["declarations"][0]["name"] == "Tile");
+    CHECK(result["groupShared"]["declarations"][0]["type"] == "uint [32]");
+    CHECK(result["groupShared"]["declarations"][0]["declaration"] == "groupshared uint Tile[32]");
+    CHECK(result["groupShared"]["declarations"][0]["bytes"] == 128);
+    CHECK(result["groupShared"]["declarations"][0]["range"]["start"] ==
+          Json{{"line", 1}, {"character", 0}});
     CHECK(result["waveSize"]["known"] == false);
     CHECK(result["occupancy"].is_null());
 
@@ -6133,16 +6146,22 @@ TEST_CASE("hlsl/computeVisualization uses the configured compute variant and DXC
     const auto barrier = without_barrier.find(barrier_statement);
     REQUIRE(barrier != std::string::npos);
     without_barrier.erase(barrier, barrier_statement.size());
+    const auto tile_count = without_barrier.find("Tile[32]");
+    REQUIRE(tile_count != std::string::npos);
+    without_barrier.replace(tile_count, std::string_view{"Tile[32]"}.size(), "Tile[16]");
     static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
         .method = "textDocument/didChange",
         .params =
             Json{{"textDocument", {{"uri", document.uri()}, {"version", 2}}},
                  {"contentChanges", Json::array({Json{{"text", std::move(without_barrier)}}})}}}));
+    server.wait_for_analysis();
     const auto no_barriers = compute_visualization_result(server, 4, document.uri());
     CHECK(no_barriers["barriers"]["available"] == true);
     CHECK(no_barriers["barriers"]["instructionCount"] == 0);
-    CHECK(no_barriers["barriers"]["locationsAvailable"] == false);
+    CHECK(no_barriers["barriers"]["locationsAvailable"] == true);
     CHECK(no_barriers["barriers"]["locations"].empty());
+    CHECK(no_barriers["groupShared"]["totalBytes"] == 64);
+    CHECK(no_barriers["groupShared"]["declarations"][0]["type"] == "uint [16]");
 }
 
 TEST_CASE("hlsl/computeVisualization computes exact and edge dispatch geometry and occupancy",
@@ -6195,24 +6214,72 @@ TEST_CASE("hlsl/computeVisualization computes exact and edge dispatch geometry a
     CHECK(edge["occupancy"]["estimatedResidentThreads"] == 256);
     CHECK(edge["occupancy"]["estimatedResidentWaves"] == 8);
     CHECK_FALSE(edge["occupancy"]["limitingFactors"].empty());
-    CHECK(edge["occupancy"]["assumptions"].size() >= 3);
+    CHECK(edge["occupancy"]["assumptions"].size() >= 2);
+
+    const auto shared_limited =
+        compute_visualization_result(server, 4, document.uri(),
+                                     Json{{"hardwareProfile",
+                                           {{"name", "Shared-memory limited GPU"},
+                                            {"waveSize", 32},
+                                            {"maxThreadsPerGroup", 1024},
+                                            {"maxThreadsPerComputeUnit", 2048},
+                                            {"maxGroupsPerComputeUnit", 8},
+                                            {"sharedMemoryBytesPerComputeUnit", 256}}}});
+    CHECK(shared_limited["occupancy"]["estimatedResidentGroups"] == 2);
+    CHECK(std::ranges::find(shared_limited["occupancy"]["limitingFactors"],
+                            "Group-shared memory per compute unit.") !=
+          shared_limited["occupancy"]["limitingFactors"].end());
 
     // Partial waves cannot be shared by independent thread groups. A
     // 32-thread group on wave64 hardware consumes 64 resident lanes, so a
     // 64-thread compute-unit limit permits one group, not two.
-    const auto partial_wave = compute_visualization_result(
-        server, 4, document.uri(),
-        Json{{"hardwareProfile",
-              {{"name", "Wave64 test GPU"},
-               {"waveSize", 64},
-               {"maxThreadsPerGroup", 1024},
-               {"maxThreadsPerComputeUnit", 64},
-               {"maxGroupsPerComputeUnit", 2},
-               {"sharedMemoryBytesPerComputeUnit", 65536}}}});
+    const auto partial_wave =
+        compute_visualization_result(server, 5, document.uri(),
+                                     Json{{"hardwareProfile",
+                                           {{"name", "Wave64 test GPU"},
+                                            {"waveSize", 64},
+                                            {"maxThreadsPerGroup", 1024},
+                                            {"maxThreadsPerComputeUnit", 64},
+                                            {"maxGroupsPerComputeUnit", 2},
+                                            {"sharedMemoryBytesPerComputeUnit", 65536}}}});
     REQUIRE(!partial_wave["occupancy"].is_null());
     CHECK(partial_wave["occupancy"]["estimatedResidentGroups"] == 1);
     CHECK(partial_wave["occupancy"]["estimatedResidentThreads"] == 32);
     CHECK(partial_wave["occupancy"]["estimatedResidentWaves"] == 1);
+}
+
+TEST_CASE("hlsl/computeVisualization serializes compiler-formatted WaveSize requirements",
+          "[lsp][compute-visualization][wave-size]") {
+    TestDirectory directory;
+    write_compute_visualization_config(directory, "cs_6_8");
+    const auto document = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "wave.hlsl").string());
+    const std::string source = "[WaveSize(32, 64, 64)]\n"
+                               "[numthreads(8, 1, 1)]\n"
+                               "void CSMain() {}\n";
+    hlsl_intellisense::lsp::Server server{[](const auto&) {}};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(
+        hlsl_intellisense::json_rpc::Notification{.method = "textDocument/didOpen",
+                                                  .params = Json{{"textDocument",
+                                                                  {{"uri", document.uri()},
+                                                                   {"languageId", "hlsl"},
+                                                                   {"version", 1},
+                                                                   {"text", source}}}}}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "hlsl/didChangeActiveVariant", .params = Json{{"variant", "Configured"}}}));
+
+    const auto result = compute_visualization_result(server, 2, document.uri());
+    REQUIRE(result["applicable"] == true);
+    CHECK(result["waveSize"]["known"] == true);
+    CHECK(result["waveSize"]["min"] == 32);
+    CHECK(result["waveSize"]["max"] == 64);
+    CHECK(result["waveSize"]["preferred"] == 64);
+    CHECK(result["waveSize"]["explanation"].get<std::string>().find("compiler-formatted") !=
+          std::string::npos);
 }
 
 TEST_CASE("hlsl/computeVisualization rejects malformed, non-positive, and overflowing inputs",

@@ -1339,6 +1339,183 @@ TEST_CASE("Compilation info exposes compute thread group size", "[dxc][compilati
     CHECK(output->type == "uav_rwstructured");
 }
 
+TEST_CASE("Compute metadata comes from DXC cursors and compiler-formatted declarations",
+          "[dxc][compilation-info][compute]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.target_profile = "cs_6_8";
+    options.entry_point = "main";
+    const auto root_path =
+        (std::filesystem::current_path() / "compute-metadata-root.hlsl").generic_string();
+    const auto include_path =
+        (std::filesystem::current_path() / "compute-metadata.hlsli").generic_string();
+    const std::string include_source = "struct SharedRecord { uint value; float3 color; };\n"
+                                       "groupshared SharedRecord Records[2];\n"
+                                       "void includedBarrier() {\n"
+                                       "    DeviceMemoryBarrierWithGroupSync();\n"
+                                       "    AllMemoryBarrierWithGroupSync();\n"
+                                       "}\n";
+    const std::string source = "#include \"compute-metadata.hlsli\"\n"
+                               "groupshared uint Counter;\n"
+                               "groupshared uint Tile[32];\n"
+                               "void GroupMemoryBarrier(uint value) { Counter = value; }\n"
+                               "void unreachableBarrier() { DeviceMemoryBarrierWithGroupSync(); }\n"
+                               "[WaveSize(32, 64, 64)]\n"
+                               "[numthreads(8, 4, 1)]\n"
+                               "void main(uint3 id : SV_DispatchThreadID) {\n"
+                               "    GroupMemoryBarrier(1);\n"
+                               "    includedBarrier();\n"
+                               "    GroupMemoryBarrierWithGroupSync();\n"
+                               "    GroupMemoryBarrier();\n"
+                               "    DeviceMemoryBarrier();\n"
+                               "    AllMemoryBarrier();\n"
+                               "    Tile[id.x] = Records[0].value;\n"
+                               "}\n";
+    auto translation_unit = intellisense.parse(
+        root_path, {{root_path, source}, {include_path, include_source}}, options);
+
+    const auto info = translation_unit.compilation_info();
+    const auto first_diagnostic =
+        info.diagnostics.empty() ? std::string{} : info.diagnostics.front().message;
+    INFO(first_diagnostic);
+    REQUIRE(info.success);
+    REQUIRE(info.compute_metadata.has_value());
+    const auto& metadata = *info.compute_metadata;
+    CHECK(metadata.barrier_locations_available);
+    CHECK_FALSE(metadata.barrier_locations_truncated);
+    REQUIRE(metadata.barrier_locations.size() == 6);
+    const auto included_barrier =
+        std::ranges::find(metadata.barrier_locations, "DeviceMemoryBarrierWithGroupSync",
+                          &hlsl_intellisense::dxc::ComputeBarrierLocation::label);
+    REQUIRE(included_barrier != metadata.barrier_locations.end());
+    CHECK(included_barrier->location.path == include_path);
+    const auto included_call = std::string{std::string_view{include_source}.substr(
+        included_barrier->start_offset,
+        included_barrier->end_offset - included_barrier->start_offset)};
+    CHECK(included_call == "DeviceMemoryBarrierWithGroupSync()");
+    CHECK(std::ranges::any_of(metadata.barrier_locations, [](const auto& location) {
+        return location.label == "GroupMemoryBarrierWithGroupSync";
+    }));
+    CHECK(std::ranges::any_of(metadata.barrier_locations, [](const auto& location) {
+        return location.label == "GroupMemoryBarrier";
+    }));
+    CHECK(std::ranges::any_of(metadata.barrier_locations, [](const auto& location) {
+        return location.label == "DeviceMemoryBarrier";
+    }));
+    CHECK(std::ranges::any_of(metadata.barrier_locations, [](const auto& location) {
+        return location.label == "AllMemoryBarrier";
+    }));
+    CHECK(std::ranges::any_of(metadata.barrier_locations, [](const auto& location) {
+        return location.label == "AllMemoryBarrierWithGroupSync";
+    }));
+    CHECK(std::ranges::count(metadata.barrier_locations, "GroupMemoryBarrier",
+                             &hlsl_intellisense::dxc::ComputeBarrierLocation::label) == 1);
+
+    REQUIRE(metadata.group_shared_declarations.size() == 3);
+    const auto find_shared = [&](std::string_view name) {
+        return std::ranges::find(metadata.group_shared_declarations, name,
+                                 &hlsl_intellisense::dxc::ComputeGroupSharedDeclaration::name);
+    };
+    const auto records = find_shared("Records");
+    REQUIRE(records != metadata.group_shared_declarations.end());
+    CHECK(records->type == "SharedRecord [2]");
+    REQUIRE(records->bytes.has_value());
+    CHECK(*records->bytes == 32);
+    CHECK(records->location.path == include_path);
+    CHECK(records->location.offset == include_source.find("Records"));
+    CHECK(records->start_offset == include_source.find("groupshared"));
+    const auto counter = find_shared("Counter");
+    REQUIRE(counter != metadata.group_shared_declarations.end());
+    CHECK(counter->bytes == std::uint64_t{4});
+    const auto tile = find_shared("Tile");
+    REQUIRE(tile != metadata.group_shared_declarations.end());
+    CHECK(tile->declaration == "groupshared uint Tile[32]");
+    CHECK(tile->type == "uint [32]");
+    CHECK(tile->bytes == std::uint64_t{128});
+    CHECK(tile->location.offset == source.find("Tile[32]"));
+    CHECK(tile->start_offset == source.find("groupshared uint Tile"));
+    CHECK(metadata.group_shared_total_bytes == std::uint64_t{164});
+
+    CHECK(metadata.wave_size.known);
+    CHECK(metadata.wave_size.min == std::uint32_t{32});
+    CHECK(metadata.wave_size.max == std::uint32_t{64});
+    CHECK(metadata.wave_size.preferred == std::uint32_t{64});
+}
+
+TEST_CASE("Compute wave metadata supports fixed, range, and absent forms",
+          "[dxc][compilation-info][compute][wave-size]") {
+    const auto inspect = [](std::string_view attribute) {
+        hlsl_intellisense::dxc::Intellisense intellisense;
+        hlsl_intellisense::dxc::CompilerOptions options;
+        options.target_profile = "cs_6_8";
+        options.entry_point = "main";
+        const auto source = std::string{attribute} + "\n[numthreads(1, 1, 1)] void main() {}\n";
+        auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+        const auto info = translation_unit.compilation_info();
+        REQUIRE(info.success);
+        REQUIRE(info.compute_metadata.has_value());
+        return info.compute_metadata->wave_size;
+    };
+
+    const auto fixed = inspect("[WaveSize(32)]");
+    CHECK(fixed.known);
+    CHECK(fixed.min == std::uint32_t{32});
+    CHECK(fixed.max == std::uint32_t{32});
+    CHECK_FALSE(fixed.preferred.has_value());
+
+    const auto range = inspect("[WaveSize(32, 64)]");
+    CHECK(range.known);
+    CHECK(range.min == std::uint32_t{32});
+    CHECK(range.max == std::uint32_t{64});
+    CHECK_FALSE(range.preferred.has_value());
+
+    const auto absent = inspect("");
+    CHECK_FALSE(absent.known);
+    CHECK_FALSE(absent.min.has_value());
+    CHECK(absent.explanation.find("no WaveSize") != std::string::npos);
+}
+
+TEST_CASE("Reachable barrier locations are independently bounded",
+          "[dxc][data-flow][compute][limits]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.target_profile = "cs_6_6";
+    options.entry_point = "main";
+    const std::string source = "[numthreads(1, 1, 1)] void main() {\n"
+                               "  GroupMemoryBarrier();\n"
+                               "  DeviceMemoryBarrier();\n"
+                               "}\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+    hlsl_intellisense::dxc::EntryPointDataFlowLimits limits;
+    limits.max_barrier_locations = 1;
+    const auto flow = translation_unit.entry_point_data_flow(limits);
+    REQUIRE(flow.found);
+    CHECK(flow.barrier_locations.size() == 1);
+    CHECK(flow.barrier_locations_truncated);
+}
+
+TEST_CASE("Group-shared declaration collection is independently bounded",
+          "[dxc][compilation-info][compute][limits]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.target_profile = "cs_6_6";
+    options.entry_point = "main";
+    const std::string source = "groupshared uint First;\n"
+                               "groupshared uint Second;\n"
+                               "[numthreads(1, 1, 1)] void main() { First = Second; }\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+    hlsl_intellisense::dxc::ComputeMetadataLimits limits;
+    limits.max_group_shared_declarations = 1;
+    const auto info = translation_unit.compilation_info(limits);
+    REQUIRE(info.compute_metadata.has_value());
+    CHECK(info.compute_metadata->group_shared_available);
+    CHECK(info.compute_metadata->group_shared_truncated);
+    CHECK(info.compute_metadata->group_shared_declarations.size() == 1);
+    CHECK_FALSE(info.compute_metadata->group_shared_total_bytes.has_value());
+    CHECK_FALSE(info.compute_metadata->group_shared_unavailable_reason.empty());
+    CHECK_FALSE(info.compute_metadata->group_shared_total_bytes_unavailable_reason.empty());
+}
+
 TEST_CASE("Compilation info recognizes joined DXC flag spellings and honors last-wins order",
           "[dxc][compilation-info]") {
     // DXC accepts both separated ("-T" "cs_6_6") and joined ("-Tcs_6_6")
