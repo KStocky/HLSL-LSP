@@ -431,6 +431,7 @@ TEST_CASE("Configured ShaderTestFramework macro includes rewrite virtual paths f
     CHECK(include.virtual_mapping == "/Test");
     CHECK(include.configuration_origin_file == config_path.generic_string());
     CHECK(file.source_text == text);
+    CHECK(resolution.has_rewritten_sources);
 
     const auto source =
         std::ranges::find(resolution.sources,

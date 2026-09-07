@@ -109,8 +109,12 @@ internal sealed class PreprocessorExplorerControl : UserControl
         AddSection("Files", () => AddFiles(report.Files));
         AddSection(
             "Preprocessor-skipped regions",
-            () => AddSkippedRegions(report.SkippedRegions));
-        AddSection("Macros", () => AddMacros(report.Macros));
+            () => AddSkippedRegions(
+                report.SkippedRegions,
+                report.CompilerAnalysis?.SkippedRegions));
+        AddSection(
+            "Macros",
+            () => AddMacros(report.Macros, report.CompilerAnalysis?.CompilerMacros));
         AddSection("Effective settings", () => AddSettings(report.Settings));
     }
 
@@ -368,9 +372,16 @@ internal sealed class PreprocessorExplorerControl : UserControl
 
     // --- Preprocessor-skipped regions --------------------------------------
 
-    private void AddSkippedRegions(IReadOnlyList<PreprocessorSkippedRegionModel> regions)
+    private void AddSkippedRegions(
+        IReadOnlyList<PreprocessorSkippedRegionModel> regions,
+        PreprocessorAnalysisCapabilityModel capability)
     {
         ThreadHelper.ThrowIfNotOnUIThread();
+        if (capability?.Available == false)
+        {
+            AddUnavailable(capability.Reason);
+            return;
+        }
         if (regions == null || regions.Count == 0)
         {
             content.Children.Add(new TextBlock { Text = "(none)", Opacity = 0.75 });
@@ -404,9 +415,16 @@ internal sealed class PreprocessorExplorerControl : UserControl
 
     // --- Macros -------------------------------------------------------
 
-    private void AddMacros(IReadOnlyList<PreprocessorMacroModel> macros)
+    private void AddMacros(
+        IReadOnlyList<PreprocessorMacroModel> macros,
+        PreprocessorAnalysisCapabilityModel capability)
     {
         ThreadHelper.ThrowIfNotOnUIThread();
+        if (capability?.Available == false)
+        {
+            AddUnavailable(capability.Reason);
+            return;
+        }
         if (macros == null || macros.Count == 0)
         {
             content.Children.Add(new TextBlock { Text = "(none)", Opacity = 0.75 });
@@ -469,6 +487,17 @@ internal sealed class PreprocessorExplorerControl : UserControl
             ++row;
         }
         content.Children.Add(grid);
+    }
+
+    private void AddUnavailable(string reason)
+    {
+        content.Children.Add(new TextBlock
+        {
+            Text = $"Unavailable: {reason ?? "compiler analysis is not supported for this source snapshot."}",
+            Foreground = Brushes.Goldenrod,
+            TextWrapping = TextWrapping.Wrap,
+            Opacity = 0.9,
+        });
     }
 
     // --- Effective settings -------------------------------------------------

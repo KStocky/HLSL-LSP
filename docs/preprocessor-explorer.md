@@ -30,6 +30,14 @@ macro includes dynamic. DXC remains authoritative for replacement values and
 preprocessing, and receives rewritten source only when a safely resolved
 virtual macro include must be mapped to its physical file.
 
+DXC 1.9's Linux `GetSkippedRanges` API is unsafe when IntelliSense receives
+source buffers with virtual include directives rewritten to physical paths.
+For those snapshots only, HLSL-LSP does not call that API. The response marks
+the skipped-region section unavailable and explains why, while retaining the
+resolver include graph, expanded configured path and provenance, compiler
+source macros, effective settings, and normal compiler diagnostics. Windows
+continues to report skipped regions for the same source.
+
 ## Protocol
 
 Request:
@@ -51,6 +59,10 @@ The document must be open. The response has this shape:
 ```json
 {
   "rootUri": "file:///C:/shaders/example.hlsl",
+  "compilerAnalysis": {
+    "skippedRegions": { "available": true },
+    "compilerMacros": { "available": true }
+  },
   "files": [
     {
       "uri": "file:///C:/shaders/example.hlsl",
@@ -123,6 +135,11 @@ Macro `source` is `compiler` for DXC-reported source definitions or
 `configuration` for effective configured definitions. File-backed
 configuration macros and settings include `originUri`; editor settings and
 built-in defaults do not.
+
+`compilerAnalysis` explicitly identifies whether each compiler-derived
+section is authoritative for the current snapshot. An unavailable section is
+empty and includes a `reason`; clients must not present that as an
+authoritative "none found" result.
 
 All positions are zero-based UTF-16 LSP positions. Requests are cancelled or
 rejected as content-modified when their document snapshot becomes stale.

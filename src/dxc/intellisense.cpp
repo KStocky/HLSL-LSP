@@ -2013,6 +2013,14 @@ std::string_view runtime_library_name() noexcept {
 #endif
 }
 
+bool supports_skipped_ranges_for_rewritten_sources() noexcept {
+#ifdef _WIN32
+    return true;
+#else
+    return false;
+#endif
+}
+
 std::string validate_runtime_directory(std::string_view directory) {
     if (directory.empty()) {
         throw RuntimeError{"A DXC runtime directory was not provided"};

@@ -86,12 +86,23 @@ export interface PreprocessorSetting {
   readonly originUri?: string;
 }
 
+export interface PreprocessorAnalysisCapability {
+  readonly available: boolean;
+  readonly reason?: string;
+}
+
+export interface PreprocessorCompilerAnalysis {
+  readonly skippedRegions: PreprocessorAnalysisCapability;
+  readonly compilerMacros: PreprocessorAnalysisCapability;
+}
+
 export interface PreprocessorExplorerReport {
   readonly rootUri: string;
   readonly files: readonly PreprocessorFile[];
   readonly skippedRegions: readonly PreprocessorSkippedRegion[];
   readonly macros: readonly PreprocessorMacro[];
   readonly settings: readonly PreprocessorSetting[];
+  readonly compilerAnalysis?: PreprocessorCompilerAnalysis;
   readonly diagnostics: readonly string[];
 }
 
@@ -298,18 +309,24 @@ export function preprocessorExplorerHtml(
       ? `<p class="muted">No files were analyzed.</p>`
       : report.files.map((file) => fileSection(file)).join("");
 
+  const skippedRegionsCapability = report.compilerAnalysis?.skippedRegions;
   const skippedRegions =
-    report.skippedRegions.length === 0
-      ? `<p class="muted">No preprocessor-skipped regions were reported.</p>`
-      : `<table>
+    skippedRegionsCapability?.available === false
+      ? `<p class="unavailable">Unavailable: ${escapeHtml(skippedRegionsCapability.reason ?? "compiler analysis is not supported for this source snapshot.")}</p>`
+      : report.skippedRegions.length === 0
+        ? `<p class="muted">No preprocessor-skipped regions were reported.</p>`
+        : `<table>
 <thead><tr><th>File</th><th>Range</th></tr></thead>
 <tbody>${report.skippedRegions.map((region) => skippedRegionRow(region)).join("")}</tbody>
 </table>`;
 
+  const compilerMacrosCapability = report.compilerAnalysis?.compilerMacros;
   const macros =
-    report.macros.length === 0
-      ? `<p class="muted">No macros were reported.</p>`
-      : `<table>
+    compilerMacrosCapability?.available === false
+      ? `<p class="unavailable">Unavailable: ${escapeHtml(compilerMacrosCapability.reason ?? "compiler macro analysis is not supported for this source snapshot.")}</p>`
+      : report.macros.length === 0
+        ? `<p class="muted">No macros were reported.</p>`
+        : `<table>
 <thead><tr><th>Name</th><th>Value</th><th>Source</th><th>Origin</th></tr></thead>
 <tbody>${report.macros.map((macro) => macroRow(macro)).join("")}</tbody>
 </table>`;
@@ -334,6 +351,7 @@ export function preprocessorExplorerHtml(
   a { color: var(--vscode-textLink-foreground); }
   .summary { color: var(--vscode-descriptionForeground); margin-bottom: 1.25rem; word-break: break-all; }
   .muted { color: var(--vscode-descriptionForeground); }
+  .unavailable { color: var(--vscode-editorWarning-foreground); }
   .physical-path { color: var(--vscode-descriptionForeground); margin: 0 0 .5rem; word-break: break-all; }
   table { border-collapse: collapse; width: 100%; max-width: 70rem; margin-bottom: .5rem; }
   th, td { border-bottom: 1px solid var(--vscode-panel-border); padding: .4rem .5rem; text-align: left; vertical-align: top; }

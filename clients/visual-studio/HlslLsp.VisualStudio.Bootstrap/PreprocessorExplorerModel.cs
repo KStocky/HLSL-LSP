@@ -22,8 +22,27 @@ public sealed class PreprocessorExplorerModel
     public IReadOnlyList<PreprocessorSettingModel> Settings { get; set; } =
         Array.Empty<PreprocessorSettingModel>();
 
+    public PreprocessorCompilerAnalysisModel CompilerAnalysis { get; set; } =
+        new PreprocessorCompilerAnalysisModel();
+
     public IReadOnlyList<string> Diagnostics { get; set; } =
         Array.Empty<string>();
+}
+
+public sealed class PreprocessorCompilerAnalysisModel
+{
+    public PreprocessorAnalysisCapabilityModel SkippedRegions { get; set; } =
+        new PreprocessorAnalysisCapabilityModel();
+
+    public PreprocessorAnalysisCapabilityModel CompilerMacros { get; set; } =
+        new PreprocessorAnalysisCapabilityModel();
+}
+
+public sealed class PreprocessorAnalysisCapabilityModel
+{
+    public bool Available { get; set; } = true;
+
+    public string Reason { get; set; }
 }
 
 public sealed class PreprocessorFileModel

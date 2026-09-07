@@ -325,6 +325,15 @@ TEST_CASE("DXC IntelliSense reports compiler-skipped preprocessor ranges", "[dxc
     CHECK(scale->value == "(value) ((value) * ACTIVE_VALUE)");
 }
 
+TEST_CASE("DXC exposes rewritten-source skipped-range capability",
+          "[dxc][preprocessor][platform]") {
+#ifdef _WIN32
+    CHECK(hlsl_intellisense::dxc::supports_skipped_ranges_for_rewritten_sources());
+#else
+    CHECK_FALSE(hlsl_intellisense::dxc::supports_skipped_ranges_for_rewritten_sources());
+#endif
+}
+
 TEST_CASE("DXC IntelliSense reports preprocessing records from unsaved includes",
           "[dxc][preprocessor][includes]") {
     hlsl_intellisense::dxc::Intellisense intellisense;

@@ -703,6 +703,7 @@ class Resolver final {
                              .open = true,
                              .virtual_mapping = {}};
         visit(root_node, result, true);
+        result.has_rewritten_sources = !rewritten_physical_paths_.empty();
         return result;
     }
 
@@ -1059,6 +1060,7 @@ class Resolver final {
         for (auto rewrite = rewrites.rbegin(); rewrite != rewrites.rend(); ++rewrite) {
             dxc_text.replace(rewrite->offset, rewrite->length, rewrite->text);
         }
+        const bool source_was_rewritten = !rewrites.empty();
         std::ranges::sort(file.includes, {}, &IncludeResolution::Edge::path_offset);
         result.files[file_index] = std::move(file);
         if (context_dependent_physical_paths_.contains(identity)) {
@@ -1067,6 +1069,9 @@ class Resolver final {
             result.sources[logical_source_index].text = dxc_text;
             if (physical_source_index) {
                 result.sources[*physical_source_index].text = dxc_text;
+            }
+            if (source_was_rewritten) {
+                rewritten_physical_paths_.insert(identity);
             }
         }
         if (has_unresolved_dynamic) {
@@ -1109,6 +1114,7 @@ class Resolver final {
     }
 
     void restore_original_sources(std::string_view identity, IncludeResolution& result) {
+        rewritten_physical_paths_.erase(std::string{identity});
         const auto logical_paths = physical_logical_paths_.find(std::string{identity});
         if (logical_paths == physical_logical_paths_.end() || logical_paths->second.empty()) {
             return;
@@ -1159,6 +1165,7 @@ class Resolver final {
     std::unordered_map<std::string, std::vector<std::string>> physical_logical_paths_;
     std::unordered_map<std::string, std::unordered_set<std::string>> physical_configuration_macros_;
     std::unordered_set<std::string> context_dependent_physical_paths_;
+    std::unordered_set<std::string> rewritten_physical_paths_;
     std::unordered_set<std::string> visited_physical_paths_;
     std::unordered_set<std::string> active_physical_paths_;
     std::unordered_set<std::string> encountered_source_macros_;

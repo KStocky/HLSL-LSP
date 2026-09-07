@@ -80,6 +80,7 @@ struct IncludeResolution {
     std::vector<dxc::SourceFile> sources;
     std::unordered_set<std::string> dependency_identities;
     bool has_dynamic_includes{};
+    bool has_rewritten_sources{};
     enum class Status : std::uint8_t { resolved, missing, cyclic, dynamic };
 
     struct Edge {

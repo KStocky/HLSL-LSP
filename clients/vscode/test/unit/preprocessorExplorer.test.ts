@@ -301,6 +301,23 @@ void test("preprocessor explorer HTML renders diagnostics when reported", () => 
   assert.match(html, /Macro-based includes are compiler-owned/);
 });
 
+void test("preprocessor explorer distinguishes unavailable compiler sections from empty results", () => {
+  const html = preprocessorExplorerHtml(
+    baseReport({
+      compilerAnalysis: {
+        skippedRegions: {
+          available: false,
+          reason: "DXC skipped ranges are unsafe for rewritten sources.",
+        },
+        compilerMacros: { available: true },
+      },
+    }),
+  );
+  assert.match(html, /Unavailable: DXC skipped ranges are unsafe/);
+  assert.doesNotMatch(html, /No preprocessor-skipped regions were reported/);
+  assert.match(html, /No macros were reported/);
+});
+
 void test("preprocessor explorer HTML escapes untrusted text", () => {
   const html = preprocessorExplorerHtml(
     baseReport({
