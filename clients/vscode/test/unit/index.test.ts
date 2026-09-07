@@ -1,7 +1,10 @@
 import "./compilationInfo.test";
 import "./configuration.test";
+import "./debouncer.test";
+import "./entryPointDataFlow.test";
 import "./lifecycle.test";
 import "./memoryLayout.test";
+import "./panelController.test";
 import "./preprocessorExplorer.test";
 import "./resourceBindings.test";
 import "./runtime.test";

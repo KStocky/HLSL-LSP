@@ -399,3 +399,91 @@ TEST_CASE("Compilation info queries (root signature, binding analysis, compatibi
     CHECK_THROWS_AS(manager.compilation_info(uri.identity(), 2, uri.path(), current),
                     json_rpc::HandlerError);
 }
+
+TEST_CASE("Entry-point data flow generation stays paired with the analysis that produced it "
+          "across an intervening reanalysis",
+          "[analysis][entry-point-data-flow][concurrency][generation]") {
+    // Regression for a TOCTOU bug: a result from `Manager::entry_point_data_flow`
+    // and the content generation used to tag `CallHierarchyItem.data` must
+    // both describe the *same* analysis. The old design fetched them via
+    // two separate `Manager` calls (`entry_point_data_flow` then a
+    // standalone `content_generation`); an included file's edit reparsing
+    // this root *without bumping its own document version* could complete
+    // in the gap between those two calls, tagging a result computed from
+    // the *old* content with a generation describing the *new* content
+    // instead. `WithGeneration` fixes this by reading the generation from
+    // inside the exact same query invocation that computes the result, so
+    // the pair can never straddle an intervening reanalysis.
+    //
+    // This is deliberately a fully sequential (non-racy) reproduction
+    // rather than a genuinely concurrent one: the scheduler already
+    // cancels any in-flight *interactive* query the instant a background
+    // reanalysis is submitted for the same root (see
+    // `Scheduler::submit`'s `running->second.cancel()` for
+    // `WorkPriority::background`), so a query cannot observe a reanalysis
+    // completing *while it is itself running* -- the only way the bug
+    // manifested was a reanalysis slipping in *between* two already-
+    // completed, separately-issued calls, which this test reproduces
+    // deterministically without any timing dependency.
+    TestDirectory directory;
+    const auto include_path = directory.path() / "shared.hlsli";
+    {
+        std::ofstream include{include_path};
+        REQUIRE(include);
+        include << "static const float sharedValue = 1.0;\n";
+    }
+    const auto include = workspace::DocumentUri::from_path(include_path.string());
+    const auto uri = workspace::DocumentUri::from_path((directory.path() / "root.hlsl").string());
+    const std::string source = "#include \"shared.hlsli\"\n"
+                               "float4 main() : SV_Target { return sharedValue.xxxx; }\n";
+    workspace::WorkspaceConfiguration configuration;
+    configuration.target_profile = "ps_6_6";
+    configuration.entry_point = "main";
+
+    analysis::Manager manager{[](const auto&, const auto&, std::uint64_t) {}, test_options()};
+    manager.analyze(input(uri, 1, source, configuration));
+    manager.wait_idle();
+
+    json_rpc::CancellationToken cancellation;
+    const auto baseline = manager.entry_point_data_flow(uri.identity(), 1, {}, cancellation);
+    REQUIRE(baseline.value.found);
+    bool baseline_has_shared_value = false;
+    for (const auto& access : baseline.value.global_accesses) {
+        if (access.name == "sharedValue") {
+            baseline_has_shared_value = true;
+        }
+    }
+    CHECK(baseline_has_shared_value);
+
+    // Reparse this root (same document version) purely because its include
+    // changed -- exactly the class of event that bumps `generation` without
+    // touching `version`, and the class of event the old split-call design
+    // could straddle.
+    {
+        std::ofstream changed_include{include_path, std::ios::trunc};
+        REQUIRE(changed_include);
+        changed_include << "static const float sharedValue = 2.0;\n"
+                           "static const float extraValue = 3.0;\n";
+    }
+    const std::unordered_set changed{include.identity()};
+    manager.invalidate_include_metadata(changed);
+    manager.analyze(input(uri, 1, source, configuration));
+    manager.wait_idle();
+    CHECK(manager.metrics().reparse_count == 1);
+
+    // A standalone generation fetch issued *after* the reanalysis reflects
+    // the *new* content -- this is what the old code would have wrongly
+    // paired with `baseline`'s already-computed, pre-reanalysis value had
+    // it fetched the generation as a second, separate call at this point.
+    const auto post_reanalysis_generation =
+        manager.content_generation(uri.identity(), 1, cancellation);
+    CHECK(post_reanalysis_generation != baseline.generation);
+
+    // A fresh, atomic `entry_point_data_flow` call correctly pairs its own
+    // (new) value with the (new) generation that produced it -- proving
+    // `WithGeneration` never lets a value and a generation from different
+    // analyses become associated with each other.
+    const auto reparsed = manager.entry_point_data_flow(uri.identity(), 1, {}, cancellation);
+    CHECK(reparsed.generation == post_reanalysis_generation);
+    CHECK(reparsed.generation != baseline.generation);
+}

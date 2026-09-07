@@ -146,6 +146,34 @@ full protocol, grouping/collision semantics, root-signature states
 "not applicable" state), compatibility meanings, and the bindless
 descriptor-heap limitation.
 
+## Call hierarchy and entry-point data flow
+
+Standard LSP call hierarchy (`textDocument/prepareCallHierarchy`,
+`callHierarchy/incomingCalls`, `callHierarchy/outgoingCalls`) works through
+VS Code's built-in **Show Call Hierarchy** command (also available from the
+editor context menu) as soon as the server advertises
+`callHierarchyProvider`; the extension registers no custom handling for it.
+
+Run **HLSL: Show Entry-Point Data Flow** to trace every function
+transitively reachable from the active document's already-configured entry
+point (`hlsl.entryPoint` / the active variant's entry point) and see the
+globals/resources those functions read or write, alongside functions and
+top-level declarations that are unused for the active variant. Like Shader
+Compilation and Resource Bindings, it analyzes the document's current
+unsaved content, is tracked in its own independent panel, and refreshes
+automatically when the active variant changes, when the document is saved,
+and (debounced) shortly after further edits. Every function, global/resource
+access, and declaration in the view is clickable only when the server
+supplies its own compiler location for it — nothing is guessed from a name.
+Read/write classification is conservative: an access is only ever reported
+as `read` or `write` when DXC's cursor tree proves it, and `readWrite`
+otherwise. If traversal hits the function-visit budget before exhausting the
+call graph, the view clearly marks the result as truncated and reports how
+many functions were actually visited, since the reachable/unreachable sets
+are then a conservative subset rather than the complete graph. See
+[`../../docs/call-hierarchy.md`](../../docs/call-hierarchy.md) for the full
+protocol, identity/staleness contract, and DXC limitations.
+
 ## DXC runtime selection
 
 By default the extension loads the bundled, pinned DXC runtime. Set

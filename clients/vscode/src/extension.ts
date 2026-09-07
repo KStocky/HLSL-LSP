@@ -28,6 +28,16 @@ import {
   resolvePreprocessorExplorerRefresh,
 } from "./preprocessorExplorer";
 import {
+  EntryPointDataFlow,
+  entryPointDataFlowRequestParams,
+  EntryPointDataFlowNavigator,
+  navigateEntryPointDataFlowLocation,
+  openEntryPointDataFlowLocationCommand,
+  resolveEntryPointDataFlowRefresh,
+} from "./entryPointDataFlow";
+import { Debouncer } from "./debouncer";
+import { PanelController } from "./panelController";
+import {
   HlslServerSettings,
   readActiveVariant,
   readDefaultLanguageVersion,
@@ -63,6 +73,7 @@ interface ManagedClient extends LifecycleClient {
   preprocessorExplorer(
     uri: vscode.Uri,
   ): Promise<PreprocessorExplorerReport | null>;
+  entryPointDataFlow(uri: vscode.Uri): Promise<EntryPointDataFlow | null>;
   dxcRuntime(): Promise<DxcRuntimeInfo | null>;
   variants(uri: vscode.Uri | undefined): Promise<VariantList | null>;
 }
@@ -166,6 +177,30 @@ let preprocessorExplorerState: PreprocessorExplorerViewState | undefined;
 let preprocessorExplorerGeneration = 0;
 let preprocessorExplorerDebounce: NodeJS.Timeout | undefined;
 
+// Independently tracked from the other panels: all four can be open for
+// different documents at the same time, and none may interfere with
+// another's generation counter or debounce timer. Unlike the other three
+// panels' hand-rolled uri/hasContent/generation/debounce fields, this one
+// delegates that whole state machine to `PanelController` (see
+// panelController.ts) so it has a single, unit-tested seam for exact
+// request payload, out-of-order suppression, document switching, debounce
+// timing, and disposal.
+interface EntryPointDataFlowViewState {
+  readonly panel: vscode.WebviewPanel;
+  readonly controller: PanelController<EntryPointDataFlow>;
+}
+
+let entryPointDataFlowState: EntryPointDataFlowViewState | undefined;
+
+// Debounces the refresh triggered by filesystem watcher events (external
+// shader/header file or shadertoolsconfig.json create/change/delete) into
+// one refresh of every open analysis panel, rather than one per event (a
+// save-from-another-tool, a git checkout, or a rename can fire several
+// events in a burst). A single shared instance across restarts: recreated
+// only when the extension itself activates/deactivates, independent of the
+// per-restart watchers whose events feed it.
+let watchedFileRefreshDebouncer: Debouncer | undefined;
+
 function compilationInfoLoadingHtml(): string {
   return `<!doctype html><html><body style="color:var(--vscode-foreground);background:var(--vscode-editor-background);font-family:var(--vscode-font-family);padding:1rem 1.5rem;"><p>Compiling…</p></body></html>`;
 }
@@ -176,6 +211,10 @@ function resourceBindingsLoadingHtml(): string {
 
 function preprocessorExplorerLoadingHtml(): string {
   return `<!doctype html><html><body style="color:var(--vscode-foreground);background:var(--vscode-editor-background);font-family:var(--vscode-font-family);padding:1rem 1.5rem;"><p>Analyzing preprocessor state…</p></body></html>`;
+}
+
+function entryPointDataFlowLoadingHtml(): string {
+  return `<!doctype html><html><body style="color:var(--vscode-foreground);background:var(--vscode-editor-background);font-family:var(--vscode-font-family);padding:1rem 1.5rem;"><p>Tracing entry-point data flow…</p></body></html>`;
 }
 
 // Fetches the current compilation info for the tracked document and applies it
@@ -297,6 +336,69 @@ async function refreshPreprocessorExplorer(
   }
 }
 
+// Refreshes every currently open analysis panel (Shader Compilation,
+// Resource Bindings, Preprocessor Explorer, Entry-Point Data Flow) against
+// its own currently tracked document. Used for triggers relevant to *any*
+// open panel regardless of which document changed: a compiler-affecting
+// setting change (entry point, target profile, defines, arguments,
+// language version, active variant), a successful restart (which can
+// change include directories/mappings/server path/DXC runtime), and a
+// save to *any* open HLSL document -- since every one of these panels
+// analyzes its root document's current unsaved snapshot *plus* any
+// #include'd file open elsewhere in the workspace, and the client has no
+// dependency query telling it which open document a given root actually
+// includes, refreshing conservatively is the safe choice (see
+// docs/call-hierarchy.md's "Includes and unsaved edits").
+async function refreshAllOpenAnalysisPanels(
+  lifecycle: ClientLifecycle<ManagedClient>,
+): Promise<void> {
+  const tasks: Promise<void>[] = [];
+  if (compilationInfoState !== undefined) {
+    tasks.push(refreshCompilationInfo(lifecycle, compilationInfoState.uri));
+  }
+  if (resourceBindingsState !== undefined) {
+    tasks.push(refreshResourceBindings(lifecycle, resourceBindingsState.uri));
+  }
+  if (preprocessorExplorerState !== undefined) {
+    tasks.push(
+      refreshPreprocessorExplorer(lifecycle, preprocessorExplorerState.uri),
+    );
+  }
+  const entryPointRefresh =
+    entryPointDataFlowState?.controller.refreshTracked();
+  if (entryPointRefresh !== undefined) {
+    tasks.push(entryPointRefresh);
+  }
+  await Promise.all(tasks);
+}
+
+// Editor settings that become higher-precedence overrides affecting what
+// the server actually compiles/analyzes (see the Configuration section of
+// README.md) without requiring a restart -- a change to any of these
+// leaves every open analysis panel showing content resolved under the
+// *previous* value unless it is explicitly refreshed here.
+// `hlsl.server.path`/`hlsl.additionalIncludeDirectories`/
+// `hlsl.virtualDirectoryMappings`/`hlsl.dxcRuntimeDirectory` are handled
+// separately: they restart the client, and every panel is refreshed after
+// that restart completes instead.
+const compilationAffectingSettings = [
+  "hlsl.entryPoint",
+  "hlsl.targetProfile",
+  "hlsl.preprocessorDefinitions",
+  "hlsl.additionalArguments",
+  "hlsl.languageVersion",
+  "hlsl.activeVariant",
+] as const;
+
+function affectsResolvedCompilation(
+  event: vscode.ConfigurationChangeEvent,
+  resource: vscode.Uri | undefined,
+): boolean {
+  return compilationAffectingSettings.some((setting) =>
+    event.affectsConfiguration(setting, resource),
+  );
+}
+
 function configurationResource(): vscode.Uri | undefined {
   return vscode.workspace.workspaceFolders?.[0]?.uri;
 }
@@ -365,6 +467,7 @@ class VscodeLanguageClient implements ManagedClient {
   private readonly client: LanguageClient;
   private readonly settingsSynchronizer: RunningSettingsSynchronizer<ClientSettings>;
   private readonly stateSubscription: vscode.Disposable;
+  private readonly watcherSubscriptions: vscode.Disposable[];
   private disposed = false;
 
   public constructor(
@@ -375,6 +478,7 @@ class VscodeLanguageClient implements ManagedClient {
     serverArgs: readonly string[],
     onRuntimeRestartRequired: (request: RuntimeRestartRequest) => void,
     onActiveVariantChanged: (variant: string | null) => void,
+    onWatchedFileEvent: () => void,
   ) {
     const executable: Executable = {
       command: runtime.command,
@@ -427,6 +531,18 @@ class VscodeLanguageClient implements ManagedClient {
       serverOptions,
       clientOptions,
     );
+    // `synchronize.fileEvents` above only forwards these same watcher events
+    // to the server (as `workspace/didChangeWatchedFiles`) so it stays in
+    // sync -- it does not, by itself, refresh anything the client itself has
+    // rendered. An external edit/create/delete of a shader/header file or of
+    // shadertoolsconfig.json can change what every open analysis panel
+    // should show (a changed #include, a changed compiler configuration),
+    // so each such event also asks the caller to (debounce-)refresh them.
+    this.watcherSubscriptions = watchers.flatMap((watcher) => [
+      watcher.onDidCreate(onWatchedFileEvent),
+      watcher.onDidChange(onWatchedFileEvent),
+      watcher.onDidDelete(onWatchedFileEvent),
+    ]);
     this.client.onNotification(
       "hlsl/dxcRuntimeRestartRequired",
       (params: unknown) => {
@@ -482,6 +598,9 @@ class VscodeLanguageClient implements ManagedClient {
       }
     } finally {
       this.stateSubscription.dispose();
+      for (const subscription of this.watcherSubscriptions) {
+        subscription.dispose();
+      }
       for (const watcher of this.watchers) {
         watcher.dispose();
       }
@@ -515,6 +634,15 @@ class VscodeLanguageClient implements ManagedClient {
     return this.client.sendRequest<PreprocessorExplorerReport | null>(
       "hlsl/preprocessorExplorer",
       { textDocument: { uri: uri.toString() } },
+    );
+  }
+
+  public entryPointDataFlow(
+    uri: vscode.Uri,
+  ): Promise<EntryPointDataFlow | null> {
+    return this.client.sendRequest<EntryPointDataFlow | null>(
+      "hlsl/entryPointDataFlow",
+      entryPointDataFlowRequestParams(uri.toString()),
     );
   }
 
@@ -688,6 +816,7 @@ export async function activate(
         serverArgs,
         handleRuntimeRestartRequired,
         handleActiveVariantChanged,
+        () => watchedFileRefreshDebouncer?.schedule(),
       );
     } catch (error) {
       for (const watcher of watchers) {
@@ -697,6 +826,9 @@ export async function activate(
     }
   });
   activeLifecycle = lifecycle;
+  watchedFileRefreshDebouncer = new Debouncer(() => {
+    void refreshAllOpenAnalysisPanels(lifecycle);
+  });
 
   const updateVariantStatus = async (): Promise<void> => {
     const editor = vscode.window.activeTextEditor;
@@ -728,6 +860,17 @@ export async function activate(
     try {
       await lifecycle.restart();
       outputChannel.appendLine("Language server restarted.");
+      // A restart can change what the server compiles/analyzes (a
+      // different DXC runtime/version, server path, include
+      // directories/mappings, or a reloaded workspace-folder
+      // configuration), so every open analysis panel is refreshed here --
+      // once, after the restart actually succeeds -- rather than left
+      // showing content resolved by the previous server instance. Shared
+      // by every restart trigger (the manual "Restart Server" command,
+      // workspace-folder changes, a server-requested runtime restart, and
+      // the restart-triggering configuration branches below) so none of
+      // them needs its own duplicate post-restart refresh.
+      await refreshAllOpenAnalysisPanels(lifecycle);
     } catch (error) {
       await reportError(
         outputChannel,
@@ -1215,6 +1358,104 @@ export async function activate(
         }
       },
     ),
+    vscode.commands.registerCommand("hlsl.showEntryPointDataFlow", async () => {
+      const editor = vscode.window.activeTextEditor;
+      if (editor?.document.languageId !== "hlsl") {
+        await vscode.window.showInformationMessage(
+          "Open an HLSL document to trace its entry-point data flow.",
+        );
+        return;
+      }
+      const uri = editor.document.uri;
+      if (entryPointDataFlowState !== undefined) {
+        const { panel, controller } = entryPointDataFlowState;
+        const { switchingDocument } = controller.open(uri.toString());
+        if (switchingDocument) {
+          // Only the loading placeholder for a different document
+          // replaces what is on screen; a same-document refresh keeps
+          // showing the last successful content until the new result (or
+          // an explicit error, on failure) is ready.
+          panel.webview.html = entryPointDataFlowLoadingHtml();
+        }
+        panel.reveal(vscode.ViewColumn.Beside);
+      } else {
+        const panel = vscode.window.createWebviewPanel(
+          "hlslEntryPointDataFlow",
+          "Entry-Point Data Flow",
+          vscode.ViewColumn.Beside,
+          {
+            enableScripts: false,
+            // No script execution is used for navigation: entry
+            // point/function/global-access links go through plain
+            // `command:` URIs, and this allowlists only the one command
+            // they may invoke -- never `true` (which would let static
+            // HTML trigger arbitrary commands).
+            enableCommandUris: [openEntryPointDataFlowLocationCommand],
+          },
+        );
+        panel.webview.html = entryPointDataFlowLoadingHtml();
+        const controller = new PanelController<EntryPointDataFlow>(
+          {
+            setHtml: (html) => {
+              panel.webview.html = html;
+            },
+            setTitle: (title) => {
+              panel.title = title;
+            },
+          },
+          (uriString) =>
+            lifecycle.withClient((client) =>
+              client.entryPointDataFlow(vscode.Uri.parse(uriString)),
+            ),
+          resolveEntryPointDataFlowRefresh,
+        );
+        controller.open(uri.toString());
+        panel.onDidDispose(() => {
+          if (entryPointDataFlowState?.panel === panel) {
+            entryPointDataFlowState.controller.dispose();
+            entryPointDataFlowState = undefined;
+          }
+        });
+        entryPointDataFlowState = { panel, controller };
+      }
+      await entryPointDataFlowState.controller.refresh(uri.toString());
+    }),
+    vscode.commands.registerCommand(
+      openEntryPointDataFlowLocationCommand,
+      async (rawArgument: unknown) => {
+        const navigator: EntryPointDataFlowNavigator = {
+          open: async (location) => {
+            const targetUri = vscode.Uri.parse(location.uri, true);
+            const range = new vscode.Range(
+              new vscode.Position(
+                location.range.start.line,
+                location.range.start.character,
+              ),
+              new vscode.Position(
+                location.range.end.line,
+                location.range.end.character,
+              ),
+            );
+            const document = await vscode.workspace.openTextDocument(targetUri);
+            const editor = await vscode.window.showTextDocument(document, {
+              preserveFocus: false,
+              selection: range,
+            });
+            editor.revealRange(
+              range,
+              vscode.TextEditorRevealType.InCenterIfOutsideViewport,
+            );
+          },
+        };
+        const result = await navigateEntryPointDataFlowLocation(
+          rawArgument,
+          navigator,
+        );
+        if (!result.success && result.errorMessage !== undefined) {
+          await vscode.window.showErrorMessage(result.errorMessage);
+        }
+      },
+    ),
     vscode.commands.registerCommand("hlsl.selectVariant", async () => {
       const editor = vscode.window.activeTextEditor;
       const documentUri =
@@ -1335,63 +1576,43 @@ export async function activate(
         );
       }
       await updateVariantStatus();
-      if (
-        event.affectsConfiguration("hlsl.activeVariant", resource) &&
-        compilationInfoState !== undefined
-      ) {
-        await refreshCompilationInfo(lifecycle, compilationInfoState.uri);
-      }
-      if (
-        event.affectsConfiguration("hlsl.activeVariant", resource) &&
-        resourceBindingsState !== undefined
-      ) {
-        await refreshResourceBindings(lifecycle, resourceBindingsState.uri);
-      }
-      if (
-        event.affectsConfiguration("hlsl.activeVariant", resource) &&
-        preprocessorExplorerState !== undefined
-      ) {
-        await refreshPreprocessorExplorer(
-          lifecycle,
-          preprocessorExplorerState.uri,
-        );
+      if (affectsResolvedCompilation(event, resource)) {
+        await refreshAllOpenAnalysisPanels(lifecycle);
       }
     }),
     vscode.workspace.onDidChangeWorkspaceFolders(restart),
     vscode.workspace.onDidSaveTextDocument((document) => {
-      if (document.uri.toString() === compilationInfoState?.uri.toString()) {
-        void refreshCompilationInfo(lifecycle, compilationInfoState.uri);
+      // Conservative: every panel's analysis covers its root document's
+      // current snapshot *plus* any #include'd file open elsewhere in the
+      // workspace (see docs/call-hierarchy.md's "Includes and unsaved
+      // edits"), and the client has no dependency query telling it which
+      // open document a given root actually includes. So saving *any*
+      // open HLSL document refreshes every currently open analysis panel,
+      // not only one whose own tracked root exactly matches the saved
+      // document.
+      if (document.languageId !== "hlsl") {
+        return;
       }
-      if (document.uri.toString() === resourceBindingsState?.uri.toString()) {
-        void refreshResourceBindings(lifecycle, resourceBindingsState.uri);
-      }
-      if (
-        document.uri.toString() === preprocessorExplorerState?.uri.toString()
-      ) {
-        void refreshPreprocessorExplorer(
-          lifecycle,
-          preprocessorExplorerState.uri,
-        );
-      }
+      void refreshAllOpenAnalysisPanels(lifecycle);
     }),
     vscode.workspace.onDidChangeTextDocument((event) => {
-      if (
-        event.document.uri.toString() === compilationInfoState?.uri.toString()
-      ) {
+      // Same conservative "any open HLSL document" trigger as the save
+      // handler above, but debounced per panel so a burst of keystrokes
+      // triggers one request per panel, not a storm of them.
+      if (event.document.languageId !== "hlsl") {
+        return;
+      }
+      if (compilationInfoState !== undefined) {
         if (compilationInfoDebounce !== undefined) {
           clearTimeout(compilationInfoDebounce);
         }
-        // Debounced so a burst of keystrokes triggers one compile, not a
-        // storm of hlsl/compilationInfo requests.
         compilationInfoDebounce = setTimeout(() => {
           if (compilationInfoState !== undefined) {
             void refreshCompilationInfo(lifecycle, compilationInfoState.uri);
           }
         }, 500);
       }
-      if (
-        event.document.uri.toString() === resourceBindingsState?.uri.toString()
-      ) {
+      if (resourceBindingsState !== undefined) {
         if (resourceBindingsDebounce !== undefined) {
           clearTimeout(resourceBindingsDebounce);
         }
@@ -1401,10 +1622,7 @@ export async function activate(
           }
         }, 500);
       }
-      if (
-        event.document.uri.toString() ===
-        preprocessorExplorerState?.uri.toString()
-      ) {
+      if (preprocessorExplorerState !== undefined) {
         if (preprocessorExplorerDebounce !== undefined) {
           clearTimeout(preprocessorExplorerDebounce);
         }
@@ -1417,6 +1635,7 @@ export async function activate(
           }
         }, 500);
       }
+      entryPointDataFlowState?.controller.scheduleDebouncedRefresh();
     }),
     {
       dispose(): void {
@@ -1470,5 +1689,9 @@ export async function deactivate(): Promise<void> {
     preprocessorExplorerDebounce = undefined;
   }
   preprocessorExplorerState = undefined;
+  entryPointDataFlowState?.controller.dispose();
+  entryPointDataFlowState = undefined;
+  watchedFileRefreshDebouncer?.dispose();
+  watchedFileRefreshDebouncer = undefined;
   await lifecycle?.stop();
 }

@@ -82,6 +82,14 @@ using json_rpc::Json;
     return static_cast<std::uint32_t>(value);
 }
 
+[[nodiscard]] std::uint64_t unsigned64_member(const Json& object, std::string_view name) {
+    const auto value = integer_member(object, name);
+    if (value < 0) {
+        invalid_params(std::string{"Expected non-negative integer: "} + std::string{name});
+    }
+    return static_cast<std::uint64_t>(value);
+}
+
 [[nodiscard]] workspace::Position position(const Json& value) {
     if (!value.is_object()) {
         invalid_params("Expected position object");
@@ -288,6 +296,55 @@ using json_rpc::Json;
                                    true);
     return {.start = workspace::lsp_position_at(snapshot.text(), start),
             .end = workspace::lsp_position_at(snapshot.text(), end)};
+}
+
+// Byte-offset-based range clamping/mapping shared by call-hierarchy JSON
+// construction, generalized to arbitrary `text` (rather than a
+// currently-open document's own snapshot the way `symbol_range` is) since a
+// call-hierarchy item or call site can live in any file the translation
+// unit reads, open or not.
+[[nodiscard]] workspace::Range offset_range(std::string_view text, std::uint32_t start_offset,
+                                            std::uint32_t end_offset) {
+    const auto start = symbol_offset(text, static_cast<std::size_t>(start_offset), false);
+    const auto normalized_end =
+        symbol_offset(text, (std::max)(static_cast<std::size_t>(end_offset), start), true);
+    const auto end = (std::max)(normalized_end, start);
+    return {.start = workspace::lsp_position_at(text, start),
+            .end = workspace::lsp_position_at(text, end)};
+}
+
+[[nodiscard]] workspace::Range callable_range(const dxc::CallableSymbol& callable,
+                                              std::string_view text) {
+    return offset_range(text, callable.start_offset, callable.end_offset);
+}
+
+[[nodiscard]] workspace::Range
+name_selection_range(std::string_view name, std::uint32_t location_offset, std::string_view text) {
+    const auto text_size = text.size();
+    const auto start = symbol_offset(text, static_cast<std::size_t>(location_offset), false);
+    auto source_offset = start;
+    auto name_offset = std::size_t{};
+    while (source_offset < text_size && name_offset < name.size()) {
+        if (text[source_offset] == name[name_offset]) {
+            ++source_offset;
+            ++name_offset;
+        } else if (text[source_offset] == ' ' || text[source_offset] == '\t') {
+            ++source_offset;
+        } else {
+            break;
+        }
+    }
+    const auto end = symbol_offset(
+        text,
+        name_offset == name.size() ? source_offset : (std::min)(start + name.size(), text_size),
+        true);
+    return {.start = workspace::lsp_position_at(text, start),
+            .end = workspace::lsp_position_at(text, end)};
+}
+
+[[nodiscard]] workspace::Range callable_selection_range(const dxc::CallableSymbol& callable,
+                                                        std::string_view text) {
+    return name_selection_range(callable.name, callable.location.offset, text);
 }
 
 void append_document_symbols(Json& output, const std::vector<dxc::Symbol>& symbols,
@@ -1980,6 +2037,22 @@ void Server::register_handlers() {
     dispatcher_.register_request_handler(
         "textDocument/rename",
         [this](const auto& params, const auto& context) { return rename(params, context); });
+    dispatcher_.register_request_handler("textDocument/prepareCallHierarchy",
+                                         [this](const auto& params, const auto& context) {
+                                             return prepare_call_hierarchy(params, context);
+                                         });
+    dispatcher_.register_request_handler("callHierarchy/incomingCalls",
+                                         [this](const auto& params, const auto& context) {
+                                             return call_hierarchy_incoming_calls(params, context);
+                                         });
+    dispatcher_.register_request_handler("callHierarchy/outgoingCalls",
+                                         [this](const auto& params, const auto& context) {
+                                             return call_hierarchy_outgoing_calls(params, context);
+                                         });
+    dispatcher_.register_request_handler("hlsl/entryPointDataFlow",
+                                         [this](const auto& params, const auto& context) {
+                                             return entry_point_data_flow(params, context);
+                                         });
     dispatcher_.register_request_handler(
         "textDocument/hover",
         [this](const auto& params, const auto& context) { return hover(params, context); });
@@ -2200,6 +2273,7 @@ Json Server::initialize(const std::optional<Json>& params) {
         {"referencesProvider", true},
         {"renameProvider", {{"prepareProvider", true}}},
         {"hoverProvider", true},
+        {"callHierarchyProvider", true},
         {"signatureHelpProvider",
          {{"triggerCharacters", Json::array({"(", ","})},
           {"retriggerCharacters", Json::array({")"})}}},
@@ -2511,6 +2585,669 @@ Json Server::references(const std::optional<Json>& params,
             {{"uri", target.uri()}, {"range", lsp_range(reference_range(text, reference))}});
     }
     return locations;
+}
+
+std::string Server::text_for_path(std::string_view path) const {
+    std::string text;
+    try {
+        const auto target = workspace::DocumentUri::from_path(std::string{path});
+        {
+            std::scoped_lock state_lock{state_mutex_};
+            if (documents_.contains(target.uri())) {
+                text = documents_.snapshot(target.uri()).text();
+            }
+        }
+        if (text.empty()) {
+            std::ifstream stream{target.path(), std::ios::binary};
+            text = {std::istreambuf_iterator<char>{stream}, std::istreambuf_iterator<char>{}};
+        }
+    } catch (const workspace::DocumentError&) {
+        return {};
+    }
+    return text;
+}
+
+Json Server::call_hierarchy_item(const dxc::CallableSymbol& callable, const std::string& root_uri,
+                                 const std::string& root_identity, std::int64_t root_version,
+                                 std::uint64_t root_generation) const {
+    const auto target = workspace::DocumentUri::from_path(callable.location.path);
+    const auto text = text_for_path(callable.location.path);
+    const auto whole_range = text.empty() ? workspace::Range{} : callable_range(callable, text);
+    const auto selection_range =
+        text.empty() ? workspace::Range{} : callable_selection_range(callable, text);
+    Json data{{"rootUri", root_uri},
+              {"rootIdentity", root_identity},
+              {"rootVersion", root_version},
+              // Pins the exact compiled snapshot this callable was
+              // resolved from (see `Manager::content_generation`'s
+              // comments): an included-file edit or a configuration/
+              // active-variant change can reparse this root without
+              // changing `rootVersion`, so `rootVersion` alone cannot
+              // detect it.
+              {"generation", root_generation},
+              {"path", callable.location.path},
+              {"line", callable.location.line},
+              {"column", callable.location.column},
+              {"startOffset", callable.start_offset},
+              {"cursorKind", callable.cursor_kind},
+              {"name", callable.name}};
+    return {{"name", callable.name},
+            {"kind", symbol_kind(callable.cursor_kind, callable.name)},
+            {"detail", callable.signature},
+            {"uri", target.uri()},
+            {"range", lsp_range(whole_range)},
+            {"selectionRange", lsp_range(selection_range)},
+            {"data", std::move(data)}};
+}
+
+Json Server::navigable_json(std::string_view name, std::uint32_t cursor_kind,
+                            const dxc::SourceLocation& location, std::uint32_t start_offset,
+                            std::uint32_t end_offset) const {
+    const auto target = workspace::DocumentUri::from_path(location.path);
+    const auto text = text_for_path(location.path);
+    const auto whole_range =
+        text.empty() ? workspace::Range{} : offset_range(text, start_offset, end_offset);
+    const auto selection_range =
+        text.empty() ? workspace::Range{} : name_selection_range(name, location.offset, text);
+    return {{"name", std::string{name}},
+            {"kind", symbol_kind(cursor_kind, name)},
+            {"uri", target.uri()},
+            {"range", lsp_range(whole_range)},
+            {"selectionRange", lsp_range(selection_range)}};
+}
+
+Server::CallHierarchyItemData Server::parse_call_hierarchy_item_data(const Json& item) {
+    if (!item.is_object()) {
+        invalid_params("Call hierarchy item must be an object");
+    }
+    const auto& data = object_member(item, "data");
+    CallHierarchyItemData result;
+    result.root_uri = string_member(data, "rootUri");
+    result.root_identity = string_member(data, "rootIdentity");
+    result.root_version = integer_member(data, "rootVersion");
+    result.generation = unsigned64_member(data, "generation");
+    result.path = string_member(data, "path");
+    result.line = unsigned_member(data, "line");
+    result.column = unsigned_member(data, "column");
+    result.start_offset = unsigned_member(data, "startOffset");
+    result.cursor_kind = unsigned_member(data, "cursorKind");
+    result.name = string_member(data, "name");
+    return result;
+}
+
+Json Server::prepare_call_hierarchy(const std::optional<Json>& params,
+                                    const json_rpc::RequestContext& context) {
+    require_running();
+    const auto& value = object_params(params);
+    const auto uri = string_member(object_member(value, "textDocument"), "uri");
+    const auto request_position = position(object_member(value, "position"));
+
+    workspace::SourceSnapshot snapshot = [&] {
+        std::scoped_lock state_lock{state_mutex_};
+        try {
+            const auto& state = documents_.document(uri);
+            if (!state.open) {
+                invalid_params("prepareCallHierarchy document is not open");
+            }
+            return documents_.snapshot(uri);
+        } catch (const workspace::DocumentError& error) {
+            invalid_params(error.what());
+        }
+    }();
+
+    analyze_and_publish(snapshot.uri());
+    const auto [line, column] = dxc_position(snapshot.text(), request_position);
+    const auto callable =
+        analysis_.callable_at(snapshot.document_uri().identity(), snapshot.version(),
+                              snapshot.path(), line, column, context.cancellation);
+    {
+        std::scoped_lock state_lock{state_mutex_};
+        if (!documents_.contains(snapshot.uri()) ||
+            documents_.snapshot(snapshot.uri()).version() != snapshot.version()) {
+            throw HandlerError{json_rpc::content_modified_code,
+                               "prepareCallHierarchy was superseded"};
+        }
+    }
+    if (!callable.value.has_value()) {
+        return nullptr;
+    }
+    // Builds the full response *before* the final staleness recheck below,
+    // not after: `call_hierarchy_item` independently re-fetches the root's
+    // (and, when the callable lives in an include, that include's) *live*
+    // document text via `text_for_path` to turn `callable`'s offsets into
+    // LSP line/column ranges. That fetch is a separately timed read of
+    // mutable server state from the atomic `callable_at` call above, so a
+    // concurrent edit landing in between could otherwise pair this item's
+    // still-old offsets with already-new text -- exactly the "mixed old
+    // offsets/new text" hazard the recheck immediately below exists to
+    // catch, by rejecting outright whenever anything could have raced
+    // *any* part of this construction, rather than only checking beforehand.
+    auto item =
+        call_hierarchy_item(*callable.value, snapshot.uri(), snapshot.document_uri().identity(),
+                            snapshot.version(), callable.generation);
+    {
+        std::scoped_lock state_lock{state_mutex_};
+        if (!documents_.contains(snapshot.uri()) ||
+            documents_.snapshot(snapshot.uri()).version() != snapshot.version()) {
+            throw HandlerError{json_rpc::content_modified_code,
+                               "prepareCallHierarchy was superseded"};
+        }
+    }
+    // `callable.generation` was captured atomically alongside `callable.value`
+    // (see `WithGeneration`), but the document-version recheck above cannot
+    // detect an included-file edit or a configuration/active-variant change
+    // that reparses this root without bumping its own version -- exactly the
+    // gap `data.generation` exists to close for *later* incoming/outgoing
+    // requests. Re-fetching the content generation right *after* fully
+    // building the item this handler is about to return closes that same
+    // gap for this request too: a reanalysis racing anywhere between the
+    // atomic `callable_at` call above and this point -- including during
+    // the item construction above -- would otherwise let a returned
+    // `CallHierarchyItem` embed a generation, or text-derived ranges, that
+    // no longer describe the current analysis.
+    if (options_.analysis_hooks && options_.analysis_hooks->before_call_hierarchy_revalidation) {
+        options_.analysis_hooks->before_call_hierarchy_revalidation();
+    }
+    if (analysis_.content_generation(snapshot.document_uri().identity(), snapshot.version(),
+                                     context.cancellation) != callable.generation) {
+        throw HandlerError{json_rpc::content_modified_code, "prepareCallHierarchy was superseded"};
+    }
+    return Json::array({std::move(item)});
+}
+
+std::uint64_t
+Server::validate_call_hierarchy_item(const CallHierarchyItemData& data,
+                                     const json_rpc::CancellationToken& cancellation) {
+    {
+        std::scoped_lock state_lock{state_mutex_};
+        if (!documents_.contains(data.root_uri) || !documents_.document(data.root_uri).open ||
+            documents_.document(data.root_uri).version != data.root_version) {
+            throw HandlerError{json_rpc::content_modified_code,
+                               "Call hierarchy item is no longer valid"};
+        }
+    }
+    // `data.root_version` alone cannot detect an included-file edit or a
+    // configuration/active-variant change: `Manager::analyze` reparses the
+    // root's translation unit for either without bumping the root
+    // document's own version. Re-resolving the callable at its own stored
+    // position and comparing both its content generation and its own
+    // identity (start offset, cursor kind, name) against what was captured
+    // when this item was built is what actually detects that the stored
+    // `data` no longer describes the same symbol in the current analysis,
+    // rather than trusting those stored fields unchecked.
+    const auto generation = analysis_.verify_call_hierarchy_identity(
+        data.root_identity, data.root_version, data.path, data.line, data.column, data.start_offset,
+        data.cursor_kind, data.name, cancellation);
+    if (!generation.has_value() || *generation != data.generation) {
+        throw HandlerError{json_rpc::content_modified_code,
+                           "Call hierarchy item no longer matches the analyzed source"};
+    }
+    return *generation;
+}
+
+Json Server::call_hierarchy_outgoing_calls(const std::optional<Json>& params,
+                                           const json_rpc::RequestContext& context) {
+    require_running();
+    const auto& value = object_params(params);
+    const auto data = parse_call_hierarchy_item_data(object_member(value, "item"));
+
+    {
+        std::scoped_lock state_lock{state_mutex_};
+        if (!documents_.contains(data.root_uri) || !documents_.document(data.root_uri).open ||
+            documents_.document(data.root_uri).version != data.root_version) {
+            throw HandlerError{json_rpc::content_modified_code,
+                               "Call hierarchy item is no longer valid"};
+        }
+    }
+    analyze_and_publish(data.root_uri);
+    // Validates that `data` still describes the same symbol in the current
+    // analysis (see `validate_call_hierarchy_item`'s comment). That check
+    // and the `outgoing_calls` query below are still two separately timed
+    // Manager operations, so a reanalysis (an included-file edit or a
+    // configuration/active-variant change) could in principle land strictly
+    // between them -- the explicit generation comparison below, not just
+    // the document-version recheck that follows it, is what actually closes
+    // that window: it rejects with ContentModified whenever the generation
+    // `outgoing_calls` actually computed against differs from the one this
+    // validation just confirmed matches `data`, rather than silently
+    // returning callees resolved from a different analysis than the one the
+    // caller's `data` was validated against.
+    static_cast<void>(validate_call_hierarchy_item(data, context.cancellation));
+    auto outgoing = analysis_.outgoing_calls(data.root_identity, data.root_version, data.path,
+                                             data.line, data.column, context.cancellation);
+    auto& calls = outgoing.value;
+    if (outgoing.generation != data.generation) {
+        throw HandlerError{json_rpc::content_modified_code,
+                           "Call hierarchy item no longer matches the analyzed source"};
+    }
+    {
+        std::scoped_lock state_lock{state_mutex_};
+        if (!documents_.contains(data.root_uri) ||
+            documents_.document(data.root_uri).version != data.root_version) {
+            throw HandlerError{json_rpc::content_modified_code,
+                               "Call hierarchy item is no longer valid"};
+        }
+    }
+
+    const auto caller_text = text_for_path(data.path);
+    Json result = Json::array();
+    for (const auto& call : calls) {
+        Json from_ranges = Json::array();
+        for (const auto& call_site : call.call_sites) {
+            if (caller_text.empty()) {
+                continue;
+            }
+            from_ranges.push_back(
+                lsp_range(offset_range(caller_text, call_site.start_offset, call_site.end_offset)));
+        }
+        result.push_back({{"to", call_hierarchy_item(call.callee, data.root_uri, data.root_identity,
+                                                     data.root_version, outgoing.generation)},
+                          {"fromRanges", std::move(from_ranges)}});
+    }
+    // The checks above close the window between validation and the
+    // `outgoing_calls` query itself, but `caller_text`/each callee's own
+    // `call_hierarchy_item` construction re-fetch *live* document text
+    // independently, after that query returned -- a further edit landing
+    // during this construction (of the caller's own file, or of whichever
+    // file a callee happens to be defined in) could otherwise pair
+    // offsets computed against `outgoing.generation` with already-newer
+    // text. One last generation recheck, strictly after the full response
+    // is built, catches that remaining window too.
+    if (options_.analysis_hooks && options_.analysis_hooks->before_call_hierarchy_revalidation) {
+        options_.analysis_hooks->before_call_hierarchy_revalidation();
+    }
+    if (analysis_.content_generation(data.root_identity, data.root_version, context.cancellation) !=
+        outgoing.generation) {
+        throw HandlerError{json_rpc::content_modified_code,
+                           "Call hierarchy item no longer matches the analyzed source"};
+    }
+    return result;
+}
+
+Json Server::call_hierarchy_incoming_calls(const std::optional<Json>& params,
+                                           const json_rpc::RequestContext& context) {
+    require_running();
+    const auto& value = object_params(params);
+    const auto data = parse_call_hierarchy_item_data(object_member(value, "item"));
+
+    {
+        std::scoped_lock state_lock{state_mutex_};
+        if (!documents_.contains(data.root_uri) || !documents_.document(data.root_uri).open ||
+            documents_.document(data.root_uri).version != data.root_version) {
+            throw HandlerError{json_rpc::content_modified_code,
+                               "Call hierarchy item is no longer valid"};
+        }
+    }
+    analyze_and_publish(data.root_uri);
+    // This item's own root/identity/position must still be valid. The
+    // generation returned here describes exactly this validation check's
+    // own, separately timed query; it is compared explicitly below against
+    // whichever candidate root turns out to be `data.root_identity` itself
+    // (see the loop), since that is the only candidate for which "the
+    // generation this item was built against" is even a meaningful
+    // expectation -- every other candidate root has its own, entirely
+    // independent generation namespace (see `Manager::content_generation`'s
+    // comment on what a generation counts), so there is nothing to compare
+    // its generation to a priori and each simply uses its own current one.
+    static_cast<void>(validate_call_hierarchy_item(data, context.cancellation));
+
+    // Incoming callers can live in any currently open root that resolves the
+    // target's own file as part of its translation unit -- not only the
+    // root the item happened to be prepared from -- exactly the same
+    // cross-root expansion `find_references` already performs for
+    // textDocument/references. `data.path` must still be parseable into a
+    // valid document identity; malformed input is rejected here, before any
+    // root is queried, rather than surfacing as an obscure internal error
+    // later.
+    try {
+        static_cast<void>(workspace::DocumentUri::from_path(data.path).identity());
+    } catch (const workspace::DocumentError& error) {
+        invalid_params(error.what());
+    }
+
+    struct Accumulated {
+        dxc::CallableSymbol caller;
+        std::string root_uri;
+        std::string root_identity;
+        std::int64_t root_version{};
+        std::uint64_t generation{};
+        std::vector<dxc::Reference> call_sites;
+    };
+    // Keyed by (caller path, caller start offset, *root identity*): two
+    // different root/config contexts (different `#define`s, a different
+    // active variant, or simply an unrelated other root) can each report a
+    // caller at the very same textual path+offset while having resolved it
+    // against incompatible compiler contexts (different macro expansions,
+    // different reachable overloads, etc.). Keying on root identity too
+    // keeps every context's result in its own distinct entry -- with its
+    // own metadata and generation -- instead of silently retaining only the
+    // first root's metadata while splicing in call sites computed under a
+    // different context's analysis.
+    //
+    // A structured key (rather than a delimiter-joined string) is used
+    // deliberately: `path` and `root_identity` are filesystem paths, which
+    // on this platform (and in general) can themselves contain ':'
+    // (e.g. a Windows drive letter, `C:\...`). Concatenating
+    // `path + ':' + offset + ':' + root_identity` is therefore not
+    // injective -- distinct (path, offset, root_identity) triples can
+    // produce the identical joined string (for example, one entry's path
+    // absorbing what another entry intended as its offset/root-identity
+    // separator), which would silently merge two unrelated callers'
+    // `call_sites` into one entry. Comparing/hashing the three fields
+    // individually has no such ambiguity.
+    struct AccumulatedKey {
+        std::string path;
+        std::uint32_t start_offset{};
+        std::string root_identity;
+
+        [[nodiscard]] bool operator==(const AccumulatedKey&) const = default;
+    };
+    struct AccumulatedKeyHash {
+        [[nodiscard]] std::size_t operator()(const AccumulatedKey& key) const noexcept {
+            std::size_t seed = std::hash<std::string>{}(key.path);
+            seed ^= std::hash<std::uint32_t>{}(key.start_offset) + 0x9e3779b9 + (seed << 6) +
+                    (seed >> 2);
+            seed ^= std::hash<std::string>{}(key.root_identity) + 0x9e3779b9 + (seed << 6) +
+                    (seed >> 2);
+            return seed;
+        }
+    };
+    std::unordered_map<AccumulatedKey, Accumulated, AccumulatedKeyHash> accumulated;
+    // Every candidate root's query result, and the identity/version/
+    // generation it was queried against, keyed by root identity,
+    // independent of whether that query happened to yield any calls.
+    // Recorded so the final revalidation pass after full response
+    // construction can cover every root this response's correctness
+    // actually depended on, not only the subset that happened to
+    // contribute a caller (see that pass's own comment for why an
+    // empty-result root still needs this).
+    std::unordered_map<std::string, std::pair<std::int64_t, std::uint64_t>>
+        queried_root_generations;
+
+    // Every currently open root is queried, unconditionally -- there is no
+    // "is this root even a plausible candidate" filter here (there
+    // deliberately was one keyed on `dependency_identities`/
+    // `has_dynamic_includes`, and it was removed; see below). `roots()`
+    // returns a *copied snapshot* of each root's metadata, taken once
+    // before this loop starts; a root copied into that snapshot as
+    // "definitely not dependent on the target file" can be edited (a new
+    // `#include` added) or reconfigured (active variant/`#define`s
+    // changed) an instant later -- concurrently with, or strictly between,
+    // this snapshot and this loop reaching that root -- making it a real
+    // caller that a filter based on the stale copy would wrongly skip.
+    // Because a skipped root is never queried, it is also never added to
+    // `queried_root_generations` above, so the final revalidation pass
+    // could not have caught the omission either: the root's true
+    // dependency on the target only becomes visible once it is actually
+    // queried against its *current* analysis. Querying every root
+    // unconditionally removes that window entirely: every root's
+    // dependency on the target is settled by its own `incoming_calls`
+    // query against live, current analysis, not by trusting a
+    // point-in-time metadata copy. This is not a new source of
+    // unboundedness: `Server::workspace_symbols` already queries every
+    // root in `analysis_.roots()` unconditionally (no dependency filter at
+    // all), so the accepted bounded contract for "iterate every currently
+    // open root" already exists elsewhere in this file -- the set is
+    // bounded by however many roots the client currently has open, exactly
+    // as it always has been for every exhaustive-root handler.
+    for (const auto& root : analysis_.roots()) {
+        context.cancellation.throw_if_cancellation_requested();
+        if (options_.analysis_hooks &&
+            options_.analysis_hooks->before_call_hierarchy_candidate_root) {
+            options_.analysis_hooks->before_call_hierarchy_candidate_root(root.root_identity);
+        }
+        workspace::SourceSnapshot root_snapshot = [&] {
+            std::scoped_lock state_lock{state_mutex_};
+            if (!documents_.contains(root.root_uri) || !documents_.document(root.root_uri).open) {
+                throw HandlerError{json_rpc::content_modified_code,
+                                   "A referenced root is no longer open"};
+            }
+            return documents_.snapshot(root.root_uri);
+        }();
+        analyze_and_publish(root_snapshot.uri());
+        auto incoming =
+            analysis_.incoming_calls(root.root_identity, root_snapshot.version(), data.path,
+                                     data.line, data.column, context.cancellation);
+        auto& calls = incoming.value;
+        queried_root_generations.insert_or_assign(
+            root.root_identity, std::pair{root_snapshot.version(), incoming.generation});
+        // Only meaningful when this candidate root *is* the item's own
+        // root: closes the same TOCTOU window `outgoing_calls` guards
+        // against above -- a reanalysis of `data.root_identity` landing
+        // strictly between `validate_call_hierarchy_item` and this query
+        // must not be allowed to silently serialize results computed
+        // against a different analysis than the one `data` was validated
+        // against.
+        if (root.root_identity == data.root_identity && incoming.generation != data.generation) {
+            throw HandlerError{json_rpc::content_modified_code,
+                               "Call hierarchy item no longer matches the analyzed source"};
+        }
+        {
+            std::scoped_lock state_lock{state_mutex_};
+            if (!documents_.contains(root_snapshot.uri()) ||
+                !documents_.document(root_snapshot.uri()).open ||
+                documents_.document(root_snapshot.uri()).version != root_snapshot.version()) {
+                throw HandlerError{json_rpc::content_modified_code,
+                                   "A referenced root changed during analysis"};
+            }
+        }
+        for (auto& call : calls) {
+            const AccumulatedKey key{.path = call.caller.location.path,
+                                     .start_offset = call.caller.start_offset,
+                                     .root_identity = root.root_identity};
+            auto existing = accumulated.find(key);
+            if (existing == accumulated.end()) {
+                accumulated.emplace(key, Accumulated{.caller = call.caller,
+                                                     .root_uri = root_snapshot.uri(),
+                                                     .root_identity = root.root_identity,
+                                                     .root_version = root_snapshot.version(),
+                                                     .generation = incoming.generation,
+                                                     .call_sites = std::move(call.call_sites)});
+            } else {
+                // Both entries share this root/generation (same key), so
+                // merging their call sites is safe here -- unlike merging
+                // across different roots, this cannot mix incompatible
+                // compiler contexts.
+                existing->second.call_sites.insert(existing->second.call_sites.end(),
+                                                   std::make_move_iterator(call.call_sites.begin()),
+                                                   std::make_move_iterator(call.call_sites.end()));
+            }
+        }
+    }
+
+    std::vector<Accumulated> ordered;
+    ordered.reserve(accumulated.size());
+    for (auto& [key, accumulated_entry] : accumulated) {
+        static_cast<void>(key);
+        ordered.push_back(std::move(accumulated_entry));
+    }
+    std::ranges::sort(ordered, [](const auto& left, const auto& right) {
+        return std::tie(left.caller.location.path, left.caller.start_offset, left.root_identity) <
+               std::tie(right.caller.location.path, right.caller.start_offset, right.root_identity);
+    });
+
+    Json result = Json::array();
+    for (auto& entry : ordered) {
+        std::ranges::sort(entry.call_sites, {}, &dxc::Reference::start_offset);
+        // Two candidate-root iterations can both report the very same
+        // physical call site (e.g. an overload resolved identically on
+        // both sides of a header boundary); dedupe by offset range so a
+        // single caller reference is never shown twice for one entry.
+        entry.call_sites.erase(std::unique(entry.call_sites.begin(), entry.call_sites.end(),
+                                           [](const auto& left, const auto& right) {
+                                               return left.start_offset == right.start_offset &&
+                                                      left.end_offset == right.end_offset;
+                                           }),
+                               entry.call_sites.end());
+        const auto caller_text = text_for_path(entry.caller.location.path);
+        Json from_ranges = Json::array();
+        for (const auto& call_site : entry.call_sites) {
+            if (caller_text.empty()) {
+                continue;
+            }
+            from_ranges.push_back(
+                lsp_range(offset_range(caller_text, call_site.start_offset, call_site.end_offset)));
+        }
+        result.push_back(
+            {{"from", call_hierarchy_item(entry.caller, entry.root_uri, entry.root_identity,
+                                          entry.root_version, entry.generation)},
+             {"fromRanges", std::move(from_ranges)}});
+    }
+
+    // The per-root checks in the loop above only close the window between
+    // *that root's own* query and the next root's; the final serialization
+    // pass just above (each entry's own `call_hierarchy_item`/`caller_text`
+    // construction, which independently re-fetches *live* document text)
+    // runs strictly after every root has already been queried, so a
+    // reanalysis of *any* queried root landing during that pass, or during
+    // the earlier processing of a later root in the loop, would not
+    // otherwise be caught. Revalidate every candidate root this response
+    // actually *queried* -- `queried_root_generations`, captured immediately
+    // after each root's own `incoming_calls` query above -- not merely the
+    // subset that happened to contribute a caller: a candidate root that
+    // legitimately returned zero callers at query time is just as capable
+    // of being reanalyzed strictly afterward (e.g. a concurrent edit adds a
+    // new call from that root) as one that did contribute, and omitting it
+    // here would let a now-stale "no callers from this root" silently
+    // stand instead of being rejected as `ContentModified`.
+    if (options_.analysis_hooks && options_.analysis_hooks->before_call_hierarchy_revalidation) {
+        options_.analysis_hooks->before_call_hierarchy_revalidation();
+    }
+    for (const auto& [root_identity, version_and_generation] : queried_root_generations) {
+        context.cancellation.throw_if_cancellation_requested();
+        const auto& [root_version, expected_generation] = version_and_generation;
+        if (analysis_.content_generation(root_identity, root_version, context.cancellation) !=
+            expected_generation) {
+            throw HandlerError{json_rpc::content_modified_code,
+                               "A referenced root changed during analysis"};
+        }
+    }
+    return result;
+}
+
+Json Server::entry_point_data_flow(const std::optional<Json>& params,
+                                   const json_rpc::RequestContext& context) {
+    require_running();
+    const auto& value = object_params(params);
+    const auto uri = string_member(object_member(value, "textDocument"), "uri");
+
+    workspace::SourceSnapshot snapshot = [&] {
+        std::scoped_lock state_lock{state_mutex_};
+        try {
+            const auto& state = documents_.document(uri);
+            if (!state.open) {
+                invalid_params("hlsl/entryPointDataFlow document is not open");
+            }
+            return documents_.snapshot(uri);
+        } catch (const workspace::DocumentError& error) {
+            invalid_params(error.what());
+        }
+    }();
+
+    analyze_and_publish(snapshot.uri());
+    // `flow` and `generation` are fetched together, atomically, from the
+    // same serialized manager operation (see `WithGeneration`'s comment):
+    // fetching them via two separate `Manager` calls could straddle a
+    // concurrent reanalysis (an included file edit or a
+    // configuration/active-variant change reparses without bumping the
+    // root's own document version) and tag this result with a generation
+    // describing a *different* analysis than the one that actually
+    // produced it.
+    const auto flow_with_generation = analysis_.entry_point_data_flow(
+        snapshot.document_uri().identity(), snapshot.version(), {}, context.cancellation);
+    const auto& flow = flow_with_generation.value;
+    const auto generation = flow_with_generation.generation;
+    {
+        std::scoped_lock state_lock{state_mutex_};
+        if (!documents_.contains(snapshot.uri()) ||
+            documents_.snapshot(snapshot.uri()).version() != snapshot.version()) {
+            throw HandlerError{json_rpc::content_modified_code,
+                               "hlsl/entryPointDataFlow was superseded"};
+        }
+    }
+    const auto root_uri = snapshot.uri();
+    const auto root_identity = snapshot.document_uri().identity();
+    const auto root_version = snapshot.version();
+
+    Json result{{"found", flow.found}, {"explanation", flow.explanation}};
+    if (flow.entry_point.has_value()) {
+        result["entryPoint"] = call_hierarchy_item(*flow.entry_point, root_uri, root_identity,
+                                                   root_version, generation);
+    } else {
+        // `Json{nullptr}` would construct a one-element array via the
+        // initializer-list constructor; assignment is used instead so this
+        // is unambiguously a JSON null.
+        result["entryPoint"] = nullptr;
+    }
+
+    Json reachable = Json::array();
+    for (const auto& node : flow.reachable_functions) {
+        reachable.push_back(
+            {{"function", call_hierarchy_item(node.function, root_uri, root_identity, root_version,
+                                              generation)},
+             {"depth", node.depth},
+             {"recursive", node.recursive}});
+    }
+    result["reachableFunctions"] = std::move(reachable);
+
+    Json unreachable = Json::array();
+    for (const auto& function : flow.unreachable_functions) {
+        unreachable.push_back(
+            call_hierarchy_item(function, root_uri, root_identity, root_version, generation));
+    }
+    result["unreachableFunctions"] = std::move(unreachable);
+
+    Json unused = Json::array();
+    for (const auto& declaration : flow.unused_declarations) {
+        unused.push_back(navigable_json(declaration.name, declaration.cursor_kind,
+                                        declaration.location, declaration.start_offset,
+                                        declaration.end_offset));
+    }
+    result["unusedDeclarations"] = std::move(unused);
+
+    Json accesses = Json::array();
+    for (const auto& access : flow.global_accesses) {
+        auto entry = navigable_json(access.name, access.cursor_kind, access.location,
+                                    access.start_offset, access.end_offset);
+        entry["qualifiedName"] = access.qualified_name;
+        entry["access"] = access.access == dxc::GlobalAccessKind::read    ? "read"
+                          : access.access == dxc::GlobalAccessKind::write ? "write"
+                                                                          : "readWrite";
+        accesses.push_back(std::move(entry));
+    }
+    result["globalAccesses"] = std::move(accesses);
+
+    result["truncated"] = flow.truncated;
+    // Distinct per-phase truncation reasons: `truncated` alone cannot tell a
+    // client which section(s) of this response may be incomplete, and the
+    // four causes are independent (hitting one does not imply the others).
+    // A client rendering `unreachableFunctions` as authoritative dead-code
+    // information, for example, needs `functionsVisitedTruncated` *and*
+    // `definitionsTruncated` specifically, not the blanket `truncated`
+    // flag, since `globalAccessesTruncated`/`unusedDeclarationsTruncated`
+    // do not affect that section's completeness at all.
+    result["functionsVisitedTruncated"] = flow.functions_visited_truncated;
+    result["definitionsTruncated"] = flow.definitions_truncated;
+    result["globalAccessesTruncated"] = flow.global_accesses_truncated;
+    result["unusedDeclarationsTruncated"] = flow.unused_declarations_truncated;
+    result["functionsVisited"] = flow.functions_visited;
+
+    // Serializing the traversal above (potentially thousands of reachable
+    // functions/accesses/declarations) takes long enough that a reanalysis
+    // could complete strictly between the atomic `entry_point_data_flow`
+    // fetch above and this point, even though the version recheck right
+    // after that fetch already passed. Re-verifying the content generation
+    // one last time, immediately before handing this JSON back to the
+    // caller, closes that remaining window: every `CallHierarchyItem.data`
+    // embedded above was tagged with `generation`, so if the root's current
+    // generation has since moved on, this response must be rejected rather
+    // than returned describing an analysis that is no longer current.
+    if (analysis_.content_generation(root_identity, root_version, context.cancellation) !=
+        generation) {
+        throw HandlerError{json_rpc::content_modified_code,
+                           "hlsl/entryPointDataFlow was superseded"};
+    }
+    return result;
 }
 
 Json Server::prepare_rename(const std::optional<Json>& params,

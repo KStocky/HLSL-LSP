@@ -19,11 +19,13 @@
 #include <iterator>
 #include <limits>
 #include <regex>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -814,6 +816,7 @@ void attach_resource_source_locations(CompilationInfo& info,
 
 [[nodiscard]] DxcCursorKind cursor_kind(IDxcCursor& cursor);
 [[nodiscard]] bool callable_cursor(DxcCursorKind kind);
+[[nodiscard]] bool type_cursor(DxcCursorKind kind);
 [[nodiscard]] std::string trim(std::string_view value);
 
 [[nodiscard]] std::string cursor_qualified_symbol_name(IDxcCursor& cursor) {
@@ -1134,6 +1137,868 @@ void append_named_callables(IDxcCursor& parent, std::string_view name,
     } catch (const std::exception&) {
         return "unknown";
     }
+}
+
+// ---------------------------------------------------------------------------
+// Call hierarchy and entry-point data-flow support.
+//
+// Everything below is derived exclusively from DXC's IDxcCursor cursor tree
+// (GetChildren/GetReferencedCursor/GetArgumentAt/GetSemanticParent); there is
+// no separate HLSL parser or textual heuristic anywhere in this section.
+// ---------------------------------------------------------------------------
+
+[[nodiscard]] ComPtr<IDxcCursor> adopt_addref(IDxcCursor* cursor) {
+    ComPtr<IDxcCursor> result;
+    if (cursor != nullptr) {
+        cursor->AddRef();
+        *result.put() = cursor;
+    }
+    return result;
+}
+
+// Pages through `cursor`'s children (DXC's GetChildren is paginated) and
+// invokes `callback` once per non-null child, in order.
+template <typename Callback> void for_each_child(IDxcCursor& cursor, Callback&& callback) {
+    constexpr unsigned page_size = 256;
+    for (unsigned skip = 0;; skip += page_size) {
+        unsigned child_count{};
+        IDxcCursor** raw_children{};
+        check(cursor.GetChildren(skip, page_size, &child_count, &raw_children), "GetChildren");
+        TaskCursors children{raw_children, child_count};
+        for (unsigned index = 0; index < child_count; ++index) {
+            if (children[index] != nullptr) {
+                callback(*children[index]);
+            }
+        }
+        if (child_count < page_size) {
+            break;
+        }
+    }
+}
+
+// Recurses into container declarations the same way `cursor_symbols` does
+// (structs/classes/namespaces/templates), collecting every callable cursor
+// that is itself a *definition* (`IsDefinition() == true`); a declaration
+// without a visible body cannot be traced, so those are skipped rather than
+// reported as reachable/unreachable with no body to scan. `node_count` is
+// threaded through recursive calls (rather than reset per-call) so the
+// checkpoint below covers the whole tree walk, not just one container's
+// direct children.
+//
+// Bounded by `max_definitions` independently of any reachability budget:
+// once `out` reaches that size, `truncated` is set and no further
+// definitions are collected or recursed into -- a translation unit with an
+// enormous number of (mostly unreachable/dead) function definitions would
+// otherwise make this collection pass itself, and the `unreachable_functions`
+// output it feeds, unbounded (see `EntryPointDataFlowLimits::
+// max_definitions_collected`'s comment). `truncated` is checked at the top
+// of the recursive call and the callback both, so no further work of any
+// kind (not even walking sibling nodes at the *current* level, which are
+// still cheap paginated `GetChildren` calls but skip all callable/kind
+// checks) proceeds once the budget is hit.
+void collect_callable_definitions(IDxcCursor& cursor, std::vector<ComPtr<IDxcCursor>>& out,
+                                  std::uint32_t depth,
+                                  const std::function<void()>& cancellation_checkpoint,
+                                  std::uint64_t& node_count, std::size_t max_definitions,
+                                  bool& truncated) {
+    if (depth >= 64 || truncated) {
+        return;
+    }
+    for_each_child(cursor, [&](IDxcCursor& child) {
+        if (truncated) {
+            return;
+        }
+        if ((++node_count % 512) == 0 && cancellation_checkpoint) {
+            cancellation_checkpoint();
+        }
+        const auto kind = cursor_kind(child);
+        if (callable_cursor(kind)) {
+            BOOL is_definition{};
+            check(child.IsDefinition(&is_definition), "IsDefinition");
+            if (is_definition != FALSE) {
+                if (out.size() >= max_definitions) {
+                    truncated = true;
+                    return;
+                }
+                out.push_back(adopt_addref(&child));
+            }
+            return;
+        }
+        if (symbol_container(kind)) {
+            collect_callable_definitions(child, out, depth + 1, cancellation_checkpoint, node_count,
+                                         max_definitions, truncated);
+        }
+    });
+}
+
+// True when `candidate` could plausibly be an HLSL shader entry point:
+// a plain free-function definition (`DxcCursor_FunctionDecl`), never a
+// method, constructor, conversion function, or (uninstantiated) function
+// template, and declared at translation-unit or namespace scope rather
+// than as a struct/class/union member. HLSL entry points are ordinary
+// top-level functions; a struct method or a constructor that merely
+// shares its spelling with the configured entry point name must never be
+// silently selected instead. This is a conservative filter over compiler
+// cursor kind/scope, not a textual guess.
+[[nodiscard]] bool is_valid_entry_point_candidate(IDxcCursor& candidate) {
+    if (cursor_kind(candidate) != DxcCursor_FunctionDecl) {
+        return false;
+    }
+    ComPtr<IDxcCursor> parent;
+    check(candidate.GetSemanticParent(parent.put()), "GetSemanticParent");
+    if (is_null_cursor(parent.get())) {
+        return true;
+    }
+    const auto parent_kind = cursor_kind(*parent.get());
+    return !type_cursor(parent_kind);
+}
+
+// True when `referenced` is a variable declared at file/namespace scope
+// (a "global" for data-flow purposes), as opposed to a local variable or
+// parameter declared inside a function/method body. DXC exposes no direct
+// "is this a local" flag, so this walks the semantic-parent chain: a
+// variable declared inside any callable (function/method/constructor) is
+// local, and everything else (including `static` file-scope variables and
+// namespace-scope variables) is global.
+[[nodiscard]] bool is_global_variable_cursor(IDxcCursor& referenced) {
+    if (cursor_kind(referenced) != DxcCursor_VarDecl) {
+        return false;
+    }
+    ComPtr<IDxcCursor> current;
+    check(referenced.GetSemanticParent(current.put()), "GetSemanticParent");
+    for (std::uint32_t depth = 0; !is_null_cursor(current.get()) && depth < 64; ++depth) {
+        if (callable_cursor(cursor_kind(*current.get()))) {
+            return false;
+        }
+        ComPtr<IDxcCursor> parent;
+        check(current->GetSemanticParent(parent.put()), "GetSemanticParent");
+        current = std::move(parent);
+    }
+    return true;
+}
+
+// True when `referenced` is a field of a cbuffer/tbuffer (HLSL's global
+// constant-buffer containers, which the cursor tree represents as an
+// anonymous/named UnexposedDecl whose formatted name starts with "cbuffer "
+// or "tbuffer ", the same shape `layout_container_key` already recognizes
+// for memory-layout reporting). A field of an ordinary struct is not itself
+// treated as a global: if the struct *instance* is a global variable, the
+// instance itself is reported as accessed via `is_global_variable_cursor`
+// when its own DeclRefExpr is visited.
+[[nodiscard]] bool is_cbuffer_or_tbuffer_field_cursor(IDxcCursor& referenced) {
+    if (cursor_kind(referenced) != DxcCursor_FieldDecl) {
+        return false;
+    }
+    ComPtr<IDxcCursor> parent;
+    check(referenced.GetSemanticParent(parent.put()), "GetSemanticParent");
+    if (is_null_cursor(parent.get())) {
+        check(referenced.GetLexicalParent(parent.put()), "GetLexicalParent");
+    }
+    if (is_null_cursor(parent.get()) || cursor_kind(*parent.get()) != DxcCursor_UnexposedDecl) {
+        return false;
+    }
+    const auto formatted = cursor_formatted_name(*parent.get());
+    return formatted.starts_with("cbuffer ") || formatted.starts_with("tbuffer ");
+}
+
+// A small, deliberately conservative allow-list of HLSL resource-object
+// methods DXC's cursor tree cannot otherwise prove are read-only (a method
+// call's implicit object argument is always exposed "bare", the same shape
+// as a mutating access -- see the comment on `BodyScanner::walk`'s CallExpr
+// handling). Any method not on this list (Store, InterlockedAdd, Append,
+// Consume, IncrementCounter/DecrementCounter, or any unrecognized/
+// user-defined method) is classified read_write rather than guessed.
+//
+// This allowlist encodes semantics specific to the compiler *builtin*
+// resource/sampler types; it must never be applied to a method call whose
+// receiver has not first been proven (via `is_builtin_resource_type_spelling`
+// against the receiver's own declared type) to actually be one of those
+// builtin types, since a user-defined struct/class is free to declare its
+// own method reusing one of these names with entirely different (and
+// possibly mutating) semantics.
+[[nodiscard]] bool is_read_only_resource_method(std::string_view name) {
+    static const std::unordered_set<std::string_view> read_only_methods{
+        "Sample",
+        "SampleBias",
+        "SampleGrad",
+        "SampleLevel",
+        "SampleCmp",
+        "SampleCmpBias",
+        "SampleCmpGrad",
+        "SampleCmpLevelZero",
+        "Load",
+        "Load2DMS",
+        "Gather",
+        "GatherRed",
+        "GatherGreen",
+        "GatherBlue",
+        "GatherAlpha",
+        "GatherCmp",
+        "GatherCmpRed",
+        "GatherCmpGreen",
+        "GatherCmpBlue",
+        "GatherCmpAlpha",
+        "CalculateLevelOfDetail",
+        "CalculateLevelOfDetailUnclamped",
+        "GetDimensions",
+        "GetSamplePosition",
+    };
+    return read_only_methods.contains(name);
+}
+
+// Returns whether `spelling` (a cursor's `IDxcType::GetSpelling` result, as
+// produced by `cursor_type`) names one of HLSL's compiler builtin
+// resource/sampler object types -- exactly, never merely as a prefix, so a
+// user-defined type that happens to start with one of these names (e.g.
+// `Texture2DArrayOfThings`) is never mistaken for the real thing. Template
+// arguments (e.g. the `<float4>` in `Texture2D<float4>`) and a leading
+// qualifier DXC may include are stripped before comparison.
+[[nodiscard]] bool is_builtin_resource_type_spelling(std::string_view spelling) {
+    auto name = spelling;
+    if (const auto angle = name.find('<'); angle != std::string_view::npos) {
+        name = name.substr(0, angle);
+    }
+    while (!name.empty() && name.back() == ' ') {
+        name.remove_suffix(1);
+    }
+    if (const auto space = name.rfind(' '); space != std::string_view::npos) {
+        name = name.substr(space + 1);
+    }
+    static const std::unordered_set<std::string_view> builtin_resource_types{
+        "Texture1D",
+        "Texture1DArray",
+        "Texture2D",
+        "Texture2DArray",
+        "Texture2DMS",
+        "Texture2DMSArray",
+        "Texture3D",
+        "TextureCube",
+        "TextureCubeArray",
+        "RWTexture1D",
+        "RWTexture1DArray",
+        "RWTexture2D",
+        "RWTexture2DArray",
+        "RWTexture3D",
+        "Buffer",
+        "RWBuffer",
+        "StructuredBuffer",
+        "RWStructuredBuffer",
+        "AppendStructuredBuffer",
+        "ConsumeStructuredBuffer",
+        "ByteAddressBuffer",
+        "RWByteAddressBuffer",
+        "ConstantBuffer",
+        "SamplerState",
+        "SamplerComparisonState",
+        "RaytracingAccelerationStructure",
+        "FeedbackTexture2D",
+        "FeedbackTexture2DArray",
+        "RasterizerOrderedTexture1D",
+        "RasterizerOrderedTexture1DArray",
+        "RasterizerOrderedTexture2D",
+        "RasterizerOrderedTexture2DArray",
+        "RasterizerOrderedTexture3D",
+        "RasterizerOrderedBuffer",
+        "RasterizerOrderedByteAddressBuffer",
+        "RasterizerOrderedStructuredBuffer",
+    };
+    return builtin_resource_types.contains(name);
+}
+
+// Peels at most a few layers of implicit-load (UnexposedExpr) and
+// member-access (MemberRefExpr) wrapping from `cursor` to reach an
+// underlying DeclRefExpr, then resolves it. Used to locate a method or
+// operator call's implicit object argument (e.g. the resource `buf` in
+// `buf.Sample(...)` or `buf[i]`), which empirically appears at an
+// unpredictable position among a CallExpr's children rather than a fixed
+// index, instead of guessing that position.
+[[nodiscard]] ComPtr<IDxcCursor> resolve_global_operand(ComPtr<IDxcCursor> cursor) {
+    for (std::uint32_t guard = 0; !is_null_cursor(cursor.get()) && guard < 8; ++guard) {
+        const auto kind = cursor_kind(*cursor.get());
+        if (kind != DxcCursor_UnexposedExpr && kind != DxcCursor_MemberRefExpr) {
+            break;
+        }
+        unsigned child_count{};
+        IDxcCursor** raw_children{};
+        check(cursor->GetChildren(0, 1, &child_count, &raw_children), "GetChildren");
+        TaskCursors children{raw_children, child_count};
+        if (child_count == 0 || children[0] == nullptr) {
+            break;
+        }
+        cursor = adopt_addref(children[0]);
+    }
+    if (is_null_cursor(cursor.get()) || cursor_kind(*cursor.get()) != DxcCursor_DeclRefExpr) {
+        return {};
+    }
+    ComPtr<IDxcCursor> referenced;
+    check(cursor->GetReferencedCursor(referenced.put()), "GetReferencedCursor");
+    return referenced;
+}
+
+// Searches `call_expr`'s immediate children (not recursing into nested call
+// expressions, so a resource reference belonging to a *different* nested
+// call, e.g. `a.Store(idx, b.Load(idx2))`, is never misattributed to `a`)
+// for the implicit receiver -- what a method/operator call's implicit
+// object argument always is in HLSL, since every resource is declared at
+// global scope. `explicit_arguments` (the call's genuine, caller-supplied
+// arguments -- for an overloaded operator call on a member this is
+// `GetArgumentAt`'s results *excluding* index 0, which DXC/Clang models as
+// the implicit receiver itself, not a real argument; for an ordinary
+// (non-operator) method call it is all of `GetArgumentAt`'s results, none
+// of which include the receiver) are explicitly excluded from this search:
+// without that exclusion, a global passed *as an argument* to a method
+// called on a non-global receiver (e.g. a resource function parameter)
+// could otherwise be mistaken for the receiver itself, silently
+// suppressing that argument's own independent access.
+[[nodiscard]] ComPtr<IDxcCursor>
+find_resource_base(IDxcCursor& call_expr, std::span<const ComPtr<IDxcCursor>> explicit_arguments) {
+    ComPtr<IDxcCursor> found;
+    for_each_child(call_expr, [&](IDxcCursor& child) {
+        if (found.get() != nullptr) {
+            return;
+        }
+        const auto is_argument = std::ranges::any_of(explicit_arguments, [&](const auto& argument) {
+            if (argument.get() == nullptr) {
+                return false;
+            }
+            BOOL equal{};
+            check(argument->IsEqualTo(&child, &equal), "IsEqualTo");
+            return equal != FALSE;
+        });
+        if (is_argument) {
+            return;
+        }
+        auto referenced = resolve_global_operand(adopt_addref(&child));
+        if (!is_null_cursor(referenced.get()) && is_global_variable_cursor(*referenced.get())) {
+            found = std::move(referenced);
+        }
+    });
+    return found;
+}
+
+[[nodiscard]] GlobalAccess make_global_access(IDxcCursor& referenced, GlobalAccessKind kind) {
+    ComPtr<IDxcSourceLocation> location;
+    check(referenced.GetLocation(location.put()), "GetLocation");
+    ComPtr<IDxcSourceRange> extent;
+    check(referenced.GetExtent(extent.put()), "GetExtent");
+    unsigned start{};
+    unsigned end{};
+    check(extent->GetOffsets(&start, &end), "GetOffsets");
+    return GlobalAccess{
+        .name = cursor_spelling(referenced),
+        .qualified_name = cursor_qualified_symbol_name(referenced),
+        .cursor_kind = static_cast<std::uint32_t>(cursor_kind(referenced)),
+        .location = make_source_location(*location.get()),
+        .start_offset = start,
+        .end_offset = end,
+        .access = kind,
+    };
+}
+
+[[nodiscard]] CallableSymbol make_callable_symbol(IDxcCursor& cursor) {
+    ComPtr<IDxcCursor> definition;
+    check(cursor.GetDefinitionCursor(definition.put()), "GetDefinitionCursor");
+    auto* target = is_null_cursor(definition.get()) ? &cursor : definition.get();
+    BOOL is_definition{};
+    check(target->IsDefinition(&is_definition), "IsDefinition");
+
+    ComPtr<IDxcSourceLocation> location;
+    check(target->GetLocation(location.put()), "GetLocation");
+    ComPtr<IDxcSourceRange> extent;
+    check(target->GetExtent(extent.put()), "GetExtent");
+    unsigned start{};
+    unsigned end{};
+    check(extent->GetOffsets(&start, &end), "GetOffsets");
+
+    return CallableSymbol{
+        .name = cursor_spelling(*target),
+        .qualified_name = cursor_qualified_symbol_name(*target),
+        .signature = declaration_header(*target),
+        .cursor_kind = static_cast<std::uint32_t>(cursor_kind(*target)),
+        .location = make_source_location(*location.get()),
+        .start_offset = start,
+        .end_offset = end,
+        .is_definition = is_definition != FALSE,
+    };
+}
+
+[[nodiscard]] std::string callable_identity_key(const CallableSymbol& symbol) {
+    return symbol.location.path + ':' + std::to_string(symbol.start_offset);
+}
+
+// Distinguishes, for one level of recursion into a CallExpr's children,
+// whether the child being visited is one of the call's genuine arguments
+// (found via DXC's own GetArgumentAt, which is compared against by cursor
+// identity rather than child position -- see `BodyScanner::walk`) versus
+// everything else (the callee designator and, for method/operator calls,
+// the implicit object argument).
+enum class BareContext : std::uint8_t { normal, call_argument };
+
+// Classifies a global/resource reference that DXC's cursor tree left "bare"
+// (i.e. NOT wrapped in an implicit-load UnexposedExpr -- see the file
+// comment on the empirical basis for this rule). `parent_kind` is the
+// cursor kind of the reference's immediate structural parent.
+[[nodiscard]] GlobalAccessKind classify_bare_context(DxcCursorKind parent_kind,
+                                                     BareContext context) {
+    if (context == BareContext::call_argument) {
+        // A bare (unwrapped) call argument binds to an `out`/`inout`
+        // parameter (DXC only wraps a call argument in an implicit load
+        // when it binds to a plain `in` parameter). Whether it is
+        // write-only (`out`) or both read and written (`inout`) cannot be
+        // told apart from the cursor tree alone, so this is conservatively
+        // read_write rather than guessed.
+        return GlobalAccessKind::read_write;
+    }
+    switch (parent_kind) {
+    case DxcCursor_CompoundAssignOperator:
+    case DxcCursor_UnaryOperator:
+        // `x += ...` / `++x` / `--x` read the previous value and write the
+        // new one.
+        return GlobalAccessKind::read_write;
+    case DxcCursor_BinaryOperator:
+        // Every operand of a value-producing binary operator (arithmetic or
+        // comparison) is wrapped in an implicit load by DXC; a bare operand
+        // of a BinaryOperator can therefore only be the left-hand side of a
+        // plain `=` assignment.
+        return GlobalAccessKind::write;
+    default:
+        // No bare-producing context has been observed other than the ones
+        // above and a plain `=` assignment's left-hand side; anything else
+        // reaching here without a load wrapper is conservatively treated as
+        // both read and written rather than assumed read-only.
+        return GlobalAccessKind::read_write;
+    }
+}
+
+// Walks a callable definition's own cursor subtree (parameters and body)
+// once, recording:
+//  - every direct call to another callable definition or declaration
+//    (`outgoing_calls()`), keyed by the callee's own identity so repeated
+//    calls to the same overload accumulate call sites rather than
+//    duplicating entries; and
+//  - every global variable, cbuffer/tbuffer field, and resource object
+//    read or written, merged across every `scan()` call made on the same
+//    BodyScanner instance (callers that want per-function isolation should
+//    use a fresh instance; `TranslationUnit::entry_point_data_flow` shares
+//    one instance across every reachable function precisely so the merged
+//    accesses aggregate the way its documented contract promises).
+//
+// Read/write classification rests on one empirically verified DXC/Clang
+// behavior: an expression node is wrapped in an implicit-load UnexposedExpr
+// exactly when its value is loaded (read); a reference used purely as an
+// lvalue (assignment left-hand side, compound-assign/increment/decrement
+// operand, or an `out`/`inout` call argument) is left "bare" with no
+// wrapper. This was confirmed against pinned DXC 1.9.2607.13 across plain
+// assignment, compound assignment, comparison, unary increment, `in`/
+// `inout` call arguments, resource subscript operators, and resource
+// method calls (see intellisense_tests.cpp's call-hierarchy/data-flow test
+// cases). Wherever the cursor tree does not disambiguate (an unresolvable
+// bare context, or a named resource method not on the read-only
+// allow-list), classification defaults to read_write rather than guessing
+// narrower -- this is a hard requirement, not merely a fallback of
+// convenience.
+class BodyScanner final {
+  public:
+    BodyScanner(EntryPointDataFlowLimits limits, std::function<void()> cancellation_checkpoint)
+        : limits_{limits}, cancellation_checkpoint_{std::move(cancellation_checkpoint)} {}
+
+    void scan(IDxcCursor& callable_definition) {
+        outgoing_calls_.clear();
+        outgoing_index_.clear();
+        walk(callable_definition, DxcCursor_UnexposedDecl, BareContext::normal, 0);
+    }
+
+    [[nodiscard]] std::vector<OutgoingCall> outgoing_calls() const {
+        auto result = outgoing_calls_;
+        for (auto& call : result) {
+            std::ranges::sort(call.call_sites, {}, &Reference::start_offset);
+        }
+        std::ranges::sort(result, [](const auto& left, const auto& right) {
+            return std::tie(left.callee.location.path, left.callee.start_offset) <
+                   std::tie(right.callee.location.path, right.callee.start_offset);
+        });
+        return result;
+    }
+
+    [[nodiscard]] std::vector<GlobalAccess> global_accesses() const {
+        std::vector<GlobalAccess> result;
+        result.reserve(accesses_by_key_.size());
+        for (const auto& [key, access] : accesses_by_key_) {
+            result.push_back(access);
+        }
+        std::ranges::sort(result, [](const auto& left, const auto& right) {
+            return std::tie(left.location.path, left.start_offset) <
+                   std::tie(right.location.path, right.start_offset);
+        });
+        return result;
+    }
+
+    [[nodiscard]] bool access_truncated() const noexcept { return access_truncated_; }
+
+  private:
+    void checkpoint() {
+        if ((++node_count_ % 512) == 0 && cancellation_checkpoint_) {
+            cancellation_checkpoint_();
+        }
+    }
+
+    // Records a read/write/read_write access to a global/resource
+    // declaration. Once the retention budget (`max_global_accesses`) is
+    // hit, *newly encountered* (unseen) declarations are rejected -- their
+    // key is not present in `accesses_by_key_`, so admitting them would
+    // grow the retained set past its budget. Declarations already retained
+    // before the budget was hit, however, must keep being conservatively
+    // merged for every later access: skipping that merge (as an earlier
+    // version of this function did, via an unconditional early return once
+    // truncated) could leave an already-retained global under-reported as
+    // `read` even though a later write to it was actually observed, which
+    // is exactly the kind of under-reporting this API's "never
+    // under-report a real read/write" contract forbids.
+    void record_access(IDxcCursor& referenced, GlobalAccessKind kind) {
+        auto access = make_global_access(referenced, kind);
+        const auto key = access.location.path + ':' + std::to_string(access.start_offset);
+        auto it = accesses_by_key_.find(key);
+        if (it == accesses_by_key_.end()) {
+            if (access_truncated_ || accesses_by_key_.size() >= limits_.max_global_accesses) {
+                access_truncated_ = true;
+                return;
+            }
+            accesses_by_key_.emplace(key, std::move(access));
+            return;
+        }
+        if (it->second.access != access.access) {
+            it->second.access = GlobalAccessKind::read_write;
+        }
+    }
+
+    // The same `path:start_offset` identity key `record_access` keys
+    // `accesses_by_key_` with, computed directly from a referenced
+    // declaration cursor -- used to recognize when a CallExpr's own
+    // specialized resource-access classification (from its method-name
+    // allow-list or its own wrap/bare state for an operator call) and the
+    // generic DeclRefExpr/MemberRefExpr walk are about to (re-)classify the
+    // exact same declaration, so the generic walk can defer to the already
+    // more-precise specialized classification instead of overwriting it.
+    [[nodiscard]] static std::string declaration_key(IDxcCursor& referenced) {
+        ComPtr<IDxcSourceLocation> location;
+        check(referenced.GetLocation(location.put()), "GetLocation");
+        ComPtr<IDxcSourceRange> extent;
+        check(referenced.GetExtent(extent.put()), "GetExtent");
+        unsigned start{};
+        unsigned end{};
+        check(extent->GetOffsets(&start, &end), "GetOffsets");
+        (void)end;
+        return make_source_location(*location.get()).path + ':' + std::to_string(start);
+    }
+
+    void record_call(IDxcCursor& call_expr, IDxcCursor& callee) {
+        if (!callable_cursor(cursor_kind(callee))) {
+            return;
+        }
+        auto symbol = make_callable_symbol(callee);
+        if (symbol.location.path.empty()) {
+            // No navigable location (a compiler intrinsic or other
+            // synthetic cursor) -- not reportable as an outgoing call
+            // target.
+            return;
+        }
+        ComPtr<IDxcSourceLocation> location;
+        check(call_expr.GetLocation(location.put()), "GetLocation");
+        ComPtr<IDxcSourceRange> extent;
+        check(call_expr.GetExtent(extent.put()), "GetExtent");
+        unsigned start{};
+        unsigned end{};
+        check(extent->GetOffsets(&start, &end), "GetOffsets");
+        Reference call_site{.location = make_source_location(*location.get()),
+                            .start_offset = start,
+                            .end_offset = end};
+
+        const auto key = callable_identity_key(symbol);
+        const auto existing = outgoing_index_.find(key);
+        if (existing == outgoing_index_.end()) {
+            outgoing_index_.emplace(key, outgoing_calls_.size());
+            outgoing_calls_.push_back(
+                OutgoingCall{.callee = std::move(symbol), .call_sites = {std::move(call_site)}});
+            return;
+        }
+        outgoing_calls_[existing->second].call_sites.push_back(std::move(call_site));
+    }
+
+    void walk(IDxcCursor& cursor, DxcCursorKind parent_kind, BareContext context,
+              std::uint32_t depth, std::string_view suppress_key = {}) {
+        if (depth > 4096) {
+            return;
+        }
+        checkpoint();
+        const auto kind = cursor_kind(cursor);
+
+        if (kind == DxcCursor_DeclRefExpr || kind == DxcCursor_MemberRefExpr) {
+            ComPtr<IDxcCursor> referenced;
+            check(cursor.GetReferencedCursor(referenced.put()), "GetReferencedCursor");
+            if (!is_null_cursor(referenced.get()) &&
+                (is_global_variable_cursor(*referenced.get()) ||
+                 is_cbuffer_or_tbuffer_field_cursor(*referenced.get()))) {
+                // Skip a declaration whose access was already classified,
+                // more precisely, by the enclosing CallExpr's own
+                // specialized resource-access logic just below (a resource
+                // reference reached through this generic recursion, e.g.
+                // `tex` inside `tex.Sample(...)`'s MemberRefExpr subtree,
+                // would otherwise be reclassified here using a strictly
+                // less informative rule -- see the CallExpr branch).
+                if (declaration_key(*referenced.get()) != suppress_key) {
+                    const auto access_kind = parent_kind == DxcCursor_UnexposedExpr
+                                                 ? GlobalAccessKind::read
+                                                 : classify_bare_context(parent_kind, context);
+                    record_access(*referenced.get(), access_kind);
+                }
+            }
+        } else if (kind == DxcCursor_CallExpr) {
+            ComPtr<IDxcCursor> callee;
+            check(cursor.GetReferencedCursor(callee.put()), "GetReferencedCursor");
+            int num_arguments{-1};
+            check(cursor.GetNumArguments(&num_arguments), "GetNumArguments");
+            std::vector<ComPtr<IDxcCursor>> arguments;
+            arguments.reserve(static_cast<std::size_t>((std::max)(num_arguments, 0)));
+            for (int index = 0; index < num_arguments; ++index) {
+                ComPtr<IDxcCursor> argument;
+                check(cursor.GetArgumentAt(index, argument.put()), "GetArgumentAt");
+                arguments.push_back(std::move(argument));
+            }
+
+            std::string resource_suppress_key;
+            if (!is_null_cursor(callee.get())) {
+                record_call(cursor, *callee.get());
+                if (cursor_kind(*callee.get()) == DxcCursor_CXXMethod) {
+                    const auto callee_name = cursor_spelling(*callee.get());
+                    const auto is_operator = callee_name.starts_with("operator");
+                    // For an overloaded operator call on a member (e.g.
+                    // `buf[i]`, modeled by DXC/Clang as a
+                    // CXXOperatorCallExpr), `GetArgumentAt(0)` is the
+                    // implicit receiver itself, not a genuine call
+                    // argument -- unlike an ordinary (non-operator)
+                    // CXXMethod call, whose `GetArgumentAt` results never
+                    // include the receiver. Excluding that receiver
+                    // "argument" from the implicit-receiver search below
+                    // would make the search find nothing (the receiver is
+                    // the *only* global among an operator call's
+                    // arguments in the common case, e.g. `buf[id.x]` has
+                    // no other global operand), silently falling through
+                    // to a far less precise generic classification. Only
+                    // arguments genuinely supplied by the caller --
+                    // `arguments[1:]` for an operator call on a member,
+                    // all of `arguments` for a non-operator method call --
+                    // are excluded from the receiver search.
+                    auto resource = find_resource_base(
+                        cursor, std::span<const ComPtr<IDxcCursor>>{arguments}.subspan(
+                                    is_operator && !arguments.empty() ? 1 : 0));
+                    if (!is_null_cursor(resource.get())) {
+                        // The read-only method-name allowlist encodes
+                        // knowledge specific to the *compiler builtin*
+                        // resource/sampler types (Texture2D::Sample,
+                        // RWStructuredBuffer::Load, ...); a user-defined
+                        // struct or class can declare its own method with
+                        // the same name that mutates state, so the
+                        // allowlist may only be applied once the
+                        // receiver's own declared type is proven to be one
+                        // of those builtin types. An unproven (i.e.
+                        // user-defined) receiver type is always
+                        // conservatively read_write, regardless of name.
+                        const auto receiver_is_builtin_resource =
+                            is_builtin_resource_type_spelling(cursor_type(*resource.get()));
+                        const auto access_kind =
+                            is_operator ? (parent_kind == DxcCursor_UnexposedExpr
+                                               ? GlobalAccessKind::read
+                                               : classify_bare_context(parent_kind, context))
+                                        : (receiver_is_builtin_resource &&
+                                                   is_read_only_resource_method(callee_name)
+                                               ? GlobalAccessKind::read
+                                               : GlobalAccessKind::read_write);
+                        record_access(*resource.get(), access_kind);
+                        resource_suppress_key = declaration_key(*resource.get());
+                    }
+                }
+            }
+
+            for_each_child(cursor, [&](IDxcCursor& child) {
+                const auto is_argument = std::ranges::any_of(arguments, [&](const auto& argument) {
+                    if (argument.get() == nullptr) {
+                        return false;
+                    }
+                    BOOL equal{};
+                    check(argument->IsEqualTo(&child, &equal), "IsEqualTo");
+                    return equal != FALSE;
+                });
+                walk(child, kind, is_argument ? BareContext::call_argument : BareContext::normal,
+                     depth + 1, resource_suppress_key);
+            });
+            return;
+        }
+
+        for_each_child(cursor, [&](IDxcCursor& child) {
+            walk(child, kind, BareContext::normal, depth + 1, suppress_key);
+        });
+    }
+
+    EntryPointDataFlowLimits limits_;
+    std::function<void()> cancellation_checkpoint_;
+    std::unordered_map<std::string, GlobalAccess> accesses_by_key_;
+    bool access_truncated_{};
+    std::unordered_map<std::string, std::size_t> outgoing_index_;
+    std::vector<OutgoingCall> outgoing_calls_;
+    std::uint64_t node_count_{};
+};
+
+// Resolves the callable declaration/definition cursor at `path`/`line`/
+// `column` (a call site or the callable's own name), the same way
+// `hover_at`/`definition_at` resolve a target cursor: the cursor found at
+// that position if it is not itself a reference, otherwise whatever it
+// refers to. Returns a null ComPtr when the position does not resolve to a
+// function, method, constructor, or conversion function.
+[[nodiscard]] ComPtr<IDxcCursor> resolve_callable_cursor(IDxcTranslationUnit& translation_unit,
+                                                         std::string_view path, std::uint32_t line,
+                                                         std::uint32_t column) {
+    const std::string owned_path{path};
+    ComPtr<IDxcFile> file;
+    check(translation_unit.GetFile(owned_path.c_str(), file.put()), "GetFile");
+    ComPtr<IDxcSourceLocation> location;
+    check(translation_unit.GetLocation(file.get(), line, column, location.put()), "GetLocation");
+    ComPtr<IDxcCursor> cursor;
+    check(translation_unit.GetCursorForLocation(location.get(), cursor.put()),
+          "GetCursorForLocation");
+    if (is_null_cursor(cursor.get())) {
+        return {};
+    }
+    ComPtr<IDxcCursor> referenced;
+    check(cursor->GetReferencedCursor(referenced.put()), "GetReferencedCursor");
+    auto* target = is_null_cursor(referenced.get()) ? cursor.get() : referenced.get();
+    if (!callable_cursor(cursor_kind(*target))) {
+        return {};
+    }
+    return adopt_addref(target);
+}
+
+// True when `declaration` has at least one reference anywhere in `sources`
+// other than its own declaration/definition occurrence -- used to identify
+// unused top-level declarations. FindReferencesInFile reports the
+// declaration's own name as one of its "references", so that occurrence
+// (matched by exact source location) is excluded rather than counted.
+[[nodiscard]] bool has_any_reference(IDxcTranslationUnit& translation_unit, IDxcCursor& declaration,
+                                     const std::vector<SourceFile>& sources,
+                                     const SourceLocation& declaration_location,
+                                     const std::function<void()>& cancellation_checkpoint) {
+    constexpr unsigned page_size = 64;
+    std::uint64_t page_count = 0;
+    for (const auto& source : sources) {
+        ComPtr<IDxcFile> file;
+        check(translation_unit.GetFile(source.path.c_str(), file.put()), "GetFile");
+        for (unsigned skip = 0;; skip += page_size) {
+            if ((++page_count % 8) == 0 && cancellation_checkpoint) {
+                cancellation_checkpoint();
+            }
+            unsigned count{};
+            IDxcCursor** raw_references{};
+            check(declaration.FindReferencesInFile(file.get(), skip, page_size, &count,
+                                                   &raw_references),
+                  "FindReferencesInFile");
+            TaskCursors references{raw_references, count};
+            for (unsigned index = 0; index < count; ++index) {
+                auto* reference = references[index];
+                if (reference == nullptr) {
+                    continue;
+                }
+                ComPtr<IDxcSourceLocation> reference_location;
+                check(reference->GetLocation(reference_location.put()), "GetLocation");
+                if (make_source_location(*reference_location.get()) != declaration_location) {
+                    return true;
+                }
+            }
+            if (count < page_size) {
+                break;
+            }
+        }
+    }
+    return false;
+}
+
+// Top-level (file/namespace-scope) function and global-variable
+// declarations with zero references anywhere in the current unsaved
+// snapshot -- a compiler-verifiable, entry-point-independent dead code
+// signal. The configured entry point itself is always excluded (shader
+// entry points are the analysis root, not something anything else in the
+// shader is expected to call). Deliberately scoped to top-level
+// declarations only, not struct/class members: a struct field's "use" is
+// bound up with its containing type's use, which this conservative,
+// well-defined signal does not attempt to model.
+//
+// Each candidate's reference scan is at least O(sources.size()); `limits`
+// bounds the total number of declarations actually scanned so a
+// translation unit with an enormous number of top-level declarations
+// cannot make a single request perform unbounded work. Declarations beyond
+// that budget are simply omitted from the result (a conservative
+// under-report, never a false "unused" claim), and `truncated` is set so
+// the caller can fold it into the overall response's truncation signal.
+[[nodiscard]] std::vector<Symbol> unused_top_level_declarations(
+    IDxcTranslationUnit& translation_unit, IDxcCursor& root, const std::vector<SourceFile>& sources,
+    std::string_view entry_point_name, const EntryPointDataFlowLimits& limits,
+    const std::function<void()>& cancellation_checkpoint, bool& truncated) {
+    std::vector<Symbol> result;
+    std::uint64_t node_count = 0;
+    std::uint64_t reference_scans_performed = 0;
+    for_each_child(root, [&](IDxcCursor& child) {
+        if ((++node_count % 512) == 0 && cancellation_checkpoint) {
+            cancellation_checkpoint();
+        }
+        const auto kind = cursor_kind(child);
+        const auto is_function = callable_cursor(kind);
+        const auto is_global = kind == DxcCursor_VarDecl;
+        if (!is_function && !is_global) {
+            return;
+        }
+        if (is_function) {
+            BOOL is_definition{};
+            check(child.IsDefinition(&is_definition), "IsDefinition");
+            if (is_definition == FALSE) {
+                return;
+            }
+        }
+        const auto name = cursor_spelling(child);
+        if (name.empty() || name == entry_point_name) {
+            return;
+        }
+        ComPtr<IDxcSourceLocation> location;
+        check(child.GetLocation(location.put()), "GetLocation");
+        if (location.get() == nullptr) {
+            return;
+        }
+        if (reference_scans_performed >= limits.max_unused_declaration_candidates) {
+            truncated = true;
+            return;
+        }
+        ++reference_scans_performed;
+        const auto declaration_location = make_source_location(*location.get());
+        if (has_any_reference(translation_unit, child, sources, declaration_location,
+                              cancellation_checkpoint)) {
+            return;
+        }
+        ComPtr<IDxcSourceRange> extent;
+        check(child.GetExtent(extent.put()), "GetExtent");
+        unsigned start{};
+        unsigned end{};
+        check(extent->GetOffsets(&start, &end), "GetOffsets");
+        result.push_back(Symbol{
+            .name = name,
+            .cursor_kind = static_cast<std::uint32_t>(kind),
+            .location = declaration_location,
+            .start_offset = start,
+            .end_offset = end,
+            .children = {},
+        });
+    });
+    std::ranges::sort(result, [](const auto& left, const auto& right) {
+        return std::tie(left.location.path, left.start_offset) <
+               std::tie(right.location.path, right.start_offset);
+    });
+    return result;
 }
 
 } // namespace
@@ -2220,6 +3085,530 @@ auto TranslationUnit::symbols() const -> std::vector<Symbol> {
     ComPtr<IDxcCursor> root;
     check(implementation_->translation_unit->GetCursor(root.put()), "GetCursor");
     return cursor_symbols(*root.get(), 0);
+}
+
+auto TranslationUnit::callable_at(std::string_view path, std::uint32_t line,
+                                  std::uint32_t column) const -> std::optional<CallableSymbol> {
+    auto cursor =
+        resolve_callable_cursor(*implementation_->translation_unit.get(), path, line, column);
+    if (is_null_cursor(cursor.get())) {
+        return std::nullopt;
+    }
+    return make_callable_symbol(*cursor.get());
+}
+
+auto TranslationUnit::outgoing_calls(std::string_view path, std::uint32_t line,
+                                     std::uint32_t column,
+                                     const std::function<void()>& cancellation_checkpoint) const
+    -> std::vector<OutgoingCall> {
+    auto cursor =
+        resolve_callable_cursor(*implementation_->translation_unit.get(), path, line, column);
+    if (is_null_cursor(cursor.get())) {
+        return {};
+    }
+    ComPtr<IDxcCursor> definition;
+    check(cursor->GetDefinitionCursor(definition.put()), "GetDefinitionCursor");
+    auto* body = is_null_cursor(definition.get()) ? cursor.get() : definition.get();
+    BOOL is_definition{};
+    check(body->IsDefinition(&is_definition), "IsDefinition");
+    if (is_definition == FALSE) {
+        // A declaration with no visible body in the current unsaved
+        // snapshot: there is nothing to scan for calls.
+        return {};
+    }
+    BodyScanner scanner{EntryPointDataFlowLimits{}, cancellation_checkpoint};
+    scanner.scan(*body);
+    return scanner.outgoing_calls();
+}
+
+auto TranslationUnit::incoming_calls(std::string_view path, std::uint32_t line,
+                                     std::uint32_t column,
+                                     const std::function<void()>& cancellation_checkpoint) const
+    -> std::vector<IncomingCall> {
+    auto target =
+        resolve_callable_cursor(*implementation_->translation_unit.get(), path, line, column);
+    if (is_null_cursor(target.get())) {
+        return {};
+    }
+
+    std::vector<IncomingCall> result;
+    std::unordered_map<std::string, std::size_t> caller_index;
+
+    constexpr unsigned page_size = 256;
+    for (const auto& candidate_source : implementation_->sources) {
+        if (cancellation_checkpoint) {
+            cancellation_checkpoint();
+        }
+        ComPtr<IDxcFile> candidate_file;
+        check(implementation_->translation_unit->GetFile(candidate_source.path.c_str(),
+                                                         candidate_file.put()),
+              "GetFile");
+        for (unsigned skip = 0;; skip += page_size) {
+            if (cancellation_checkpoint) {
+                cancellation_checkpoint();
+            }
+            unsigned count{};
+            IDxcCursor** raw_references{};
+            check(target->FindReferencesInFile(candidate_file.get(), skip, page_size, &count,
+                                               &raw_references),
+                  "FindReferencesInFile");
+            TaskCursors references{raw_references, count};
+            for (unsigned index = 0; index < count; ++index) {
+                if (cancellation_checkpoint && (index % 64) == 0) {
+                    cancellation_checkpoint();
+                }
+                auto* reference = references[index];
+                if (reference == nullptr) {
+                    continue;
+                }
+                // A call site is always the DeclRefExpr/MemberRefExpr
+                // designator of a call expression; this also excludes the
+                // callable's own declaration/definition occurrence, whose
+                // cursor kind is the callable kind itself, not a reference
+                // expression.
+                const auto reference_kind = cursor_kind(*reference);
+                if (reference_kind != DxcCursor_DeclRefExpr &&
+                    reference_kind != DxcCursor_MemberRefExpr) {
+                    continue;
+                }
+
+                ComPtr<IDxcCursor> parent;
+                check(reference->GetSemanticParent(parent.put()), "GetSemanticParent");
+                ComPtr<IDxcCursor> caller;
+                for (std::uint32_t depth = 0; !is_null_cursor(parent.get()) && depth < 64;
+                     ++depth) {
+                    if (callable_cursor(cursor_kind(*parent.get()))) {
+                        caller = std::move(parent);
+                        break;
+                    }
+                    ComPtr<IDxcCursor> next;
+                    check(parent->GetSemanticParent(next.put()), "GetSemanticParent");
+                    parent = std::move(next);
+                }
+                if (is_null_cursor(caller.get())) {
+                    // Not enclosed by any callable (e.g. a global
+                    // initializer) -- not representable as a call.
+                    continue;
+                }
+
+                auto caller_symbol = make_callable_symbol(*caller.get());
+                ComPtr<IDxcSourceLocation> reference_location;
+                check(reference->GetLocation(reference_location.put()), "GetLocation");
+                ComPtr<IDxcSourceRange> reference_extent;
+                check(reference->GetExtent(reference_extent.put()), "GetExtent");
+                unsigned start{};
+                unsigned end{};
+                check(reference_extent->GetOffsets(&start, &end), "GetOffsets");
+                Reference call_site{.location = make_source_location(*reference_location.get()),
+                                    .start_offset = start,
+                                    .end_offset = end};
+
+                const auto key = callable_identity_key(caller_symbol);
+                const auto existing = caller_index.find(key);
+                if (existing == caller_index.end()) {
+                    caller_index.emplace(key, result.size());
+                    result.push_back(IncomingCall{.caller = std::move(caller_symbol),
+                                                  .call_sites = {std::move(call_site)}});
+                } else {
+                    result[existing->second].call_sites.push_back(std::move(call_site));
+                }
+            }
+            if (count < page_size) {
+                break;
+            }
+        }
+    }
+
+    for (auto& call : result) {
+        if (cancellation_checkpoint) {
+            cancellation_checkpoint();
+        }
+        std::ranges::sort(call.call_sites, {}, &Reference::start_offset);
+    }
+    std::ranges::sort(result, [](const auto& left, const auto& right) {
+        return std::tie(left.caller.location.path, left.caller.start_offset) <
+               std::tie(right.caller.location.path, right.caller.start_offset);
+    });
+    return result;
+}
+
+auto TranslationUnit::entry_point_data_flow(
+    const EntryPointDataFlowLimits& limits,
+    const std::function<void()>& cancellation_checkpoint) const -> EntryPointDataFlow {
+    // Derives the entry point exactly as compilation_info() does: parsed
+    // from this translation unit's own effective compiler arguments' `-E`,
+    // never accepted as a request parameter, so there is no second,
+    // possibly inconsistent compiler configuration for the same document.
+    std::string entry_point_name;
+    const auto& full_arguments = implementation_->full_arguments;
+    for (std::size_t index = 0; index < full_arguments.size(); ++index) {
+        const auto& argument = full_arguments[index];
+        if (argument == "-E" && index + 1 < full_arguments.size()) {
+            entry_point_name = full_arguments[++index];
+        } else if (argument.starts_with("-E") && argument.size() > 2) {
+            entry_point_name = argument.substr(2);
+        }
+    }
+
+    EntryPointDataFlow result;
+    if (entry_point_name.empty()) {
+        result.explanation = "No entry point is configured for this document (set "
+                             "hlsl.entryPoint or a variant entry point)";
+        return result;
+    }
+
+    ComPtr<IDxcCursor> root;
+    check(implementation_->translation_unit->GetCursor(root.put()), "GetCursor");
+    std::vector<ComPtr<IDxcCursor>> all_definitions;
+    std::uint64_t definition_collection_node_count = 0;
+    bool definitions_truncated = false;
+    collect_callable_definitions(*root.get(), all_definitions, 0, cancellation_checkpoint,
+                                 definition_collection_node_count, limits.max_definitions_collected,
+                                 definitions_truncated);
+    // Assigned immediately after collection -- before the entry point is
+    // resolved -- so that every subsequent return path (including the
+    // "not found"/"ambiguous" early returns below, which never reach the
+    // final `result.truncated` recomputation near the end of this
+    // function) still reports an accurate truncation state. Without this,
+    // a truncated definition set that happens to omit the configured
+    // entry point (or omit a second, colliding definition that would have
+    // made it ambiguous) would present as a definitive, complete "not
+    // found"/"ambiguous" result instead of an incomplete one.
+    result.definitions_truncated = definitions_truncated;
+    result.truncated = definitions_truncated;
+
+    // Restricted to plain top-level function definitions (see
+    // `is_valid_entry_point_candidate`): a struct method, constructor, or
+    // conversion function that merely shares its spelling with the
+    // configured entry point name is never a valid HLSL entry point and
+    // must not be selected by traversal order. If more than one top-level
+    // function definition shares the name (illegal overloading of an entry
+    // point name), the ambiguity is reported rather than silently resolved
+    // to whichever definition happened to be visited first.
+    std::vector<ComPtr<IDxcCursor>> entry_point_candidates;
+    for (auto& candidate : all_definitions) {
+        if (cursor_spelling(*candidate.get()) != entry_point_name) {
+            continue;
+        }
+        if (!is_valid_entry_point_candidate(*candidate.get())) {
+            continue;
+        }
+        // Adopt an additional reference rather than moving `candidate` out:
+        // `all_definitions` is walked again below to compute
+        // `unreachable_functions`, and must still contain every definition
+        // (including the entry point itself, which is always trivially
+        // reachable) with a valid cursor.
+        entry_point_candidates.push_back(adopt_addref(candidate.get()));
+    }
+    if (entry_point_candidates.empty()) {
+        result.explanation = "The configured entry point '" + entry_point_name +
+                             "' does not resolve to a top-level function definition in this "
+                             "document (methods, constructors, and conversion functions are not "
+                             "valid HLSL entry points)";
+        if (definitions_truncated) {
+            result.explanation +=
+                "; definition collection was truncated at the configured limit before "
+                "every top-level definition in this document was examined, so this result "
+                "may be incomplete rather than a definitive not-found";
+        }
+        return result;
+    }
+    if (entry_point_candidates.size() > 1) {
+        result.explanation = "The configured entry point '" + entry_point_name +
+                             "' is ambiguous: " + std::to_string(entry_point_candidates.size()) +
+                             " top-level function definitions share this name in this document";
+        if (definitions_truncated) {
+            result.explanation +=
+                "; definition collection was truncated at the configured limit before "
+                "every top-level definition in this document was examined, so additional "
+                "colliding definitions beyond the ones counted here may exist";
+        }
+        return result;
+    }
+    ComPtr<IDxcCursor> entry_cursor = std::move(entry_point_candidates.front());
+
+    result.found = true;
+    auto entry_symbol = make_callable_symbol(*entry_cursor.get());
+    const auto entry_key = callable_identity_key(entry_symbol);
+    result.entry_point = entry_symbol;
+
+    BodyScanner scanner{limits, cancellation_checkpoint};
+
+    std::vector<std::string> bfs_order;
+    std::unordered_map<std::string, ReachableFunction> reachable_by_key;
+    std::unordered_map<std::string, std::vector<std::string>> adjacency;
+
+    struct QueueItem final {
+        ComPtr<IDxcCursor> cursor;
+        std::string key;
+    };
+    std::vector<QueueItem> queue;
+
+    reachable_by_key.emplace(entry_key, ReachableFunction{.function = entry_symbol, .depth = 0});
+    bfs_order.push_back(entry_key);
+    queue.push_back(QueueItem{.cursor = std::move(entry_cursor), .key = entry_key});
+
+    bool functions_visited_truncated = false;
+    for (std::size_t head = 0; head < queue.size(); ++head) {
+        if (cancellation_checkpoint) {
+            cancellation_checkpoint();
+        }
+        auto current_cursor = std::move(queue[head].cursor);
+        auto current_key = queue[head].key;
+        const auto current_depth = reachable_by_key.at(current_key).depth;
+
+        scanner.scan(*current_cursor.get());
+        auto& successors = adjacency[current_key];
+        for (const auto& call : scanner.outgoing_calls()) {
+            const auto callee_key = callable_identity_key(call.callee);
+            successors.push_back(callee_key);
+            if (reachable_by_key.contains(callee_key)) {
+                continue;
+            }
+            if (reachable_by_key.size() >= limits.max_functions_visited) {
+                functions_visited_truncated = true;
+                continue;
+            }
+            reachable_by_key.emplace(
+                callee_key, ReachableFunction{.function = call.callee, .depth = current_depth + 1});
+            bfs_order.push_back(callee_key);
+            if (call.callee.is_definition) {
+                auto callee_cursor = resolve_callable_cursor(
+                    *implementation_->translation_unit.get(), call.callee.location.path,
+                    call.callee.location.line, call.callee.location.column);
+                if (!is_null_cursor(callee_cursor.get())) {
+                    queue.push_back(
+                        QueueItem{.cursor = std::move(callee_cursor), .key = callee_key});
+                }
+            }
+        }
+    }
+
+    // Marks every callable that participates in a nontrivial call-graph
+    // cycle reachable from the entry point (mutual recursion of any size,
+    // or direct self-recursion) using Kosaraju's strongly-connected-
+    // components algorithm over the already-bounded
+    // `reachable_by_key`/`adjacency` graph built above.
+    //
+    // A naive "is this successor currently on the DFS path when visited"
+    // back-edge check (the previous implementation) only detects cycles
+    // that close back to a node still on the *current* DFS path; it misses
+    // SCC membership reached through a node that was already fully
+    // finalized on a different branch of the same DFS tree. For example,
+    // with edges A->B, B->A, A->C, C->B: a DFS from A visits and fully
+    // finishes B's subtree first (correctly marking the A<->B cycle)
+    // before visiting C, so by the time C->B is examined, B is already
+    // finalized and the edge is silently ignored -- even though C can
+    // reach back to A (via B) and is therefore in the very same SCC as A
+    // and B. Kosaraju's algorithm (a forward DFS pass computing a
+    // finishing order, then a DFS pass over the transposed graph in
+    // reverse-finishing order) recovers exact SCC membership regardless of
+    // traversal/discovery order. Every node whose SCC has more than one
+    // member, or is a single node with a direct self-loop, is marked
+    // `recursive`. Every phase below is an explicit-stack iteration (never
+    // native recursion) to stay stack-safe on arbitrarily long chains, and
+    // each phase has its own cancellation checkpoint so total work stays
+    // bounded and cancellable, not only the traversal above.
+    std::unordered_set<std::string> recursive_keys;
+    {
+        struct Frame final {
+            std::string key;
+            std::size_t next_child_index{};
+        };
+        std::uint64_t work_units = 0;
+        const auto checkpoint = [&] {
+            if ((++work_units % 512) == 0 && cancellation_checkpoint) {
+                cancellation_checkpoint();
+            }
+        };
+
+        // Pass 1: iterative DFS over the forward graph, recording a
+        // finishing (post) order. `Frame::next_child_index` resumes each
+        // frame exactly where it left off, playing the role a compiler-
+        // generated stack frame's loop counter and return address would.
+        std::vector<std::string> finishing_order;
+        finishing_order.reserve(reachable_by_key.size());
+        {
+            std::unordered_set<std::string> visited;
+            std::vector<Frame> stack;
+            for (const auto& start_key : bfs_order) {
+                if (visited.contains(start_key)) {
+                    continue;
+                }
+                visited.insert(start_key);
+                stack.push_back(Frame{.key = start_key});
+                while (!stack.empty()) {
+                    const auto it = adjacency.find(stack.back().key);
+                    const auto* successors = it != adjacency.end() ? &it->second : nullptr;
+                    bool descended = false;
+                    while (successors != nullptr &&
+                           stack.back().next_child_index < successors->size()) {
+                        checkpoint();
+                        const auto& next = (*successors)[stack.back().next_child_index];
+                        ++stack.back().next_child_index;
+                        if (!reachable_by_key.contains(next) || visited.contains(next)) {
+                            continue;
+                        }
+                        visited.insert(next);
+                        stack.push_back(Frame{.key = next});
+                        descended = true;
+                        break;
+                    }
+                    if (descended) {
+                        continue;
+                    }
+                    finishing_order.push_back(stack.back().key);
+                    stack.pop_back();
+                }
+            }
+        }
+
+        // Transpose graph: only over edges between two reachable nodes,
+        // matching exactly what pass 1 above walked.
+        std::unordered_map<std::string, std::vector<std::string>> transpose;
+        for (const auto& [key, successors] : adjacency) {
+            if (!reachable_by_key.contains(key)) {
+                continue;
+            }
+            for (const auto& next : successors) {
+                checkpoint();
+                if (reachable_by_key.contains(next)) {
+                    transpose[next].push_back(key);
+                }
+            }
+        }
+
+        // Pass 2: iterative DFS over the transposed graph in reverse
+        // finishing order; each tree recovered this way is exactly one
+        // strongly connected component (Kosaraju's key property).
+        std::unordered_set<std::string> assigned;
+        std::vector<std::string> component;
+        for (auto order_it = finishing_order.rbegin(); order_it != finishing_order.rend();
+             ++order_it) {
+            if (assigned.contains(*order_it)) {
+                continue;
+            }
+            component.clear();
+            std::vector<Frame> stack;
+            assigned.insert(*order_it);
+            stack.push_back(Frame{.key = *order_it});
+            while (!stack.empty()) {
+                const auto transpose_it = transpose.find(stack.back().key);
+                const auto* successors =
+                    transpose_it != transpose.end() ? &transpose_it->second : nullptr;
+                bool descended = false;
+                while (successors != nullptr &&
+                       stack.back().next_child_index < successors->size()) {
+                    checkpoint();
+                    const auto& next = (*successors)[stack.back().next_child_index];
+                    ++stack.back().next_child_index;
+                    if (assigned.contains(next)) {
+                        continue;
+                    }
+                    assigned.insert(next);
+                    stack.push_back(Frame{.key = next});
+                    descended = true;
+                    break;
+                }
+                if (descended) {
+                    continue;
+                }
+                component.push_back(stack.back().key);
+                stack.pop_back();
+            }
+
+            checkpoint();
+            const bool has_self_loop = [&] {
+                if (component.size() != 1) {
+                    return false;
+                }
+                const auto adjacency_it = adjacency.find(component.front());
+                if (adjacency_it == adjacency.end()) {
+                    return false;
+                }
+                return std::ranges::find(adjacency_it->second, component.front()) !=
+                       adjacency_it->second.end();
+            }();
+            if (component.size() > 1 || has_self_loop) {
+                for (const auto& member : component) {
+                    recursive_keys.insert(member);
+                }
+            }
+        }
+    }
+
+    result.reachable_functions.reserve(reachable_by_key.size());
+    {
+        std::uint64_t conversion_count = 0;
+        for (auto& [key, node] : reachable_by_key) {
+            if ((++conversion_count % 512) == 0 && cancellation_checkpoint) {
+                cancellation_checkpoint();
+            }
+            node.recursive = recursive_keys.contains(key);
+            result.reachable_functions.push_back(std::move(node));
+        }
+    }
+    std::ranges::sort(result.reachable_functions, [](const auto& left, const auto& right) {
+        if (left.depth != right.depth) {
+            return left.depth < right.depth;
+        }
+        return std::tie(left.function.location.path, left.function.start_offset) <
+               std::tie(right.function.location.path, right.function.start_offset);
+    });
+
+    // When the BFS above was truncated (hit `max_functions_visited` before
+    // exhausting the call graph), `reachable_by_key` is only a partial,
+    // possibly-incomplete view of the true reachable set: some definitions
+    // outside it were never explored because traversal stopped, not
+    // because they are provably unreachable from the entry point (they may
+    // be reachable via edges from queued-but-unvisited callees). Reporting
+    // "all_definitions minus reachable_by_key" as unreachable in that case
+    // would falsely classify those downstream-but-unvisited functions as
+    // dead code. Likewise, when `all_definitions` itself was truncated
+    // (hit `max_definitions_collected` before every top-level definition
+    // was collected), it is not the complete universe to subtract
+    // `reachable_by_key` from -- a definition that was never collected
+    // cannot be told apart from one that was collected and found
+    // reachable. `unreachable_functions` is therefore left empty whenever
+    // *either* of these two specific budgets was hit -- an explicit,
+    // conservative "unknown" rather than an unproven claim -- and only
+    // populated once both the reachability BFS and the definition
+    // collection have run to completion. This is deliberately independent
+    // of the other, unrelated truncation causes folded into
+    // `result.truncated` below (the global-access retention limit and the
+    // unused-declaration scan budget): neither of those affects whether
+    // `reachable_by_key`/`all_definitions` are complete, so neither should
+    // suppress a classification that is otherwise sound.
+    if (!functions_visited_truncated && !definitions_truncated) {
+        std::uint64_t unreachable_scan_count = 0;
+        for (auto& definition : all_definitions) {
+            if ((++unreachable_scan_count % 512) == 0 && cancellation_checkpoint) {
+                cancellation_checkpoint();
+            }
+            auto symbol = make_callable_symbol(*definition.get());
+            if (!reachable_by_key.contains(callable_identity_key(symbol))) {
+                result.unreachable_functions.push_back(std::move(symbol));
+            }
+        }
+        std::ranges::sort(result.unreachable_functions, [](const auto& left, const auto& right) {
+            return std::tie(left.location.path, left.start_offset) <
+                   std::tie(right.location.path, right.start_offset);
+        });
+    }
+
+    result.global_accesses = scanner.global_accesses();
+    bool unused_declarations_truncated = false;
+    result.unused_declarations = unused_top_level_declarations(
+        *implementation_->translation_unit.get(), *root.get(), implementation_->sources,
+        entry_point_name, limits, cancellation_checkpoint, unused_declarations_truncated);
+    result.functions_visited_truncated = functions_visited_truncated;
+    result.definitions_truncated = definitions_truncated;
+    result.global_accesses_truncated = scanner.access_truncated();
+    result.unused_declarations_truncated = unused_declarations_truncated;
+    result.truncated = result.functions_visited_truncated || result.definitions_truncated ||
+                       result.global_accesses_truncated || result.unused_declarations_truncated;
+    result.functions_visited = reachable_by_key.size();
+    return result;
 }
 
 void TranslationUnit::reparse(std::vector<SourceFile> files) {

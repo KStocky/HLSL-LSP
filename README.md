@@ -202,6 +202,23 @@ analysis. The pinned DXC reference API does not expose macro definition or
 expansion references, so Rename is not offered on macros. Unresolved or
 generated sources that cannot be represented as file URIs are not renamed.
 
+### Call hierarchy and entry-point data flow
+
+Call hierarchy shows compiler-resolved incoming and outgoing calls without
+conflating overloads. Visual Studio Code uses its built-in **Show Call
+Hierarchy** command; Visual Studio exposes the same server results through
+**Tools > HLSL Call Hierarchy** because its current LSP client does not
+implement the standard call-hierarchy methods. A dedicated Entry-Point Data
+Flow view traces the active variant's configured entry point, reports
+reachable and recursive functions, conservatively classifies global and
+resource reads and writes, and identifies unreachable functions and unused
+declarations. Traversal is bounded and uses the current unsaved document and
+includes. See [`docs/call-hierarchy.md`](docs/call-hierarchy.md) for identity,
+staleness, access-classification, and DXC limitation details.
+
+In Visual Studio, run **Tools > HLSL Entry-Point Data Flow**. In Visual Studio
+Code, run **HLSL: Show Entry-Point Data Flow** from the Command Palette.
+
 ### Navigation bar
 
 The native Visual Studio navigation bar tracks namespaces, types, functions,

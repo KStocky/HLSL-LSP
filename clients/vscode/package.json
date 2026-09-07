@@ -39,6 +39,7 @@
     "onCommand:hlsl.showCompilationInfo",
     "onCommand:hlsl.showResourceBindings",
     "onCommand:hlsl.showPreprocessorExplorer",
+    "onCommand:hlsl.showEntryPointDataFlow",
     "onCommand:hlsl.selectVariant"
   ],
   "capabilities": {
@@ -103,6 +104,11 @@
       {
         "command": "hlsl.showPreprocessorExplorer",
         "title": "HLSL: Show Preprocessor Explorer",
+        "category": "HLSL"
+      },
+      {
+        "command": "hlsl.showEntryPointDataFlow",
+        "title": "HLSL: Show Entry-Point Data Flow",
         "category": "HLSL"
       },
       {
