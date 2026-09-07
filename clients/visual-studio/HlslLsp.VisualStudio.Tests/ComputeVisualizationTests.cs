@@ -34,6 +34,9 @@ public sealed class ComputeVisualizationTests
     ""available"": true,
     ""unavailableReason"": """",
     ""instructionCount"": 1,
+    ""locationsAvailable"": true,
+    ""locationsUnavailableReason"": """",
+    ""locationsTruncated"": false,
     ""locations"": [{
       ""label"": ""GroupMemoryBarrierWithGroupSync"",
       ""uri"": ""file:///C:/shaders/compute.hlsl"",
@@ -47,10 +50,14 @@ public sealed class ComputeVisualizationTests
     ""available"": true,
     ""unavailableReason"": """",
     ""totalBytes"": 128,
+    ""totalBytesUnavailableReason"": """",
+    ""truncated"": false,
     ""declarations"": [{
       ""name"": ""tile"",
       ""type"": ""float[32]"",
-      ""sizeBytes"": 128,
+      ""declaration"": ""groupshared float tile[32]"",
+      ""bytes"": 128,
+      ""sizeUnavailableReason"": """",
       ""uri"": ""file:///C:/shaders/compute.hlsl"",
       ""range"": {
         ""start"": { ""line"": 1, ""character"": 0 },
@@ -63,6 +70,8 @@ public sealed class ComputeVisualizationTests
     ""min"": 32,
     ""max"": 64,
     ""preferred"": 32,
+    ""minMaxSource"": ""psv0"",
+    ""preferredSource"": ""compilerFormattedEntryCursor"",
     ""explanation"": ""Wave-size attributes constrain this entry point.""
   },
   ""occupancy"": {
@@ -88,11 +97,17 @@ public sealed class ComputeVisualizationTests
         Assert.Equal((ulong)56, model.InactiveThreads);
         Assert.Equal("SV_DispatchThreadID", Assert.Single(model.SystemValues).Semantic);
         Assert.Equal((ulong)1, model.Barriers.InstructionCount);
+        Assert.False(model.Barriers.LocationsTruncated);
         Assert.Equal(8, model.Barriers.Locations[0].Range.Start.Line);
         Assert.Equal((ulong)128, model.GroupShared.TotalBytes);
-        Assert.Equal("tile", Assert.Single(model.GroupShared.Declarations).Name);
+        var groupShared = Assert.Single(model.GroupShared.Declarations);
+        Assert.Equal("tile", groupShared.Name);
+        Assert.Equal("groupshared float tile[32]", groupShared.Declaration);
+        Assert.Equal((ulong)128, groupShared.Bytes);
         Assert.True(model.WaveSize.Known);
         Assert.Equal((uint)32, model.WaveSize.Preferred);
+        Assert.Equal("psv0", model.WaveSize.MinMaxSource);
+        Assert.Equal("compilerFormattedEntryCursor", model.WaveSize.PreferredSource);
         Assert.Equal("Test GPU", model.Occupancy.HardwareProfile);
         Assert.Equal((ulong)8, model.Occupancy.EstimatedResidentGroups);
     }
@@ -226,6 +241,15 @@ public sealed class ComputeVisualizationTests
         Assert.False(
             ComputeVisualizationRefreshLogic.ShouldRevealToolWindow(
                 existingWindowSupplied: true));
+    }
+
+    [Fact]
+    public void InteractionState_DefaultsToServerDerivedWorkload()
+    {
+        var state = new ComputeVisualizationInteractionState();
+
+        Assert.Null(state.LastSubmittedOptions.DispatchDimensions);
+        Assert.Null(state.LastSubmittedOptions.HardwareProfile);
     }
 
     [Fact]

@@ -53,6 +53,7 @@ public sealed class ComputeBarrierAnalysisModel
     public ulong? InstructionCount { get; set; }
     public bool LocationsAvailable { get; set; }
     public string LocationsUnavailableReason { get; set; }
+    public bool LocationsTruncated { get; set; }
     public IReadOnlyList<ComputeSourceLocationModel> Locations { get; set; } =
         Array.Empty<ComputeSourceLocationModel>();
 }
@@ -61,7 +62,9 @@ public sealed class ComputeGroupSharedDeclarationModel
 {
     public string Name { get; set; }
     public string Type { get; set; }
-    public ulong? SizeBytes { get; set; }
+    public string Declaration { get; set; }
+    public ulong? Bytes { get; set; }
+    public string SizeUnavailableReason { get; set; }
     public string Uri { get; set; }
     public CompilationSourceRangeModel Range { get; set; }
 }
@@ -71,6 +74,8 @@ public sealed class ComputeGroupSharedAnalysisModel
     public bool Available { get; set; }
     public string UnavailableReason { get; set; }
     public ulong? TotalBytes { get; set; }
+    public string TotalBytesUnavailableReason { get; set; }
+    public bool Truncated { get; set; }
     public IReadOnlyList<ComputeGroupSharedDeclarationModel> Declarations { get; set; } =
         Array.Empty<ComputeGroupSharedDeclarationModel>();
 }
@@ -81,6 +86,8 @@ public sealed class ComputeWaveSizeModel
     public uint? Min { get; set; }
     public uint? Max { get; set; }
     public uint? Preferred { get; set; }
+    public string MinMaxSource { get; set; }
+    public string PreferredSource { get; set; }
     public string Explanation { get; set; }
 }
 
@@ -251,10 +258,7 @@ internal sealed class ComputeVisualizationInteractionState
 {
     internal ComputeVisualizationInteractionState()
     {
-        LastSubmittedOptions = new ComputeVisualizationOptions
-        {
-            DispatchDimensions = new ComputeDimensionsModel { X = 1, Y = 1, Z = 1 },
-        };
+        LastSubmittedOptions = new ComputeVisualizationOptions();
     }
 
     internal Uri RequestedDocumentUri { get; private set; }

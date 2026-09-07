@@ -42,6 +42,7 @@ function report(
       instructionCount: 1,
       locationsAvailable: true,
       locationsUnavailableReason: "",
+      locationsTruncated: false,
       locations: [
         {
           label: "GroupMemoryBarrierWithGroupSync",
@@ -57,11 +58,15 @@ function report(
       available: true,
       unavailableReason: "",
       totalBytes: 128,
+      totalBytesUnavailableReason: "",
+      truncated: false,
       declarations: [
         {
           name: "tile",
           type: "float[32]",
-          sizeBytes: 128,
+          declaration: "groupshared float tile[32]",
+          bytes: 128,
+          sizeUnavailableReason: "",
           uri,
           range: {
             start: { line: 1, character: 0 },
@@ -75,6 +80,8 @@ function report(
       min: null,
       max: null,
       preferred: null,
+      minMaxSource: null,
+      preferredSource: null,
       explanation: "No compiler-authoritative wave-size requirement.",
     },
     occupancy: null,
@@ -169,6 +176,7 @@ void test("zero compiler barriers is distinct from unavailable source locations"
         instructionCount: 0,
         locationsAvailable: false,
         locationsUnavailableReason: "DXC does not expose locations.",
+        locationsTruncated: false,
         locations: [],
       },
     }),
@@ -185,6 +193,7 @@ void test("zero compiler barriers is distinct from unavailable source locations"
         instructionCount: 2,
         locationsAvailable: false,
         locationsUnavailableReason: "Exact compiler reason.",
+        locationsTruncated: false,
         locations: [],
       },
     }),

@@ -706,12 +706,7 @@ public sealed class HlslBootstrapPackage : AsyncPackage
             0,
             false,
             cancellationToken) as ComputeVisualizationToolWindow;
-        var options = existingWindow?.SubmittedOptions ??
-                      new ComputeVisualizationOptions
-                      {
-                          DispatchDimensions =
-                              new ComputeDimensionsModel { X = 1, Y = 1, Z = 1 },
-                      };
+        var options = existingWindow?.SubmittedOptions ?? new ComputeVisualizationOptions();
         await ShowComputeVisualizationExplicitAsync(uri, options, cancellationToken);
     }
 
@@ -807,14 +802,20 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         if (failureMessage != null)
         {
             window?.SetError(uri, options, failureMessage, preserveContent);
+            if (existingWindow == null)
+            {
+                window?.SetRequestError(failureMessage);
+            }
         }
         else if (report == null)
         {
-            window?.SetError(
-                uri,
-                options,
-                "The HLSL language server is not ready to provide compute visualization.",
-                preserveContent);
+            const string message =
+                "The HLSL language server is not ready to provide compute visualization.";
+            window?.SetError(uri, options, message, preserveContent);
+            if (existingWindow == null)
+            {
+                window?.SetRequestError(message);
+            }
         }
         else
         {

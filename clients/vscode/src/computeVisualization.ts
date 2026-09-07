@@ -48,13 +48,16 @@ export interface ComputeBarrierAnalysis {
   readonly instructionCount: number | null;
   readonly locationsAvailable: boolean;
   readonly locationsUnavailableReason: string;
+  readonly locationsTruncated: boolean;
   readonly locations: readonly ComputeBarrierLocation[];
 }
 
 export interface ComputeGroupSharedDeclaration {
   readonly name: string;
   readonly type: string;
-  readonly sizeBytes: number | null;
+  readonly declaration: string;
+  readonly bytes: number | null;
+  readonly sizeUnavailableReason: string;
   readonly uri?: string;
   readonly range?: ComputeSourceRange;
 }
@@ -63,6 +66,8 @@ export interface ComputeGroupSharedAnalysis {
   readonly available: boolean;
   readonly unavailableReason: string;
   readonly totalBytes: number | null;
+  readonly totalBytesUnavailableReason: string;
+  readonly truncated: boolean;
   readonly declarations: readonly ComputeGroupSharedDeclaration[];
 }
 
@@ -71,6 +76,8 @@ export interface ComputeWaveSize {
   readonly min: number | null;
   readonly max: number | null;
   readonly preferred: number | null;
+  readonly minMaxSource: string | null;
+  readonly preferredSource: string | null;
   readonly explanation: string;
 }
 
@@ -254,6 +261,7 @@ function barriersSection(barriers: ComputeBarrierAnalysis): string {
   return `<section>
 <h2>Barriers</h2>
 <p>Compiler instruction count: ${numberOrUnavailable(barriers.instructionCount)}</p>
+${barriers.locationsTruncated ? '<p class="unavailable">Barrier locations were truncated by the server limit.</p>' : ""}
 <ul>${locations}</ul>
 </section>`;
 }
@@ -274,13 +282,22 @@ function groupSharedSection(groupShared: ComputeGroupSharedAnalysis): string {
                     declaration.name,
                   )
                 : escapeHtml(declaration.name);
-            return `<tr><td>${name}</td><td><code>${escapeHtml(declaration.type)}</code></td><td>${numberOrUnavailable(declaration.sizeBytes)}</td></tr>`;
+            const bytes =
+              declaration.bytes === null && declaration.sizeUnavailableReason
+                ? escapeHtml(declaration.sizeUnavailableReason)
+                : numberOrUnavailable(declaration.bytes);
+            return `<tr><td>${name}</td><td><code>${escapeHtml(declaration.type)}</code><br><code>${escapeHtml(declaration.declaration)}</code></td><td>${bytes}</td></tr>`;
           })
           .join("");
   return `<section>
 <h2>Group-shared memory</h2>
-<p>Total estimated bytes: ${numberOrUnavailable(groupShared.totalBytes)}</p>
-<table><thead><tr><th>Name</th><th>Type</th><th>Bytes</th></tr></thead><tbody>${rows}</tbody></table>
+  <p>Total estimated bytes: ${
+    groupShared.totalBytes === null && groupShared.totalBytesUnavailableReason
+      ? escapeHtml(groupShared.totalBytesUnavailableReason)
+      : numberOrUnavailable(groupShared.totalBytes)
+  }</p>
+  ${groupShared.truncated ? '<p class="unavailable">Group-shared declarations were truncated by the server limit.</p>' : ""}
+  <table><thead><tr><th>Name</th><th>Type</th><th>Bytes</th></tr></thead><tbody>${rows}</tbody></table>
 </section>`;
 }
 
@@ -294,6 +311,8 @@ function waveSection(waveSize: ComputeWaveSize): string {
 <tr><th>Minimum</th><td>${numberOrUnavailable(waveSize.min)}</td></tr>
 <tr><th>Maximum</th><td>${numberOrUnavailable(waveSize.max)}</td></tr>
 <tr><th>Preferred</th><td>${numberOrUnavailable(waveSize.preferred)}</td></tr>
+<tr><th>Min/max source</th><td>${escapeHtml(waveSize.minMaxSource ?? "Unavailable")}</td></tr>
+<tr><th>Preferred source</th><td>${escapeHtml(waveSize.preferredSource ?? "Unavailable")}</td></tr>
 </tbody></table>
 <p class="muted">${escapeHtml(waveSize.explanation)}</p>
 </section>`;

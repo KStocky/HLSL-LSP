@@ -6230,6 +6230,23 @@ TEST_CASE("hlsl/computeVisualization computes exact and edge dispatch geometry a
                             "Group-shared memory per compute unit.") !=
           shared_limited["occupancy"]["limitingFactors"].end());
 
+    const auto shared_exhausted =
+        compute_visualization_result(server, 5, document.uri(),
+                                     Json{{"hardwareProfile",
+                                           {{"name", "Insufficient shared memory"},
+                                            {"waveSize", 32},
+                                            {"maxThreadsPerGroup", 1024},
+                                            {"maxThreadsPerComputeUnit", 2048},
+                                            {"maxGroupsPerComputeUnit", 8},
+                                            {"sharedMemoryBytesPerComputeUnit", 64}}}});
+    CHECK(shared_exhausted["occupancy"]["estimatedResidentGroups"] == 0);
+    CHECK(std::ranges::find(shared_exhausted["occupancy"]["limitingFactors"],
+                            "Group-shared memory per compute unit.") !=
+          shared_exhausted["occupancy"]["limitingFactors"].end());
+    CHECK(std::ranges::find(shared_exhausted["occupancy"]["limitingFactors"],
+                            "One reflected thread group exceeds maxThreadsPerComputeUnit.") ==
+          shared_exhausted["occupancy"]["limitingFactors"].end());
+
     // Partial waves cannot be shared by independent thread groups. A
     // 32-thread group on wave64 hardware consumes 64 resident lanes, so a
     // 64-thread compute-unit limit permits one group, not two.

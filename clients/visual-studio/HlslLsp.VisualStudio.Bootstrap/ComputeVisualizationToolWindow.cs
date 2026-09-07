@@ -32,6 +32,11 @@ public sealed class ComputeVisualizationToolWindow : ToolWindowPane
                     interactionState.RequestedDocumentUri,
                     options);
             }
+            else
+            {
+                control.SetInputError(
+                    "Open an HLSL document, then run Tools > HLSL Compute Visualization.");
+            }
         };
         Content = control;
     }
@@ -74,15 +79,21 @@ public sealed class ComputeVisualizationToolWindow : ToolWindowPane
         control.SetOptionsIfDocumentChanged(options);
         control.SetError(message, preserve);
     }
+
+    internal void SetRequestError(string message)
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        control.SetInputError(message);
+    }
 }
 
 internal sealed class ComputeVisualizationControl : UserControl
 {
     private readonly StackPanel content = new();
     private readonly StackPanel configuration = new();
-    private readonly TextBox dispatchX = Input("1");
-    private readonly TextBox dispatchY = Input("1");
-    private readonly TextBox dispatchZ = Input("1");
+    private readonly TextBox dispatchX = Input(string.Empty);
+    private readonly TextBox dispatchY = Input(string.Empty);
+    private readonly TextBox dispatchZ = Input(string.Empty);
     private readonly TextBox profileName = Input(string.Empty, 170);
     private readonly TextBox waveSize = Input(string.Empty);
     private readonly TextBox maxThreadsPerGroup = Input(string.Empty);
@@ -142,6 +153,7 @@ internal sealed class ComputeVisualizationControl : UserControl
         ComputeHardwareProfileModel submittedHardwareProfile)
     {
         ThreadHelper.ThrowIfNotOnUIThread();
+        inputError.Text = string.Empty;
         hasContent = report != null;
         content.Children.Clear();
         content.Margin = new Thickness(12);
@@ -195,6 +207,9 @@ internal sealed class ComputeVisualizationControl : UserControl
         AddConfiguration();
         AddText(message, Brushes.OrangeRed);
     }
+
+    internal void SetInputError(string message)
+        => inputError.Text = message ?? string.Empty;
 
     private void AddConfiguration()
     {
@@ -252,12 +267,27 @@ internal sealed class ComputeVisualizationControl : UserControl
     {
         options = null;
         error = null;
-        if (!ComputeVisualizationInput.TryParsePositiveUInt32(dispatchX.Text, out var x) ||
-            !ComputeVisualizationInput.TryParsePositiveUInt32(dispatchY.Text, out var y) ||
-            !ComputeVisualizationInput.TryParsePositiveUInt32(dispatchZ.Text, out var z))
+        var dispatchFieldsPresent =
+            !string.IsNullOrWhiteSpace(dispatchX.Text) ||
+            !string.IsNullOrWhiteSpace(dispatchY.Text) ||
+            !string.IsNullOrWhiteSpace(dispatchZ.Text);
+        ComputeDimensionsModel dispatch = null;
+        uint x = 0;
+        uint y = 0;
+        uint z = 0;
+        if (dispatchFieldsPresent &&
+            (!ComputeVisualizationInput.TryParsePositiveUInt32(dispatchX.Text, out x) ||
+             !ComputeVisualizationInput.TryParsePositiveUInt32(dispatchY.Text, out y) ||
+             !ComputeVisualizationInput.TryParsePositiveUInt32(dispatchZ.Text, out z)))
         {
-            error = "Logical workload dimensions must be positive 32-bit integers.";
+            error =
+                "Logical workload dimensions must either all be blank or all be positive " +
+                "32-bit integers.";
             return false;
+        }
+        if (dispatchFieldsPresent)
+        {
+            dispatch = new ComputeDimensionsModel { X = x, Y = y, Z = z };
         }
         var profileFieldsPresent =
             !string.IsNullOrWhiteSpace(profileName.Text) ||
@@ -304,7 +334,7 @@ internal sealed class ComputeVisualizationControl : UserControl
         }
         options = new ComputeVisualizationOptions
         {
-            DispatchDimensions = new ComputeDimensionsModel { X = x, Y = y, Z = z },
+            DispatchDimensions = dispatch,
             HardwareProfile = profile,
         };
         return true;
@@ -339,7 +369,17 @@ internal sealed class ComputeVisualizationControl : UserControl
                 Brushes.Goldenrod);
             return;
         }
-        AddText($"Total estimated bytes: {ComputeVisualizationDisplay.Number(groupShared.TotalBytes)}");
+        AddText(
+            "Total estimated bytes: " +
+            (groupShared.TotalBytes.HasValue
+                ? ComputeVisualizationDisplay.Number(groupShared.TotalBytes)
+                : ComputeVisualizationDisplay.UnavailableReason(
+                    groupShared.TotalBytesUnavailableReason,
+                    "Unavailable")));
+        if (groupShared.Truncated)
+        {
+            AddText("Group-shared declarations were truncated by the server limit.", Brushes.Goldenrod);
+        }
         if (groupShared.Declarations == null || groupShared.Declarations.Count == 0)
         {
             AddText("(no group-shared declarations)", Brushes.Gray);
@@ -349,7 +389,12 @@ internal sealed class ComputeVisualizationControl : UserControl
         {
             AddLocation(
                 $"{declaration.Name ?? string.Empty} : {declaration.Type ?? string.Empty} " +
-                $"({ComputeVisualizationDisplay.Number(declaration.SizeBytes)} bytes)",
+                $"({(declaration.Bytes.HasValue
+                    ? ComputeVisualizationDisplay.Number(declaration.Bytes)
+                    : ComputeVisualizationDisplay.UnavailableReason(
+                        declaration.SizeUnavailableReason,
+                        "Unavailable"))} bytes)\n" +
+                $"{declaration.Declaration ?? string.Empty}",
                 declaration.Uri,
                 declaration.Range);
         }
@@ -371,6 +416,10 @@ internal sealed class ComputeVisualizationControl : UserControl
         AddText(
             $"Compiler instruction count: " +
             $"{ComputeVisualizationDisplay.Number(barriers.InstructionCount)}");
+        if (barriers.LocationsTruncated)
+        {
+            AddText("Barrier locations were truncated by the server limit.", Brushes.Goldenrod);
+        }
         var locations = barriers.Locations ?? Array.Empty<ComputeSourceLocationModel>();
         var locationMessage = ComputeVisualizationDisplay.BarrierLocationsMessage(
             barriers.InstructionCount,
@@ -406,6 +455,8 @@ internal sealed class ComputeVisualizationControl : UserControl
             ("Minimum", wave.Min?.ToString() ?? "Unavailable"),
             ("Maximum", wave.Max?.ToString() ?? "Unavailable"),
             ("Preferred", wave.Preferred?.ToString() ?? "Unavailable"),
+            ("Min/max source", wave.MinMaxSource ?? "Unavailable"),
+            ("Preferred source", wave.PreferredSource ?? "Unavailable"),
         });
         if (!string.IsNullOrWhiteSpace(wave.Explanation))
         {
@@ -509,6 +560,7 @@ internal sealed class ComputeVisualizationControl : UserControl
                 iEndIndex = endCharacter,
             });
         }
+
         catch (Exception error)
         {
             ShowNavigationError(error.Message);

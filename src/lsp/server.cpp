@@ -4174,7 +4174,7 @@ Json Server::compute_visualization(const std::optional<Json>& params,
                 if (resident_groups == hardware->max_groups_per_compute_unit) {
                     limiting_factors.push_back("Maximum groups per compute unit.");
                 }
-                if (resident_groups == 0) {
+                if (groups_by_threads == 0) {
                     limiting_factors.push_back(
                         "One reflected thread group exceeds maxThreadsPerComputeUnit.");
                 }
