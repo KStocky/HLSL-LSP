@@ -1379,6 +1379,9 @@ TEST_CASE("Compute metadata comes from DXC cursors and compiler-formatted declar
         info.diagnostics.empty() ? std::string{} : info.diagnostics.front().message;
     INFO(first_diagnostic);
     REQUIRE(info.success);
+    CHECK(info.psv_wave_size.available);
+    CHECK(info.psv_wave_size.min == std::uint32_t{32});
+    CHECK(info.psv_wave_size.max == std::uint32_t{64});
     REQUIRE(info.compute_metadata.has_value());
     const auto& metadata = *info.compute_metadata;
     CHECK(metadata.barrier_locations_available);
@@ -1440,6 +1443,8 @@ TEST_CASE("Compute metadata comes from DXC cursors and compiler-formatted declar
     CHECK(metadata.wave_size.min == std::uint32_t{32});
     CHECK(metadata.wave_size.max == std::uint32_t{64});
     CHECK(metadata.wave_size.preferred == std::uint32_t{64});
+    CHECK(metadata.wave_size.min_max_source == "psv0");
+    CHECK(metadata.wave_size.preferred_source == "compilerFormattedEntryCursor");
 }
 
 TEST_CASE("Compute wave metadata supports fixed, range, and absent forms",
@@ -1462,17 +1467,20 @@ TEST_CASE("Compute wave metadata supports fixed, range, and absent forms",
     CHECK(fixed.min == std::uint32_t{32});
     CHECK(fixed.max == std::uint32_t{32});
     CHECK_FALSE(fixed.preferred.has_value());
+    CHECK(fixed.min_max_source == "psv0");
+    CHECK(fixed.preferred_source.empty());
 
     const auto range = inspect("[WaveSize(32, 64)]");
     CHECK(range.known);
     CHECK(range.min == std::uint32_t{32});
     CHECK(range.max == std::uint32_t{64});
     CHECK_FALSE(range.preferred.has_value());
+    CHECK(range.min_max_source == "psv0");
 
     const auto absent = inspect("");
     CHECK_FALSE(absent.known);
     CHECK_FALSE(absent.min.has_value());
-    CHECK(absent.explanation.find("no WaveSize") != std::string::npos);
+    CHECK(absent.explanation.find("PSV0") != std::string::npos);
 }
 
 TEST_CASE("Reachable barrier locations are independently bounded",

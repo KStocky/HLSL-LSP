@@ -6278,8 +6278,9 @@ TEST_CASE("hlsl/computeVisualization serializes compiler-formatted WaveSize requ
     CHECK(result["waveSize"]["min"] == 32);
     CHECK(result["waveSize"]["max"] == 64);
     CHECK(result["waveSize"]["preferred"] == 64);
-    CHECK(result["waveSize"]["explanation"].get<std::string>().find("compiler-formatted") !=
-          std::string::npos);
+    CHECK(result["waveSize"]["minMaxSource"] == "psv0");
+    CHECK(result["waveSize"]["preferredSource"] == "compilerFormattedEntryCursor");
+    CHECK(result["waveSize"]["explanation"].get<std::string>().find("PSV0") != std::string::npos);
 }
 
 TEST_CASE("hlsl/computeVisualization rejects malformed, non-positive, and overflowing inputs",

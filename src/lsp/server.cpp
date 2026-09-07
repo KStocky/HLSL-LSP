@@ -3946,50 +3946,52 @@ Json Server::compute_visualization(const std::optional<Json>& params,
     }
 
     const bool found = !info.entry_point.empty();
-    Json result{{"applicable", false},
-                {"found", found},
-                {"explanation", ""},
-                {"entryPoint", info.entry_point},
-                {"stage", info.stage},
-                {"targetProfile", info.target_profile},
-                {"threadGroupSize", nullptr},
-                {"dispatchDimensions", nullptr},
-                {"groupCount", nullptr},
-                {"launchedThreads", nullptr},
-                {"inactiveThreads", nullptr},
-                {"systemValues", Json::array()},
-                {"barriers",
-                 {{"available", false},
-                  {"unavailableReason",
-                   "Barrier instruction reflection is unavailable until a compute shader is "
-                   "successfully compiled to reflected DXIL."},
-                  {"instructionCount", nullptr},
-                  {"locationsAvailable", false},
-                  {"locationsTruncated", false},
-                  {"locationsUnavailableReason",
-                   "Barrier source locations are not exposed by the current DXC reflection and "
-                   "cursor interfaces."},
-                  {"locations", Json::array()}}},
-                {"groupShared",
-                 {{"available", false},
-                  {"unavailableReason",
-                   "Compiler-authoritative groupshared declaration sizes are not exposed by the "
-                   "current DXC reflection, cursor, type, or layout interfaces; source text is "
-                   "never parsed or guessed."},
-                  {"totalBytes", nullptr},
-                  {"totalBytesUnavailableReason",
-                   "Group-shared metadata is unavailable until a compute shader is analyzed."},
-                  {"truncated", false},
-                  {"declarations", Json::array()}}},
-                {"waveSize",
-                 {{"known", false},
-                  {"min", nullptr},
-                  {"max", nullptr},
-                  {"preferred", nullptr},
-                  {"explanation",
-                   "The current DXC shader reflection path does not expose compiler-authoritative "
-                   "wave-size requirements."}}},
-                {"occupancy", nullptr}};
+    Json result{
+        {"applicable", false},
+        {"found", found},
+        {"explanation", ""},
+        {"entryPoint", info.entry_point},
+        {"stage", info.stage},
+        {"targetProfile", info.target_profile},
+        {"threadGroupSize", nullptr},
+        {"dispatchDimensions", nullptr},
+        {"groupCount", nullptr},
+        {"launchedThreads", nullptr},
+        {"inactiveThreads", nullptr},
+        {"systemValues", Json::array()},
+        {"barriers",
+         {{"available", false},
+          {"unavailableReason",
+           "Barrier instruction reflection is unavailable until a compute shader is "
+           "successfully compiled to reflected DXIL."},
+          {"instructionCount", nullptr},
+          {"locationsAvailable", false},
+          {"locationsTruncated", false},
+          {"locationsUnavailableReason",
+           "Barrier source locations are not exposed by the current DXC reflection and "
+           "cursor interfaces."},
+          {"locations", Json::array()}}},
+        {"groupShared",
+         {{"available", false},
+          {"unavailableReason",
+           "Compiler-authoritative groupshared declaration sizes are not exposed by the "
+           "current DXC reflection, cursor, type, or layout interfaces; source text is "
+           "never parsed or guessed."},
+          {"totalBytes", nullptr},
+          {"totalBytesUnavailableReason",
+           "Group-shared metadata is unavailable until a compute shader is analyzed."},
+          {"truncated", false},
+          {"declarations", Json::array()}}},
+        {"waveSize",
+         {{"known", false},
+          {"min", nullptr},
+          {"max", nullptr},
+          {"preferred", nullptr},
+          {"minMaxSource", nullptr},
+          {"preferredSource", nullptr},
+          {"explanation", "Stable PSV0 wave-size metadata is unavailable until a compute shader is "
+                          "successfully compiled to DXIL."}}},
+        {"occupancy", nullptr}};
 
     if (!found) {
         result["explanation"] =
@@ -4127,6 +4129,12 @@ Json Server::compute_visualization(const std::optional<Json>& params,
                      {"preferred", metadata.wave_size.preferred.has_value()
                                        ? Json(*metadata.wave_size.preferred)
                                        : Json(nullptr)},
+                     {"minMaxSource", metadata.wave_size.min_max_source.empty()
+                                          ? Json(nullptr)
+                                          : Json(metadata.wave_size.min_max_source)},
+                     {"preferredSource", metadata.wave_size.preferred_source.empty()
+                                             ? Json(nullptr)
+                                             : Json(metadata.wave_size.preferred_source)},
                      {"explanation", metadata.wave_size.explanation}};
         }
 

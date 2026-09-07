@@ -117,7 +117,9 @@ superseded result rather than returning mixed-generation data.
     "min": 32,
     "max": 64,
     "preferred": 64,
-    "explanation": "Extracted from DXC's compiler-formatted declaration for the configured entry point."
+    "minMaxSource": "psv0",
+    "preferredSource": "compilerFormattedEntryCursor",
+    "explanation": "Minimum and maximum come from stable PSV0 runtime metadata; preferred comes from DXC's bounded compiler-formatted entry-point declaration."
   },
   "occupancy": null
 }
@@ -166,13 +168,19 @@ source parameters.
   why in `sizeUnavailableReason`; `totalBytes` is null unless every retained
   declaration has an exact size, with `totalBytesUnavailableReason` explaining
   why. `truncated` reports the 256-declaration bound.
-- `waveSize` is read only from the configured entry point cursor's
-  compiler-formatted declaration. Pinned DXC normalizes the attribute to
-  `[wavesize(...)]`; one, two, and three exact positive unsigned arguments
-  represent fixed, min/max, and min/max/preferred forms respectively.
-  Absent or unrecognized compiler metadata produces `known: false`. Raw
-  source text is never scanned. A hardware profile's `waveSize` remains an
-  occupancy assumption, not the shader requirement.
+- `waveSize.min` and `waveSize.max` come from the public, stable
+  `PSVRuntimeInfo0::MinimumExpectedWaveLaneCount` and
+  `MaximumExpectedWaveLaneCount` fields in the compiled DXIL container's
+  PSV0 part. `minMaxSource` is therefore `psv0` when known. PSV0 does not
+  contain the preferred value. For that field only, the configured entry
+  point cursor's compiler-formatted declaration is inspected; pinned DXC
+  normalizes the attribute to `[wavesize(...)]`, and a bounded exact
+  three-argument form supplies `preferred`. `preferredSource` is then
+  `compilerFormattedEntryCursor`. The cursor's min/max must agree with PSV0
+  before its preferred value is accepted. Missing/malformed PSV0 produces
+  `known: false`; absent preferred metadata leaves only `preferred` null.
+  Raw source and LLVM IR/disassembly are never parsed. A hardware profile's
+  `waveSize` remains an occupancy assumption, not the shader requirement.
 - Without `hardwareProfile`, `occupancy` is always null. The server never
   guesses a device.
 

@@ -954,8 +954,11 @@ void attach_resource_source_locations(CompilationInfo& info,
     if (values.size() == 3) {
         result.preferred = values[2];
     }
-    result.explanation =
-        "Extracted from DXC's compiler-formatted declaration for the configured entry point.";
+    result.min_max_source = "compilerFormattedEntryCursor";
+    if (result.preferred.has_value()) {
+        result.preferred_source = "compilerFormattedEntryCursor";
+    }
+    result.explanation = "Extracted from DXC's compiler-formatted entry-point declaration.";
     return result;
 }
 
@@ -2802,12 +2805,34 @@ auto TranslationUnit::compilation_info(const ComputeMetadataLimits& limits) cons
         metadata.barrier_locations_unavailable_reason =
             "Barrier locations were truncated at the compiler-cursor result limit.";
     }
-    if (flow.entry_point.has_value()) {
-        metadata.wave_size = wave_size_from_formatted_entry(flow.entry_point->signature);
+    const auto formatted_wave = flow.entry_point.has_value()
+                                    ? wave_size_from_formatted_entry(flow.entry_point->signature)
+                                    : ComputeWaveSize{};
+    if (info.psv_wave_size.available && info.psv_wave_size.min.has_value() &&
+        info.psv_wave_size.max.has_value()) {
+        metadata.wave_size.known = true;
+        metadata.wave_size.min = info.psv_wave_size.min;
+        metadata.wave_size.max = info.psv_wave_size.max;
+        metadata.wave_size.min_max_source = "psv0";
+        if (formatted_wave.known && formatted_wave.min == info.psv_wave_size.min &&
+            formatted_wave.max == info.psv_wave_size.max && formatted_wave.preferred.has_value()) {
+            metadata.wave_size.preferred = formatted_wave.preferred;
+            metadata.wave_size.preferred_source = "compilerFormattedEntryCursor";
+        }
+        metadata.wave_size.explanation =
+            metadata.wave_size.preferred.has_value()
+                ? "Minimum and maximum come from stable PSV0 runtime metadata; preferred comes "
+                  "from DXC's bounded compiler-formatted entry-point declaration."
+                : "Minimum and maximum come from stable PSV0 runtime metadata; no preferred "
+                  "value is present in that binary metadata.";
+    } else if (info.psv_wave_size.available) {
+        metadata.wave_size.explanation =
+            "Stable PSV0 runtime metadata reports no wave-size requirement.";
     } else {
-        metadata.wave_size.explanation = flow.explanation.empty()
-                                             ? "The configured entry point was not resolved."
-                                             : flow.explanation;
+        metadata.wave_size.explanation =
+            info.psv_wave_size.unavailable_reason.empty()
+                ? "Stable PSV0 wave-size metadata is unavailable for this compiled output."
+                : info.psv_wave_size.unavailable_reason;
     }
 
     ComPtr<IDxcCursor> root;

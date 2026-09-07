@@ -354,6 +354,8 @@ struct ComputeWaveSize {
     std::optional<std::uint32_t> min;
     std::optional<std::uint32_t> max;
     std::optional<std::uint32_t> preferred;
+    std::string min_max_source;
+    std::string preferred_source;
     std::string explanation;
 };
 
@@ -601,6 +603,15 @@ struct CompilationInfo {
     // signature, root signature details unavailable on this platform, or
     // shader reflection metadata unavailable for this compiled output.
     std::optional<CompilationCompatibility> compatibility;
+    // Stable wave-size range read from the public PSV0 runtime-info layout in
+    // the compiled DXIL container. `available` describes PSV extraction;
+    // null min/max means PSV0 authoritatively reports no shader requirement.
+    struct PsvWaveSize {
+        bool available{};
+        std::optional<std::uint32_t> min;
+        std::optional<std::uint32_t> max;
+        std::string unavailable_reason;
+    } psv_wave_size;
     // Compiler-owned cursor metadata derived from the same serialized
     // translation-unit generation as this compilation result.
     std::optional<ComputeCompilerMetadata> compute_metadata;

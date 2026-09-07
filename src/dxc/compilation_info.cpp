@@ -7,7 +7,9 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
+#include <limits>
 #include <regex>
 #include <stdexcept>
 #include <string>
@@ -42,6 +44,61 @@
 namespace {
 
 constexpr std::size_t max_disassembly_bytes = std::size_t{4} * 1024U * 1024U;
+constexpr UINT32 psv_part = DXC_FOURCC('P', 'S', 'V', '0');
+
+// Public PSVRuntimeInfo0 ABI from
+// dxc/DxilContainer/DxilPipelineStateValidation.h. The PSV0 payload starts
+// with a uint32 runtime-info byte size followed by this additive structure.
+// The stage union occupies four uint32 values; wave bounds are stable fields
+// immediately after it in every PSV version.
+struct PsvRuntimeInfo0 {
+    std::uint32_t stage_info[4];
+    std::uint32_t minimum_expected_wave_lane_count;
+    std::uint32_t maximum_expected_wave_lane_count;
+};
+static_assert(sizeof(PsvRuntimeInfo0) == 24);
+
+[[nodiscard]] hlsl_intellisense::dxc::CompilationInfo::PsvWaveSize
+extract_psv_wave_size(IDxcUtils& utils, const DxcBuffer& object_buffer) {
+    void* part_data = nullptr;
+    UINT32 part_size = 0;
+    const auto result =
+        utils.GetDxilContainerPart(&object_buffer, psv_part, &part_data, &part_size);
+    if (FAILED(result) || part_data == nullptr) {
+        return {.available = false,
+                .unavailable_reason = "The compiled DXIL container does not expose a PSV0 part."};
+    }
+    if (part_size < sizeof(std::uint32_t)) {
+        return {.available = false,
+                .unavailable_reason = "The compiler-produced PSV0 part is truncated."};
+    }
+    std::uint32_t runtime_info_size{};
+    std::memcpy(&runtime_info_size, part_data, sizeof(runtime_info_size));
+    if (runtime_info_size < sizeof(PsvRuntimeInfo0) ||
+        part_size - sizeof(runtime_info_size) < runtime_info_size) {
+        return {.available = false,
+                .unavailable_reason =
+                    "The compiler-produced PSV0 runtime-info block is too small."};
+    }
+    PsvRuntimeInfo0 runtime_info{};
+    std::memcpy(&runtime_info, static_cast<const std::byte*>(part_data) + sizeof(runtime_info_size),
+                sizeof(runtime_info));
+    constexpr auto no_minimum = std::uint32_t{0};
+    constexpr auto no_maximum = (std::numeric_limits<std::uint32_t>::max)();
+    if (runtime_info.minimum_expected_wave_lane_count == no_minimum &&
+        runtime_info.maximum_expected_wave_lane_count == no_maximum) {
+        return {.available = true};
+    }
+    if (runtime_info.minimum_expected_wave_lane_count == 0 ||
+        runtime_info.maximum_expected_wave_lane_count <
+            runtime_info.minimum_expected_wave_lane_count) {
+        return {.available = false,
+                .unavailable_reason = "The compiler-produced PSV0 wave-size range is malformed."};
+    }
+    return {.available = true,
+            .min = runtime_info.minimum_expected_wave_lane_count,
+            .max = runtime_info.maximum_expected_wave_lane_count};
+}
 
 // D3D_REGISTER_COMPONENT_TYPE
 constexpr unsigned RCT_UINT32 = 1;
@@ -972,6 +1029,9 @@ CompilationInfo compilation_info_from_compile(DxcCreateInstanceProc create_insta
     }
 
     info.root_signature = extract_root_signature(utils.get(), object_buffer, /*is_spirv=*/false);
+    if (info.stage == "compute") {
+        info.psv_wave_size = extract_psv_wave_size(*utils.get(), object_buffer);
+    }
 
     LocalComPtr<IShaderReflection> reflection;
     const HRESULT create_reflection_hr =
