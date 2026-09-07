@@ -426,6 +426,60 @@ internal sealed class HlslLanguageClient :
             .ConfigureAwait(false);
     }
 
+    internal async Task<ComputeVisualizationModel> GetComputeVisualizationAsync(
+        Uri documentUri,
+        ComputeVisualizationOptions options,
+        CancellationToken cancellationToken)
+    {
+        var currentRpc = Volatile.Read(ref rpc);
+        if (currentRpc == null)
+        {
+            await rpcAttached.WaitAsync(cancellationToken).ConfigureAwait(false);
+            currentRpc = Volatile.Read(ref rpc);
+            if (currentRpc == null)
+            {
+                throw new InvalidOperationException(
+                    "The HLSL language server connection is unavailable.");
+            }
+        }
+        var parameters = new Dictionary<string, object>
+        {
+            ["textDocument"] = new Dictionary<string, object>
+            {
+                ["uri"] = documentUri.AbsoluteUri,
+            },
+        };
+        if (options?.DispatchDimensions != null)
+        {
+            parameters["dispatchDimensions"] = new Dictionary<string, object>
+            {
+                ["x"] = options.DispatchDimensions.X,
+                ["y"] = options.DispatchDimensions.Y,
+                ["z"] = options.DispatchDimensions.Z,
+            };
+        }
+        if (options?.HardwareProfile != null)
+        {
+            parameters["hardwareProfile"] = new Dictionary<string, object>
+            {
+                ["name"] = options.HardwareProfile.Name,
+                ["waveSize"] = options.HardwareProfile.WaveSize,
+                ["maxThreadsPerGroup"] = options.HardwareProfile.MaxThreadsPerGroup,
+                ["maxThreadsPerComputeUnit"] =
+                    options.HardwareProfile.MaxThreadsPerComputeUnit,
+                ["maxGroupsPerComputeUnit"] =
+                    options.HardwareProfile.MaxGroupsPerComputeUnit,
+                ["sharedMemoryBytesPerComputeUnit"] =
+                    options.HardwareProfile.SharedMemoryBytesPerComputeUnit,
+            };
+        }
+        return await currentRpc.InvokeWithParameterObjectAsync<ComputeVisualizationModel>(
+                "hlsl/computeVisualization",
+                parameters,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
     // The standard LSP error code the server uses to reject a stale
     // CallHierarchyItem (see docs/call-hierarchy.md,
     // "CallHierarchyItem.data: stable identity envelope") -- the item's
