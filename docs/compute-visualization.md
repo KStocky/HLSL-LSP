@@ -114,7 +114,10 @@ source parameters.
   availability of that compiler count. Source locations have their own
   `locationsAvailable` and `locationsUnavailableReason`; current DXC
   reflection/cursor APIs do not provide a safe instruction-to-source mapping,
-  so the server returns no guessed locations.
+  so the server returns no guessed locations. These are independent signals:
+  `instructionCount: 0` authoritatively means the compiled shader contains no
+  barrier instructions even when `locationsAvailable` is false. An empty
+  `locations` array alone must never be interpreted as a zero barrier count.
 - Current DXC cursor/type/reflection interfaces do not safely expose complete
   `groupshared` declarations and their layout. `groupShared.available` is
   therefore false, `totalBytes` is null, and declarations are empty. The

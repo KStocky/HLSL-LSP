@@ -6124,6 +6124,25 @@ TEST_CASE("hlsl/computeVisualization uses the configured compute variant and DXC
     CHECK_FALSE(result["groupShared"]["unavailableReason"].get<std::string>().empty());
     CHECK(result["waveSize"]["known"] == false);
     CHECK(result["occupancy"].is_null());
+
+    // The compiler count and source-location availability are independent.
+    // Removing the barrier makes zero authoritative; it does not make DXC
+    // source-location enumeration available.
+    auto without_barrier = compute_visualization_shader();
+    constexpr std::string_view barrier_statement = "    GroupMemoryBarrierWithGroupSync();\n";
+    const auto barrier = without_barrier.find(barrier_statement);
+    REQUIRE(barrier != std::string::npos);
+    without_barrier.erase(barrier, barrier_statement.size());
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didChange",
+        .params =
+            Json{{"textDocument", {{"uri", document.uri()}, {"version", 2}}},
+                 {"contentChanges", Json::array({Json{{"text", std::move(without_barrier)}}})}}}));
+    const auto no_barriers = compute_visualization_result(server, 4, document.uri());
+    CHECK(no_barriers["barriers"]["available"] == true);
+    CHECK(no_barriers["barriers"]["instructionCount"] == 0);
+    CHECK(no_barriers["barriers"]["locationsAvailable"] == false);
+    CHECK(no_barriers["barriers"]["locations"].empty());
 }
 
 TEST_CASE("hlsl/computeVisualization computes exact and edge dispatch geometry and occupancy",
@@ -6147,12 +6166,16 @@ TEST_CASE("hlsl/computeVisualization computes exact and edge dispatch geometry a
     static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
         .method = "hlsl/didChangeActiveVariant", .params = Json{{"variant", "Configured"}}}));
 
+    // dispatchDimensions is the desired logical workload in threads, so an
+    // exact multiple maps directly to Dispatch() group counts.
     const auto exact = compute_visualization_result(
         server, 2, document.uri(), Json{{"dispatchDimensions", {{"x", 16}, {"y", 8}, {"z", 1}}}});
     CHECK(exact["groupCount"] == Json{{"x", 2}, {"y", 2}, {"z", 1}});
     CHECK(exact["launchedThreads"] == 128);
     CHECK(exact["inactiveThreads"] == 0);
 
+    // A non-divisible logical workload is rounded up per axis; inactive
+    // threads are the launched rectangular extent minus logical elements.
     const auto edge =
         compute_visualization_result(server, 3, document.uri(),
                                      Json{{"dispatchDimensions", {{"x", 17}, {"y", 9}, {"z", 1}}},
