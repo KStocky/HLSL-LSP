@@ -17,6 +17,7 @@ namespace HlslLsp.VisualStudio.Bootstrap;
 public sealed class ComputeVisualizationToolWindow : ToolWindowPane
 {
     private readonly ComputeVisualizationControl control = new();
+    private readonly ComputeVisualizationInteractionState interactionState = new();
 
     public ComputeVisualizationToolWindow()
         : base(null)
@@ -24,17 +25,29 @@ public sealed class ComputeVisualizationToolWindow : ToolWindowPane
         Caption = "HLSL Compute Visualization";
         control.ApplyRequested = options =>
         {
-            if (DocumentUri != null)
+            interactionState.Submit(options);
+            if (interactionState.RequestedDocumentUri != null)
             {
-                ComputeVisualizationBridge.Show(DocumentUri, options);
+                ComputeVisualizationBridge.Show(
+                    interactionState.RequestedDocumentUri,
+                    options);
             }
         };
         Content = control;
     }
 
-    internal Uri DocumentUri { get; private set; }
+    internal Uri DocumentUri => interactionState.RequestedDocumentUri;
 
-    internal ComputeVisualizationOptions Options => control.Options;
+    internal Uri DisplayedDocumentUri => interactionState.DisplayedDocumentUri;
+
+    internal ComputeVisualizationOptions SubmittedOptions =>
+        interactionState.LastSubmittedOptions;
+
+    internal void TrackRequest(Uri uri)
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        interactionState.TrackRequest(uri);
+    }
 
     internal void SetReport(
         Uri uri,
@@ -42,9 +55,9 @@ public sealed class ComputeVisualizationToolWindow : ToolWindowPane
         ComputeVisualizationModel report)
     {
         ThreadHelper.ThrowIfNotOnUIThread();
-        DocumentUri = uri;
+        interactionState.MarkDisplayed(uri);
         control.SetOptionsIfDocumentChanged(options);
-        control.SetReport(report);
+        control.SetReport(report, options?.HardwareProfile);
     }
 
     internal void SetError(
@@ -55,8 +68,9 @@ public sealed class ComputeVisualizationToolWindow : ToolWindowPane
     {
         ThreadHelper.ThrowIfNotOnUIThread();
         var preserve =
-            preserveSameDocumentContent && DocumentUri != null && DocumentUri.Equals(uri);
-        DocumentUri = uri;
+            preserveSameDocumentContent &&
+            interactionState.ShouldPreserveDisplayedContentOnFailure(uri);
+        interactionState.TrackRequest(uri);
         control.SetOptionsIfDocumentChanged(options);
         control.SetError(message, preserve);
     }
@@ -94,19 +108,7 @@ internal sealed class ComputeVisualizationControl : UserControl
             Content = content,
         };
         BuildConfiguration();
-        SetReport(null);
-    }
-
-    internal ComputeVisualizationOptions Options
-    {
-        get
-        {
-            if (!TryReadOptions(out var options, out _))
-            {
-                return new ComputeVisualizationOptions();
-            }
-            return options;
-        }
+        SetReport(null, null);
     }
 
     internal void SetOptionsIfDocumentChanged(ComputeVisualizationOptions options)
@@ -135,7 +137,9 @@ internal sealed class ComputeVisualizationControl : UserControl
         }
     }
 
-    internal void SetReport(ComputeVisualizationModel report)
+    internal void SetReport(
+        ComputeVisualizationModel report,
+        ComputeHardwareProfileModel submittedHardwareProfile)
     {
         ThreadHelper.ThrowIfNotOnUIThread();
         hasContent = report != null;
@@ -176,7 +180,7 @@ internal sealed class ComputeVisualizationControl : UserControl
         AddGroupShared(report.GroupShared);
         AddBarriers(report.Barriers);
         AddWaveSize(report.WaveSize);
-        AddOccupancy(report.Occupancy);
+        AddOccupancy(report.Occupancy, submittedHardwareProfile);
     }
 
     internal void SetError(string message, bool preserveContent)
@@ -407,13 +411,15 @@ internal sealed class ComputeVisualizationControl : UserControl
         }
     }
 
-    private void AddOccupancy(ComputeOccupancyModel occupancy)
+    private void AddOccupancy(
+        ComputeOccupancyModel occupancy,
+        ComputeHardwareProfileModel submittedHardwareProfile)
     {
         AddSection(ComputeVisualizationDisplay.OccupancyHeading);
         if (occupancy == null)
         {
             AddText(
-                ComputeVisualizationDisplay.OccupancyUnavailable(Options.HardwareProfile),
+                ComputeVisualizationDisplay.OccupancyUnavailable(submittedHardwareProfile),
                 Brushes.Goldenrod);
             return;
         }

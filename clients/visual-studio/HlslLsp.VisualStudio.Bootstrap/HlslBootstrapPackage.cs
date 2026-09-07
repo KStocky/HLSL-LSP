@@ -706,10 +706,12 @@ public sealed class HlslBootstrapPackage : AsyncPackage
             0,
             false,
             cancellationToken) as ComputeVisualizationToolWindow;
-        var options = existingWindow?.Options ?? new ComputeVisualizationOptions
-        {
-            DispatchDimensions = new ComputeDimensionsModel { X = 1, Y = 1, Z = 1 },
-        };
+        var options = existingWindow?.SubmittedOptions ??
+                      new ComputeVisualizationOptions
+                      {
+                          DispatchDimensions =
+                              new ComputeDimensionsModel { X = 1, Y = 1, Z = 1 },
+                      };
         await ShowComputeVisualizationExplicitAsync(uri, options, cancellationToken);
     }
 
@@ -760,8 +762,9 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         }
         var preserveContent =
             ComputeVisualizationRefreshLogic.ShouldPreserveContentOnFailure(
-                priorWindow?.DocumentUri,
+                priorWindow?.DisplayedDocumentUri,
                 uri);
+        priorWindow?.TrackRequest(uri);
         ComputeVisualizationModel report = null;
         string failureMessage = null;
         try
@@ -850,7 +853,7 @@ public sealed class HlslBootstrapPackage : AsyncPackage
             return;
         }
         var options = ComputeVisualizationRefreshLogic.OptionsForBackgroundRefresh(
-            window.Options);
+            window.SubmittedOptions);
         var refreshCancellation =
             computeVisualizationBackgroundRefreshCancellation.BeginNext(cancellationToken);
         await ShowComputeVisualizationAsync(

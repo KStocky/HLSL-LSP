@@ -200,21 +200,58 @@ public sealed class ComputeVisualizationTests
     [Fact]
     public void Refresh_PreservesCurrentInteractiveOptions()
     {
+        var state = new ComputeVisualizationInteractionState();
         var current = new ComputeVisualizationOptions
         {
             DispatchDimensions = new ComputeDimensionsModel { X = 1920, Y = 1080, Z = 1 },
             HardwareProfile = new ComputeHardwareProfileModel { Name = "Test GPU", WaveSize = 32 },
         };
+        state.Submit(current);
 
         Assert.Same(
             current,
-            ComputeVisualizationRefreshLogic.OptionsForBackgroundRefresh(current));
+            ComputeVisualizationRefreshLogic.OptionsForBackgroundRefresh(
+                state.LastSubmittedOptions));
         var uri = new Uri("file:///C:/shaders/compute.hlsl");
         Assert.True(
             ComputeVisualizationRefreshLogic.ShouldPreserveContentOnFailure(uri, uri));
         Assert.False(
             ComputeVisualizationRefreshLogic.ShouldRevealToolWindow(
                 existingWindowSupplied: true));
+    }
+
+    [Fact]
+    public void InteractionState_TracksNewestRequestedDocumentBeforeResponseArrives()
+    {
+        var state = new ComputeVisualizationInteractionState();
+        var documentA = new Uri("file:///C:/shaders/a.hlsl");
+        var documentB = new Uri("file:///C:/shaders/b.hlsl");
+        state.MarkDisplayed(documentA);
+
+        state.TrackRequest(documentB);
+
+        Assert.Equal(documentB, state.RequestedDocumentUri);
+        Assert.Equal(documentA, state.DisplayedDocumentUri);
+        Assert.False(state.ShouldPreserveDisplayedContentOnFailure(documentB));
+    }
+
+    [Fact]
+    public void InteractionState_BackgroundRefreshUsesLastSubmittedOptionsNotLiveInvalidText()
+    {
+        var state = new ComputeVisualizationInteractionState();
+        var submitted = new ComputeVisualizationOptions
+        {
+            DispatchDimensions = new ComputeDimensionsModel { X = 64, Y = 32, Z = 1 },
+        };
+        state.Submit(submitted);
+
+        Assert.False(
+            ComputeVisualizationInput.TryParsePositiveUInt32("not submitted", out _));
+        Assert.Same(
+            submitted,
+            ComputeVisualizationRefreshLogic.OptionsForBackgroundRefresh(
+                state.LastSubmittedOptions));
+        Assert.Equal((uint)64, state.LastSubmittedOptions.DispatchDimensions.X);
     }
 
     [Fact]

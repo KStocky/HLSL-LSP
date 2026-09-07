@@ -250,3 +250,38 @@ internal static class ComputeVisualizationRefreshLogic
             path,
             configuredExtensions);
 }
+
+internal sealed class ComputeVisualizationInteractionState
+{
+    internal ComputeVisualizationInteractionState()
+    {
+        LastSubmittedOptions = new ComputeVisualizationOptions
+        {
+            DispatchDimensions = new ComputeDimensionsModel { X = 1, Y = 1, Z = 1 },
+        };
+    }
+
+    internal Uri RequestedDocumentUri { get; private set; }
+
+    internal Uri DisplayedDocumentUri { get; private set; }
+
+    internal ComputeVisualizationOptions LastSubmittedOptions { get; private set; }
+
+    internal void TrackRequest(Uri uri)
+        => RequestedDocumentUri = uri ?? throw new ArgumentNullException(nameof(uri));
+
+    internal void MarkDisplayed(Uri uri)
+    {
+        TrackRequest(uri);
+        DisplayedDocumentUri = uri;
+    }
+
+    internal void Submit(ComputeVisualizationOptions options)
+        => LastSubmittedOptions =
+            options ?? throw new ArgumentNullException(nameof(options));
+
+    internal bool ShouldPreserveDisplayedContentOnFailure(Uri requestedUri)
+        => ComputeVisualizationRefreshLogic.ShouldPreserveContentOnFailure(
+            DisplayedDocumentUri,
+            requestedUri);
+}
