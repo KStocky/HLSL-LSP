@@ -32,6 +32,10 @@ export interface PreprocessorInclude {
   readonly resolvedUri?: string;
   readonly logicalPath?: string;
   readonly mapping?: string;
+  readonly expandedPath?: string;
+  readonly configurationMacro?: string;
+  readonly configurationOrigin?: string;
+  readonly configurationOriginUri?: string;
 }
 
 export interface PreprocessorFile {
@@ -184,7 +188,23 @@ function includeRow(fileUri: string, include: PreprocessorInclude): string {
     include.mapping !== undefined
       ? ` <span class="muted">(via ${escapeHtml(include.mapping)} mapping)</span>`
       : "";
-  return `<tr><td>${directiveLink}</td><td>${escapeHtml(kindLabels[include.kind])}</td><td><span class="status ${include.status}">${escapeHtml(statusLabels[include.status])}</span></td><td>${target}${mapping}</td></tr>`;
+  const expansion =
+    include.expandedPath !== undefined
+      ? ` <span class="muted">(expands to ${escapeHtml(include.expandedPath)})</span>`
+      : "";
+  const configurationOrigin =
+    include.configurationOrigin === undefined
+      ? ""
+      : include.configurationOriginUri === undefined
+        ? ` <span class="muted">(configured by ${escapeHtml(include.configurationOrigin)})</span>`
+        : ` <span class="muted">(configured by ${locationLink(
+            include.configurationOrigin,
+            {
+              uri: include.configurationOriginUri,
+              range: pointRange({ line: 0, character: 0 }),
+            },
+          )})</span>`;
+  return `<tr><td>${directiveLink}${expansion}</td><td>${escapeHtml(kindLabels[include.kind])}</td><td><span class="status ${include.status}">${escapeHtml(statusLabels[include.status])}</span></td><td>${target}${mapping}${configurationOrigin}</td></tr>`;
 }
 
 function fileSection(file: PreprocessorFile): string {

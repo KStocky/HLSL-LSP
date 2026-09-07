@@ -182,7 +182,8 @@ TEST_CASE("Configuration converts typed flags to deterministic DXC options",
           "hlsl.preprocessorDefinitions": {
             "ZED": "value",
             "BOOL": false,
-            "BARE": ""
+            "BARE": "",
+            "HEADER": "\"/Test/STF/AssertionsV1/Framework.hlsli\""
           },
           "hlsl.additionalIncludeDirectories": ["includes"],
           "hlsl.languageVersion": "202x",
@@ -196,7 +197,9 @@ TEST_CASE("Configuration converts typed flags to deterministic DXC options",
     CHECK(options.language_version == "202x");
     CHECK(options.target_profile == "lib_6_8");
     CHECK(options.entry_point == "RayGeneration");
-    CHECK(options.defines == std::vector<std::string>{"BARE", "BOOL=false", "ZED=value"});
+    CHECK(options.defines == std::vector<std::string>{
+                                 "BARE", "BOOL=false",
+                                 "HEADER=\"/Test/STF/AssertionsV1/Framework.hlsli\"", "ZED=value"});
     CHECK(options.include_directories ==
           std::vector<std::string>{
               std::filesystem::weakly_canonical(tree.path("shaders/includes")).string()});

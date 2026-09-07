@@ -230,6 +230,7 @@ internal sealed class PreprocessorExplorerControl : UserControl
         AddTableHeaderRow(grid, row++, new[] { "Directive", "Kind", "Status", "Target" });
         foreach (var include in includes)
         {
+            var presentation = PreprocessorIncludePresentation.Create(include);
             grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
 
             var directiveCell = new TextBlock
@@ -246,6 +247,13 @@ internal sealed class PreprocessorExplorerControl : UserControl
             var character = include.Character;
             directiveLink.Click += (_, _) => NavigateToPoint(fileUri, line, character);
             directiveCell.Inlines.Add(directiveLink);
+            if (!string.IsNullOrEmpty(presentation.ExpandedPath))
+            {
+                directiveCell.Inlines.Add(new Run($" (expands to {presentation.ExpandedPath})")
+                {
+                    Foreground = Brushes.Gray,
+                });
+            }
             Grid.SetRow(directiveCell, row);
             Grid.SetColumn(directiveCell, 0);
             grid.Children.Add(directiveCell);
@@ -267,19 +275,18 @@ internal sealed class PreprocessorExplorerControl : UserControl
                 TextWrapping = TextWrapping.Wrap,
                 Margin = new Thickness(5, 4, 5, 4),
             };
-            if (!string.IsNullOrEmpty(include.ResolvedUri))
+            if (!string.IsNullOrEmpty(presentation.ResolvedUri))
             {
-                var targetLink = new Hyperlink(
-                    new Run(include.LogicalPath ?? include.ResolvedUri))
+                var targetLink = new Hyperlink(new Run(presentation.TargetLabel))
                 {
                     ToolTip = "Go to resolved file",
                 };
-                var resolvedUri = include.ResolvedUri;
+                var resolvedUri = presentation.ResolvedUri;
                 targetLink.Click += (_, _) => NavigateToPoint(resolvedUri, 0, 0);
                 targetCell.Inlines.Add(targetLink);
-                if (!string.IsNullOrEmpty(include.Mapping))
+                if (!string.IsNullOrEmpty(presentation.Mapping))
                 {
-                    targetCell.Inlines.Add(new Run($" (via {include.Mapping} mapping)")
+                    targetCell.Inlines.Add(new Run($" (via {presentation.Mapping} mapping)")
                     {
                         Foreground = Brushes.Gray,
                     });
@@ -287,7 +294,32 @@ internal sealed class PreprocessorExplorerControl : UserControl
             }
             else
             {
-                targetCell.Inlines.Add(new Run("-"));
+                targetCell.Inlines.Add(new Run(presentation.TargetLabel));
+            }
+            if (!string.IsNullOrEmpty(presentation.ConfigurationOrigin))
+            {
+                targetCell.Inlines.Add(new Run(" (configured by ")
+                {
+                    Foreground = Brushes.Gray,
+                });
+                if (!string.IsNullOrEmpty(presentation.ConfigurationOriginUri))
+                {
+                    var originLink = new Hyperlink(new Run(presentation.ConfigurationOrigin))
+                    {
+                        ToolTip = "Go to configuration",
+                    };
+                    var originUri = presentation.ConfigurationOriginUri;
+                    originLink.Click += (_, _) => NavigateToPoint(originUri, 0, 0);
+                    targetCell.Inlines.Add(originLink);
+                }
+                else
+                {
+                    targetCell.Inlines.Add(new Run(presentation.ConfigurationOrigin));
+                }
+                targetCell.Inlines.Add(new Run(")")
+                {
+                    Foreground = Brushes.Gray,
+                });
             }
             Grid.SetRow(targetCell, row);
             Grid.SetColumn(targetCell, 3);

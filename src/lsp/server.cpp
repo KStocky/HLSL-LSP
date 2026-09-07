@@ -3563,11 +3563,23 @@ Json Server::preprocessor_explorer(const std::optional<Json>& params,
             Json item{{"path", include.requested_path},
                       {"line", include_position.line},
                       {"character", include_position.character},
-                      {"kind", include.status == workspace::IncludeResolution::Status::dynamic
-                                   ? "macro"
-                               : include.quoted ? "quoted"
-                                                : "angled"},
+                      {"kind", include.macro_expanded ? "macro"
+                               : include.quoted       ? "quoted"
+                                                      : "angled"},
                       {"status", status_name(include.status)}};
+            if (!include.expanded_path.empty()) {
+                item["expandedPath"] = include.expanded_path;
+            }
+            if (!include.configuration_macro.empty()) {
+                item["configurationMacro"] = include.configuration_macro;
+            }
+            if (!include.configuration_origin.empty()) {
+                item["configurationOrigin"] = include.configuration_origin;
+            }
+            if (!include.configuration_origin_file.empty()) {
+                item["configurationOriginUri"] =
+                    workspace::DocumentUri::from_path(include.configuration_origin_file).uri();
+            }
             if (!include.resolved_path.empty()) {
                 item["resolvedUri"] =
                     workspace::DocumentUri::from_path(include.resolved_path).uri();
@@ -3676,7 +3688,9 @@ Json Server::preprocessor_explorer(const std::optional<Json>& params,
     Json diagnostics = Json::array();
     if (resolution.has_dynamic_includes) {
         diagnostics.push_back(
-            "Macro-based includes are compiler-owned; their expressions are shown without "
+            "Source-defined, function-like, undefined, cyclic, malformed, oversized, or "
+            "multi-token include expressions, and configured macros changed or obscured by "
+            "additional compiler arguments, remain compiler-owned and are shown without "
             "fabricating a resolved path.");
     }
 

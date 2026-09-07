@@ -138,8 +138,9 @@ Start with these task-oriented walkthroughs:
 ### Preprocessor explorer
 
 The Preprocessor Explorer shows the resolved include graph, missing, cyclic,
-and macro-based includes, DXC-reported skipped conditional regions, source and
-configuration macros, and effective compiler settings with their provenance.
+dynamic, and configured object-like macro includes, DXC-reported skipped
+conditional regions, source and configuration macros, and effective compiler
+settings with their provenance.
 It uses the current unsaved document and active variant, and provides
 navigation to source and file-backed configuration locations. See
 [`docs/preprocessor-explorer.md`](docs/preprocessor-explorer.md) for the

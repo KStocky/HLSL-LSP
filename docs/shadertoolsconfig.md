@@ -79,6 +79,40 @@ Settings are applied in this order, from lowest to highest precedence:
    Within one file, groups are processed in array order. A shader may match
    more than one group, so a later matching group has higher precedence.
 
+## Configured macro includes
+
+An object-like configured definition may be used as an `#include` expression
+when its fully expanded value is exactly one quoted or angle header-name token:
+
+```jsonc
+{
+  "hlsl.preprocessorDefinitions": {
+    "STF_ASSERTIONS": "\"/Test/STF/AssertionsV1/Framework.hlsli\"",
+    "PROJECT_HEADER": "PROJECT_HEADER_VALUE",
+    "PROJECT_HEADER_VALUE": "<Project/Shared.hlsli>"
+  }
+}
+```
+
+The backslashes before the quotes are JSON escaping; the effective
+`STF_ASSERTIONS` value passed to DXC is
+`"/Test/STF/AssertionsV1/Framework.hlsli"`. HLSL-LSP resolves bounded alias
+chains only when every alias comes from the document's effective configuration,
+then applies the normal relative, additional-include-directory, open-buffer,
+and virtual-directory-mapping rules. Active variants and editor overrides are
+therefore honored automatically.
+
+DXC remains the preprocessing authority. Source-defined or function-like
+macros, undefined aliases, cycles, malformed header names, multi-token values,
+and expansions beyond 32 expansion steps or a 4 KiB definition value remain
+dynamic and are not guessed by the workspace resolver. The resolver also
+leaves an include dynamic when a later `hlsl.additionalArguments` `-D`, `/D`,
+`-U`, or `/U` switch can modify any macro in its alias chain. Split and joined
+switch spellings are recognized without interpreting their replacement values.
+Response-file arguments and unusually large argument lists are treated as
+opaque because they can hide macro mutations; configured macro include
+expansion is conservatively disabled for that compilation.
+
 Across those layers:
 
 - Definition and virtual-mapping objects merge by key; a higher-precedence
@@ -247,7 +281,7 @@ Problems are reported clearly rather than applied silently:
 | `hlsl.fileGroups` | Array of file-group objects | Applies file-specific settings using the ordered matching and precedence rules above. |
 | `hlsl.variantsVersion` | Integer | Declares the named-variants schema version. Required when `hlsl.variants` is present; only `1` is supported. |
 | `hlsl.variants` | Array of variant objects | Declares selectable named compilation variants; see [Named compilation variants](#named-compilation-variants). |
-| `hlsl.preprocessorDefinitions` | Object | Adds DXC defines. Values may be strings, numbers, or Booleans. An empty string emits a value-less define. |
+| `hlsl.preprocessorDefinitions` | Object | Adds DXC defines. Values may be strings, numbers, or Booleans. An empty string emits a value-less define. Object-like values that expand to exactly one header-name token may resolve `#include MACRO`; quoted header values require JSON-escaped quotes. |
 | `hlsl.additionalIncludeDirectories` | String array | Adds existing directories to DXC's include search path. Relative paths are resolved from this config file. |
 | `hlsl.virtualDirectoryMappings` | Object of string paths | Maps virtual include roots to existing directories, primarily for Unreal-style paths. Each virtual key must begin with `/` or `\`. |
 | `hlsl.languageVersion` | String | Sets DXC `-HV`, for example `2016`, `2018`, `2021`, or `202x`. The built-in default is `2021`. |

@@ -99,6 +99,56 @@ TEST_CASE("DXC IntelliSense analyzes HLSL 2021", "[dxc][integration]") {
     }));
 }
 
+TEST_CASE("DXC accepts spliced preprocessing directive keywords",
+          "[dxc][preprocessor][splices][regression]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    const std::string source = "#def\\\n"
+                               "ine VALUE 1\n"
+                               "/* prefix */ #un\\\n"
+                               "def VALUE\n"
+                               "#ifndef VALUE\n"
+                               "#define VALUE 2\n"
+                               "#endif\n"
+                               "float4 main() : SV_Target {\n"
+                               "    return float4(VALUE, VALUE, VALUE, VALUE);\n"
+                               "}\n";
+
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+    CHECK(translation_unit.diagnostics().empty());
+}
+
+TEST_CASE("DXC accepts comment delimiters formed by phase-two splicing",
+          "[dxc][preprocessor][comments][splices][regression]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    const std::string source = "/\\\n"
+                               "* comment with an internal \\\n"
+                               "splice *\\\n"
+                               "/ #define VALUE 1\n"
+                               "/\\\n"
+                               "/ hidden #undef VALUE \\\n"
+                               "and still hidden\n"
+                               "#if VALUE != 1\n"
+                               "#error phase-two comment handling failed\n"
+                               "#endif\n"
+                               "float4 main() : SV_Target {\n"
+                               "    return float4(VALUE, VALUE, VALUE, VALUE);\n"
+                               "}\n";
+
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+    const auto diagnostics = translation_unit.diagnostics();
+    std::string messages;
+    for (const auto& diagnostic : diagnostics) {
+        messages += diagnostic.message;
+        messages += '\n';
+    }
+    INFO(messages);
+    CHECK(std::ranges::none_of(diagnostics, [](const auto& diagnostic) {
+        return diagnostic.severity >= hlsl_intellisense::dxc::DiagnosticSeverity::error;
+    }));
+}
+
 TEST_CASE("DXC inlay hints use inferred cursor types and unambiguous signatures",
           "[dxc][inlay-hints]") {
     hlsl_intellisense::dxc::Intellisense intellisense;

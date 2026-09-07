@@ -1766,6 +1766,116 @@ TEST_CASE("Server resolves virtual include mappings for DXC",
     CHECK(response->result["range"]["start"]["character"] == 20);
 }
 
+TEST_CASE("Configured macro includes resolve through virtual mappings end to end",
+          "[lsp][configuration][includes][preprocessor][integration]") {
+    TestDirectory directory;
+    std::filesystem::create_directories(directory.path() / "Test" / "STF" / "AssertionsV1");
+    const auto config_path = directory.path() / "shadertoolsconfig.json";
+    {
+        std::ofstream config{config_path};
+        REQUIRE(config);
+        config << R"({
+            "root": true,
+            "hlsl.preprocessorDefinitions": {
+                "STF_ASSERTIONS": "\"/Test/STF/AssertionsV1/Framework.hlsli\""
+            },
+            "hlsl.virtualDirectoryMappings": {"/Test": "Test"}
+        })";
+        REQUIRE(config);
+    }
+    {
+        std::ofstream include{directory.path() / "Test" / "STF" / "AssertionsV1" /
+                              "Framework.hlsli"};
+        REQUIRE(include);
+        include << "static const float frameworkValue = 1.0;\n";
+        REQUIRE(include);
+    }
+
+    const auto document = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "configured-macro.hlsl").string());
+    const std::string source = "#include STF_ASSERTIONS\n"
+                               "float4 main() : SV_Target { return frameworkValue.xxxx; }\n";
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    hlsl_intellisense::lsp::Server server{
+        [&notifications](const auto& value) { notifications.push_back(value); }};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(
+        hlsl_intellisense::json_rpc::Notification{.method = "textDocument/didOpen",
+                                                  .params = Json{{"textDocument",
+                                                                  {{"uri", document.uri()},
+                                                                   {"languageId", "hlsl"},
+                                                                   {"version", 1},
+                                                                   {"text", source}}}}}));
+
+    REQUIRE(notifications.size() == 1);
+    CHECK((*notifications.front().params)["diagnostics"].empty());
+    const auto include_uri = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "Test" / "STF" / "AssertionsV1" / "Framework.hlsli").string());
+
+    const auto include_definition = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{2},
+        .method = "textDocument/definition",
+        .params = Json{{"textDocument", {{"uri", document.uri()}}},
+                       {"position", position_at(source, source.find("STF_ASSERTIONS") + 3)}}});
+    REQUIRE(include_definition.has_value());
+    const auto* include_response =
+        std::get_if<hlsl_intellisense::json_rpc::Response>(&*include_definition);
+    REQUIRE(include_response != nullptr);
+    CHECK(include_response->result["uri"] == include_uri.uri());
+
+    const auto symbol_definition = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{3},
+        .method = "textDocument/definition",
+        .params = Json{{"textDocument", {{"uri", document.uri()}}},
+                       {"position", position_at(source, source.find("frameworkValue") + 3)}}});
+    REQUIRE(symbol_definition.has_value());
+    const auto* symbol_response =
+        std::get_if<hlsl_intellisense::json_rpc::Response>(&*symbol_definition);
+    REQUIRE(symbol_response != nullptr);
+    CHECK(symbol_response->result["uri"] == include_uri.uri());
+    CHECK(symbol_response->result["range"]["start"]["line"] == 0);
+    CHECK(symbol_response->result["range"]["start"]["character"] == 19);
+
+    const auto explorer = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{4},
+        .method = "hlsl/preprocessorExplorer",
+        .params = Json{{"textDocument", {{"uri", document.uri()}}}}});
+    REQUIRE(explorer.has_value());
+    const auto* explorer_response = std::get_if<hlsl_intellisense::json_rpc::Response>(&*explorer);
+    REQUIRE(explorer_response != nullptr);
+    REQUIRE(explorer_response->result["files"][0]["includes"].size() == 1);
+    const auto& include = explorer_response->result["files"][0]["includes"][0];
+    CHECK(include["path"] == "STF_ASSERTIONS");
+    CHECK(include["kind"] == "macro");
+    CHECK(include["status"] == "resolved");
+    CHECK(include["expandedPath"] == "/Test/STF/AssertionsV1/Framework.hlsli");
+    CHECK(include["resolvedUri"] == include_uri.uri());
+    CHECK(include["mapping"] == "/Test");
+    CHECK(include["configurationMacro"] == "STF_ASSERTIONS");
+    CHECK(include["configurationOrigin"] == config_path.generic_string());
+    CHECK(include["configurationOriginUri"] ==
+          hlsl_intellisense::workspace::DocumentUri::from_path(config_path.string()).uri());
+    CHECK(explorer_response->result["diagnostics"].empty());
+
+    const std::string edited = "#include STF_ASSERTIONS\n"
+                               "float4 main() : SV_Target { return missingValue.xxxx; }\n";
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didChange",
+        .params = Json{{"textDocument", {{"uri", document.uri()}, {"version", 2}}},
+                       {"contentChanges", Json::array({Json{{"text", edited}}})}}}));
+    REQUIRE(notifications.size() == 2);
+    const auto& diagnostics = (*notifications.back().params)["diagnostics"];
+    const auto missing = std::ranges::find_if(diagnostics, [](const auto& diagnostic) {
+        return diagnostic["message"].template get<std::string>().find("missingValue") !=
+               std::string::npos;
+    });
+    REQUIRE(missing != diagnostics.end());
+    CHECK((*missing)["range"]["start"] == position_at(edited, edited.find("missingValue")));
+}
+
 TEST_CASE("F12 on include paths opens quoted and search-path headers",
           "[lsp][navigation][includes][integration]") {
     TestDirectory directory;
@@ -2055,7 +2165,7 @@ TEST_CASE("Typed editor settings override files and resolve from the workspace",
                         {{"uri", document.uri()},
                          {"languageId", "hlsl"},
                          {"version", 1},
-                         {"text", "#include <Editor.hlsli>\n"
+                         {"text", "#include EDITOR_HEADER\n"
                                   "#ifndef EDITOR_SETTING\n#error missing editor setting\n#endif\n"
                                   "float4 main() : SV_Target { return editorValue; }\n"}}}}}));
     REQUIRE(notifications.size() == 1);
@@ -2065,11 +2175,25 @@ TEST_CASE("Typed editor settings override files and resolve from the workspace",
         .method = "workspace/didChangeConfiguration",
         .params = Json{{"settings",
                         {{"hlsl",
-                          {{"preprocessorDefinitions", {{"EDITOR_SETTING", 1}}},
+                          {{"preprocessorDefinitions",
+                            {{"EDITOR_SETTING", 1}, {"EDITOR_HEADER", "\"Editor.hlsli\""}}},
                            {"additionalIncludeDirectories", Json::array({"includes"})},
                            {"languageVersion", "2021"}}}}}}}));
     REQUIRE(notifications.size() == 2);
     CHECK((*notifications.back().params)["diagnostics"].empty());
+
+    const auto explorer = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{2},
+        .method = "hlsl/preprocessorExplorer",
+        .params = Json{{"textDocument", {{"uri", document.uri()}}}}});
+    REQUIRE(explorer.has_value());
+    const auto* explorer_response = std::get_if<hlsl_intellisense::json_rpc::Response>(&*explorer);
+    REQUIRE(explorer_response != nullptr);
+    const auto& configured_include = explorer_response->result["files"][0]["includes"][0];
+    CHECK(configured_include["status"] == "resolved");
+    CHECK(configured_include["expandedPath"] == "Editor.hlsli");
+    CHECK(configured_include["configurationOrigin"] == "editor settings");
+    CHECK_FALSE(configured_include.contains("configurationOriginUri"));
 
     static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
         .method = "workspace/didChangeConfiguration",
@@ -2797,6 +2921,177 @@ TEST_CASE("Server honors an initial active variant from initializationOptions",
                                                                    {"version", 1},
                                                                    {"text", variant_shader()}}}}}));
     CHECK(mentions(last_diagnostics(notifications, document.uri()), "marker_alpha"));
+}
+
+TEST_CASE("Configured macro include targets follow the active variant",
+          "[lsp][variants][includes][preprocessor][integration]") {
+    TestDirectory directory;
+    {
+        std::ofstream config{directory.path() / "shadertoolsconfig.json"};
+        REQUIRE(config);
+        config << R"({
+            "root": true,
+            "hlsl.additionalIncludeDirectories": ["."],
+            "hlsl.variantsVersion": 1,
+            "hlsl.variants": [
+                {
+                    "name": "Alpha",
+                    "hlsl.preprocessorDefinitions": {
+                        "VARIANT_HEADER": "\"Alpha.hlsli\""
+                    }
+                },
+                {
+                    "name": "Beta",
+                    "hlsl.preprocessorDefinitions": {
+                        "VARIANT_HEADER": "<Beta.hlsli>"
+                    }
+                }
+            ]
+        })";
+        REQUIRE(config);
+    }
+    {
+        std::ofstream alpha{directory.path() / "Alpha.hlsli"};
+        REQUIRE(alpha);
+        alpha << "static const float4 variantValue = 1.0.xxxx;\n";
+        REQUIRE(alpha);
+        std::ofstream beta{directory.path() / "Beta.hlsli"};
+        REQUIRE(beta);
+        beta << "static const float4 variantValue = 2.0.xxxx;\n";
+        REQUIRE(beta);
+    }
+
+    const auto document = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "variant-include.hlsl").string());
+    const std::string source = "#include /* \xCF\x80 configured */ VARIANT_HEADER\n"
+                               "float4 main() : SV_Target { return variantValue; }\n";
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    hlsl_intellisense::lsp::Server server{
+        [&notifications](const auto& value) { notifications.push_back(value); }};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(
+        hlsl_intellisense::json_rpc::Notification{.method = "textDocument/didOpen",
+                                                  .params = Json{{"textDocument",
+                                                                  {{"uri", document.uri()},
+                                                                   {"languageId", "hlsl"},
+                                                                   {"version", 1},
+                                                                   {"text", source}}}}}));
+    CHECK_FALSE(last_diagnostics(notifications, document.uri()).empty());
+
+    const auto check_variant = [&](std::string_view name, std::string_view header,
+                                   std::int64_t request_id) {
+        static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+            .method = "hlsl/didChangeActiveVariant",
+            .params = Json{{"variant", std::string{name}}}}));
+        CHECK(last_diagnostics(notifications, document.uri()).empty());
+        const auto explorer = server.handle(hlsl_intellisense::json_rpc::Request{
+            .id = request_id,
+            .method = "hlsl/preprocessorExplorer",
+            .params = Json{{"textDocument", {{"uri", document.uri()}}}}});
+        REQUIRE(explorer.has_value());
+        const auto* response = std::get_if<hlsl_intellisense::json_rpc::Response>(&*explorer);
+        REQUIRE(response != nullptr);
+        const auto& include = response->result["files"][0]["includes"][0];
+        CHECK(include["status"] == "resolved");
+        CHECK(include["expandedPath"] == std::string{header});
+        CHECK(include["configurationOrigin"] == "variant " + std::string{name});
+        CHECK(include["line"] == 0);
+        CHECK(include["character"] ==
+              hlsl_intellisense::workspace::lsp_position_at(source, source.find("VARIANT_HEADER"))
+                  .character);
+    };
+
+    check_variant("Alpha", "Alpha.hlsli", 2);
+    check_variant("Beta", "Beta.hlsli", 3);
+}
+
+TEST_CASE("Later DXC macro arguments keep configured virtual includes compiler-owned",
+          "[lsp][configuration][includes][preprocessor][arguments][integration]") {
+    TestDirectory directory;
+    std::filesystem::create_directories(directory.path() / "Configured");
+    {
+        std::ofstream config{directory.path() / "shadertoolsconfig.json"};
+        REQUIRE(config);
+        config << R"({
+            "root": true,
+            "hlsl.targetProfile": "ps_6_0",
+            "hlsl.entryPoint": "main",
+            "hlsl.preprocessorDefinitions": {
+                "HEADER": "HEADER_TARGET",
+                "HEADER_TARGET": "\"/Configured/configured.hlsli\""
+            },
+            "hlsl.virtualDirectoryMappings": {"/Configured": "Configured"},
+            "hlsl.additionalArguments": ["-DHEADER=\"runtime.hlsli\""]
+        })";
+        REQUIRE(config);
+    }
+    {
+        std::ofstream configured{directory.path() / "Configured" / "configured.hlsli"};
+        REQUIRE(configured);
+        configured << "static const float4 configuredValue = 1.0.xxxx;\n";
+        REQUIRE(configured);
+        std::ofstream runtime{directory.path() / "runtime.hlsli"};
+        REQUIRE(runtime);
+        runtime << "static const float4 runtimeValue = 2.0.xxxx;\n";
+        REQUIRE(runtime);
+    }
+
+    const auto document = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "argument-override.hlsl").string());
+    const auto runtime_uri = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "runtime.hlsli").string());
+    const std::string source = "#include HEADER\n"
+                               "float4 main() : SV_Target { return runtimeValue; }\n";
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    hlsl_intellisense::lsp::Server server{
+        [&notifications](const auto& value) { notifications.push_back(value); }};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(
+        hlsl_intellisense::json_rpc::Notification{.method = "textDocument/didOpen",
+                                                  .params = Json{{"textDocument",
+                                                                  {{"uri", document.uri()},
+                                                                   {"languageId", "hlsl"},
+                                                                   {"version", 1},
+                                                                   {"text", source}}}}}));
+
+    const auto messages = last_diagnostics(notifications, document.uri());
+    CHECK_FALSE(mentions(messages, "runtimeValue"));
+    CHECK_FALSE(mentions(messages, "runtime.hlsli"));
+
+    const auto definition = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{2},
+        .method = "textDocument/definition",
+        .params = Json{{"textDocument", {{"uri", document.uri()}}},
+                       {"position", position_at(source, source.find("runtimeValue") + 3)}}});
+    REQUIRE(definition.has_value());
+    const auto* definition_response =
+        std::get_if<hlsl_intellisense::json_rpc::Response>(&*definition);
+    REQUIRE(definition_response != nullptr);
+    CHECK(definition_response->result["uri"] == runtime_uri.uri());
+    CHECK(definition_response->result["range"]["start"]["line"] == 0);
+    CHECK(definition_response->result["range"]["start"]["character"] == 20);
+
+    const auto explorer = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{3},
+        .method = "hlsl/preprocessorExplorer",
+        .params = Json{{"textDocument", {{"uri", document.uri()}}}}});
+    REQUIRE(explorer.has_value());
+    const auto* explorer_response = std::get_if<hlsl_intellisense::json_rpc::Response>(&*explorer);
+    REQUIRE(explorer_response != nullptr);
+    const auto& include = explorer_response->result["files"][0]["includes"][0];
+    CHECK(include["path"] == "HEADER");
+    CHECK(include["kind"] == "macro");
+    CHECK(include["status"] == "dynamic");
+    CHECK_FALSE(include.contains("expandedPath"));
+    CHECK_FALSE(include.contains("resolvedUri"));
+    CHECK_FALSE(include.contains("configurationMacro"));
+    CHECK_FALSE(explorer_response->result["diagnostics"].empty());
 }
 
 TEST_CASE("Server reports an invalid variant selection without applying it",
