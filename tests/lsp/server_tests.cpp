@@ -6196,6 +6196,23 @@ TEST_CASE("hlsl/computeVisualization computes exact and edge dispatch geometry a
     CHECK(edge["occupancy"]["estimatedResidentWaves"] == 8);
     CHECK_FALSE(edge["occupancy"]["limitingFactors"].empty());
     CHECK(edge["occupancy"]["assumptions"].size() >= 3);
+
+    // Partial waves cannot be shared by independent thread groups. A
+    // 32-thread group on wave64 hardware consumes 64 resident lanes, so a
+    // 64-thread compute-unit limit permits one group, not two.
+    const auto partial_wave = compute_visualization_result(
+        server, 4, document.uri(),
+        Json{{"hardwareProfile",
+              {{"name", "Wave64 test GPU"},
+               {"waveSize", 64},
+               {"maxThreadsPerGroup", 1024},
+               {"maxThreadsPerComputeUnit", 64},
+               {"maxGroupsPerComputeUnit", 2},
+               {"sharedMemoryBytesPerComputeUnit", 65536}}}});
+    REQUIRE(!partial_wave["occupancy"].is_null());
+    CHECK(partial_wave["occupancy"]["estimatedResidentGroups"] == 1);
+    CHECK(partial_wave["occupancy"]["estimatedResidentThreads"] == 32);
+    CHECK(partial_wave["occupancy"]["estimatedResidentWaves"] == 1);
 }
 
 TEST_CASE("hlsl/computeVisualization rejects malformed, non-positive, and overflowing inputs",

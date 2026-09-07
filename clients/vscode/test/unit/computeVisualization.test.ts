@@ -40,6 +40,8 @@ function report(
       available: true,
       unavailableReason: "",
       instructionCount: 1,
+      locationsAvailable: true,
+      locationsUnavailableReason: "",
       locations: [
         {
           label: "GroupMemoryBarrierWithGroupSync",
@@ -165,6 +167,8 @@ void test("zero compiler barriers is distinct from unavailable source locations"
         available: true,
         unavailableReason: "",
         instructionCount: 0,
+        locationsAvailable: false,
+        locationsUnavailableReason: "DXC does not expose locations.",
         locations: [],
       },
     }),
@@ -179,12 +183,14 @@ void test("zero compiler barriers is distinct from unavailable source locations"
         available: true,
         unavailableReason: "",
         instructionCount: 2,
+        locationsAvailable: false,
+        locationsUnavailableReason: "Exact compiler reason.",
         locations: [],
       },
     }),
     uri,
   );
-  assert.match(unknownLocations, /source locations are not available/);
+  assert.match(unknownLocations, /Exact compiler reason/);
 });
 
 void test("compute visualization labels occupancy as a hardware estimate", () => {

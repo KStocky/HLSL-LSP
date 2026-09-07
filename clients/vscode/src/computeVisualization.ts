@@ -46,6 +46,8 @@ export interface ComputeBarrierAnalysis {
   readonly available: boolean;
   readonly unavailableReason: string;
   readonly instructionCount: number | null;
+  readonly locationsAvailable: boolean;
+  readonly locationsUnavailableReason: string;
   readonly locations: readonly ComputeBarrierLocation[];
 }
 
@@ -239,14 +241,16 @@ function barriersSection(barriers: ComputeBarrierAnalysis): string {
   const locations =
     barriers.instructionCount === 0
       ? '<li class="muted">(no barrier instructions)</li>'
-      : barriers.locations.length === 0
-        ? '<li class="muted">Barrier source locations are not available.</li>'
-        : barriers.locations
-            .map((location, index) => {
-              const label = location.label ?? `Barrier ${String(index + 1)}`;
-              return `<li>${locationLink(location, label)}</li>`;
-            })
-            .join("");
+      : !barriers.locationsAvailable
+        ? `<li class="muted">${escapeHtml(barriers.locationsUnavailableReason || "Barrier source locations are not available.")}</li>`
+        : barriers.locations.length === 0
+          ? '<li class="muted">(no barrier locations reported)</li>'
+          : barriers.locations
+              .map((location, index) => {
+                const label = location.label ?? `Barrier ${String(index + 1)}`;
+                return `<li>${locationLink(location, label)}</li>`;
+              })
+              .join("");
   return `<section>
 <h2>Barriers</h2>
 <p>Compiler instruction count: ${numberOrUnavailable(barriers.instructionCount)}</p>

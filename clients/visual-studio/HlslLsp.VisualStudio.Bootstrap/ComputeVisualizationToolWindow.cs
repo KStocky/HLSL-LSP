@@ -282,7 +282,7 @@ internal sealed class ComputeVisualizationControl : UserControl
                 !ComputeVisualizationInput.TryParsePositiveUInt32(
                     maxGroupsPerComputeUnit.Text,
                     out var parsedMaxGroupsPerComputeUnit) ||
-                !ComputeVisualizationInput.TryParseOptionalPositiveUInt64(
+                !ComputeVisualizationInput.TryParseOptionalPositiveUInt32(
                     sharedMemoryBytesPerComputeUnit.Text,
                     out var parsedSharedMemory) ||
                 parsedSharedMemory == 0)
@@ -374,6 +374,8 @@ internal sealed class ComputeVisualizationControl : UserControl
         var locations = barriers.Locations ?? Array.Empty<ComputeSourceLocationModel>();
         var locationMessage = ComputeVisualizationDisplay.BarrierLocationsMessage(
             barriers.InstructionCount,
+            barriers.LocationsAvailable,
+            barriers.LocationsUnavailableReason,
             locations.Count);
         if (locationMessage != null)
         {

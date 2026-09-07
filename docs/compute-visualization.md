@@ -142,10 +142,12 @@ source parameters.
 
 When a hardware profile is supplied, occupancy is explicitly an estimate.
 Resident groups are bounded by `maxGroupsPerComputeUnit` and
-`maxThreadsPerComputeUnit / threadsPerGroup`; a group larger than
-`maxThreadsPerGroup` yields zero resident groups. Resident threads and waves
-are derived with checked arithmetic, using the supplied wave size. The result
-always lists limiting factors and assumptions. Register pressure is not
-available. Because compiler-authoritative groupshared usage is currently
-unavailable, `sharedMemoryBytesPerComputeUnit` is reported as an unapplied
-assumption and does not fabricate a shared-memory occupancy limit.
+`maxThreadsPerComputeUnit / allocatedWaveLanesPerGroup`, where
+`allocatedWaveLanesPerGroup = ceil(threadsPerGroup / waveSize) * waveSize`;
+partial waves cannot be shared between groups. A group larger than
+`maxThreadsPerGroup` yields zero resident groups. Resident active threads and
+allocated waves are derived with checked arithmetic. The result always lists
+limiting factors and assumptions. Register pressure is not available. Because
+compiler-authoritative groupshared usage is currently unavailable,
+`sharedMemoryBytesPerComputeUnit` is reported as an unapplied assumption and
+does not fabricate a shared-memory occupancy limit.

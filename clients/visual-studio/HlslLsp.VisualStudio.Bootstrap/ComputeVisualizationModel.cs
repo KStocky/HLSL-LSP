@@ -19,7 +19,7 @@ public sealed class ComputeHardwareProfileModel
     public uint MaxThreadsPerGroup { get; set; }
     public uint MaxThreadsPerComputeUnit { get; set; }
     public uint MaxGroupsPerComputeUnit { get; set; }
-    public ulong SharedMemoryBytesPerComputeUnit { get; set; }
+    public uint SharedMemoryBytesPerComputeUnit { get; set; }
 }
 
 public sealed class ComputeVisualizationOptions
@@ -51,6 +51,8 @@ public sealed class ComputeBarrierAnalysisModel
     public bool Available { get; set; }
     public string UnavailableReason { get; set; }
     public ulong? InstructionCount { get; set; }
+    public bool LocationsAvailable { get; set; }
+    public string LocationsUnavailableReason { get; set; }
     public IReadOnlyList<ComputeSourceLocationModel> Locations { get; set; } =
         Array.Empty<ComputeSourceLocationModel>();
 }
@@ -138,17 +140,25 @@ internal static class ComputeVisualizationDisplay
 
     internal static string BarrierLocationsMessage(
         ulong? instructionCount,
+        bool locationsAvailable,
+        string unavailableReason,
         int locationCount)
     {
         if (instructionCount == 0)
         {
             return "(no barrier instructions)";
         }
+        if (!locationsAvailable)
+        {
+            return UnavailableReason(
+                unavailableReason,
+                instructionCount.HasValue
+                    ? "Barrier instructions were found, but compiler source locations are unavailable."
+                    : "Barrier instruction count and compiler source locations are unavailable.");
+        }
         if (locationCount == 0)
         {
-            return instructionCount.HasValue
-                ? "Barrier instructions were found, but compiler source locations are unavailable."
-                : "Barrier instruction count and compiler source locations are unavailable.";
+            return "(no barrier locations reported)";
         }
         return null;
     }
@@ -174,20 +184,6 @@ internal static class ComputeVisualizationInput
         return TryParsePositiveUInt32(value, out parsed);
     }
 
-    internal static bool TryParseOptionalPositiveUInt64(string value, out ulong parsed)
-    {
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            parsed = 0;
-            return true;
-        }
-        return ulong.TryParse(
-                   value,
-                   System.Globalization.NumberStyles.None,
-                   System.Globalization.CultureInfo.InvariantCulture,
-                   out parsed) &&
-               parsed != 0;
-    }
 }
 
 public static class ComputeVisualizationBridge

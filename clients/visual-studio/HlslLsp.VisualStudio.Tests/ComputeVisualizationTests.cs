@@ -142,12 +142,20 @@ public sealed class ComputeVisualizationTests
     {
         Assert.Equal(
             "(no barrier instructions)",
-            ComputeVisualizationDisplay.BarrierLocationsMessage(0, 0));
+            ComputeVisualizationDisplay.BarrierLocationsMessage(
+                0,
+                false,
+                "DXC does not expose locations.",
+                0));
         var unavailableLocations =
-            ComputeVisualizationDisplay.BarrierLocationsMessage(2, 0);
-        Assert.Contains("instructions were found", unavailableLocations);
-        Assert.Contains("source locations are unavailable", unavailableLocations);
-        Assert.Null(ComputeVisualizationDisplay.BarrierLocationsMessage(2, 2));
+            ComputeVisualizationDisplay.BarrierLocationsMessage(
+                2,
+                false,
+                "Exact compiler reason.",
+                0);
+        Assert.Equal("Exact compiler reason.", unavailableLocations);
+        Assert.Null(
+            ComputeVisualizationDisplay.BarrierLocationsMessage(2, true, string.Empty, 2));
     }
 
     [Theory]

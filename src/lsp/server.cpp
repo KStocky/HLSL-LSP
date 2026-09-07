@@ -4065,9 +4065,15 @@ Json Server::compute_visualization(const std::optional<Json>& params,
                 limiting_factors.push_back(
                     "The reflected thread group exceeds hardware maxThreadsPerGroup.");
             } else {
+                const auto waves_per_group = threads_per_group / hardware->wave_size +
+                                             (threads_per_group % hardware->wave_size == 0 ? 0U
+                                                                                          : 1U);
+                const auto allocated_lanes_per_group =
+                    checked_multiply(waves_per_group, hardware->wave_size,
+                                     "allocatedWaveLanesPerGroup");
                 const auto groups_by_threads =
                     static_cast<std::uint64_t>(hardware->max_threads_per_compute_unit) /
-                    threads_per_group;
+                    allocated_lanes_per_group;
                 resident_groups =
                     (std::min)(groups_by_threads,
                                static_cast<std::uint64_t>(hardware->max_groups_per_compute_unit));
