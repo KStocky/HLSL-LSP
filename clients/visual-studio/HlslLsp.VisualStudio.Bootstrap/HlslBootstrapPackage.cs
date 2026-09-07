@@ -27,6 +27,7 @@ namespace HlslLsp.VisualStudio.Bootstrap;
 [ProvideToolWindow(typeof(ResourceBindingsToolWindow))]
 [ProvideToolWindow(typeof(PreprocessorExplorerToolWindow))]
 [ProvideToolWindow(typeof(EntryPointDataFlowToolWindow))]
+[ProvideToolWindow(typeof(ComputeVisualizationToolWindow))]
 [ProvideToolWindow(typeof(CallHierarchyExplorerToolWindow))]
 [ProvideOptionPage(
     typeof(HlslOptionsPage),
@@ -51,6 +52,10 @@ public sealed class HlslBootstrapPackage : AsyncPackage
     private long entryPointDataFlowRequestGeneration;
     private readonly EntryPointDataFlowRefreshGate entryPointDataFlowRefreshGate = new();
     private readonly CoalescingBackgroundRefreshCancellation entryPointDataFlowBackgroundRefreshCancellation =
+        new(TimeSpan.FromSeconds(30));
+    private long computeVisualizationRequestGeneration;
+    private readonly EntryPointDataFlowRefreshGate computeVisualizationRefreshGate = new();
+    private readonly CoalescingBackgroundRefreshCancellation computeVisualizationBackgroundRefreshCancellation =
         new(TimeSpan.FromSeconds(30));
     private long callHierarchyRequestGeneration;
     private readonly EntryPointDataFlowRefreshGate callHierarchyRefreshGate = new();
@@ -120,6 +125,14 @@ public sealed class HlslBootstrapPackage : AsyncPackage
                 JoinableTaskFactory.RunAsync(
                         () => ShowMemoryLayoutAsync(uri, line, character, DisposalToken))
                     .FileAndForget("HlslLsp/ShowMemoryLayout"));
+        ComputeVisualizationBridge.RegisterPresenter(
+            (uri, options) =>
+                JoinableTaskFactory.RunAsync(
+                        () => ShowComputeVisualizationExplicitAsync(
+                            uri,
+                            options,
+                            DisposalToken))
+                    .FileAndForget("HlslLsp/ShowComputeVisualization"));
         await RegisterCommandsAsync(cancellationToken);
         await TryActivateLanguageClientAsync(cancellationToken);
     }
@@ -177,6 +190,12 @@ public sealed class HlslBootstrapPackage : AsyncPackage
                         () => ShowCallHierarchyAsync(DisposalToken))
                     .FileAndForget("HlslLsp/ShowCallHierarchy"),
                 new CommandID(commandSet, 0x0106)));
+        commands.AddCommand(
+            new OleMenuCommand(
+                (_, _) => JoinableTaskFactory.RunAsync(
+                        () => ShowComputeVisualizationAsync(DisposalToken))
+                    .FileAndForget("HlslLsp/ShowComputeVisualization"),
+                new CommandID(commandSet, 0x0107)));
     }
 
     private async Task ShowMemoryLayoutAsync(CancellationToken cancellationToken)
@@ -667,6 +686,181 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         await ShowPreprocessorExplorerAsync(
             window.DocumentUri,
             cancellationToken,
+            window,
+            cancellationToken);
+    }
+
+    private async Task ShowComputeVisualizationAsync(CancellationToken cancellationToken)
+    {
+        var uri = await GetActiveDocumentUriAsync(cancellationToken);
+        if (uri == null)
+        {
+            await ShowInformationAsync(
+                "Open an HLSL document, then run Tools > HLSL Compute Visualization.",
+                cancellationToken);
+            return;
+        }
+        await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+        var existingWindow = await FindToolWindowAsync(
+            typeof(ComputeVisualizationToolWindow),
+            0,
+            false,
+            cancellationToken) as ComputeVisualizationToolWindow;
+        var options = existingWindow?.SubmittedOptions ?? new ComputeVisualizationOptions();
+        await ShowComputeVisualizationExplicitAsync(uri, options, cancellationToken);
+    }
+
+    private async Task ShowComputeVisualizationExplicitAsync(
+        Uri uri,
+        ComputeVisualizationOptions options,
+        CancellationToken cancellationToken)
+    {
+        computeVisualizationRefreshGate.EnterExplicitRequest();
+        try
+        {
+            using var requestCancellation =
+                CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            requestCancellation.CancelAfter(TimeSpan.FromSeconds(30));
+            await ShowComputeVisualizationAsync(
+                uri,
+                options,
+                requestCancellation.Token,
+                null,
+                cancellationToken);
+        }
+        finally
+        {
+            if (computeVisualizationRefreshGate.ExitExplicitRequest())
+            {
+                await RefreshComputeVisualizationIfOpenAsync(null, cancellationToken);
+            }
+        }
+    }
+
+    private async Task ShowComputeVisualizationAsync(
+        Uri uri,
+        ComputeVisualizationOptions options,
+        CancellationToken cancellationToken,
+        ComputeVisualizationToolWindow existingWindow,
+        CancellationToken ambientCancellationToken)
+    {
+        var generation = Interlocked.Increment(ref computeVisualizationRequestGeneration);
+        var priorWindow = existingWindow;
+        if (priorWindow == null)
+        {
+            await JoinableTaskFactory.SwitchToMainThreadAsync(ambientCancellationToken);
+            priorWindow = await FindToolWindowAsync(
+                typeof(ComputeVisualizationToolWindow),
+                0,
+                false,
+                ambientCancellationToken) as ComputeVisualizationToolWindow;
+        }
+        var preserveContent =
+            ComputeVisualizationRefreshLogic.ShouldPreserveContentOnFailure(
+                priorWindow?.DisplayedDocumentUri,
+                uri);
+        priorWindow?.TrackRequest(uri);
+        ComputeVisualizationModel report = null;
+        string failureMessage = null;
+        try
+        {
+            report = await ComputeVisualizationBridge.RequestAsync(
+                uri,
+                options,
+                cancellationToken);
+        }
+        catch (OperationCanceledException) when (ambientCancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (OperationCanceledException)
+        {
+            failureMessage = "The compute visualization request was cancelled.";
+        }
+        catch (Exception error)
+        {
+            failureMessage = "Could not retrieve compute visualization: " + error.Message;
+        }
+        if (generation != Interlocked.Read(ref computeVisualizationRequestGeneration))
+        {
+            return;
+        }
+        await JoinableTaskFactory.SwitchToMainThreadAsync(ambientCancellationToken);
+        var window = existingWindow;
+        if (ComputeVisualizationRefreshLogic.ShouldRevealToolWindow(existingWindow != null))
+        {
+            window = await ShowToolWindowAsync(
+                typeof(ComputeVisualizationToolWindow),
+                0,
+                true,
+                ambientCancellationToken) as ComputeVisualizationToolWindow;
+        }
+        if (generation != Interlocked.Read(ref computeVisualizationRequestGeneration))
+        {
+            return;
+        }
+        if (failureMessage != null)
+        {
+            window?.SetError(uri, options, failureMessage, preserveContent);
+            if (existingWindow == null)
+            {
+                window?.SetRequestError(failureMessage);
+            }
+        }
+        else if (report == null)
+        {
+            const string message =
+                "The HLSL language server is not ready to provide compute visualization.";
+            window?.SetError(uri, options, message, preserveContent);
+            if (existingWindow == null)
+            {
+                window?.SetRequestError(message);
+            }
+        }
+        else
+        {
+            window?.SetReport(uri, options, report);
+        }
+    }
+
+    public async Task RefreshComputeVisualizationIfOpenAsync(
+        string savedFilePath,
+        CancellationToken cancellationToken)
+    {
+        if (!computeVisualizationRefreshGate.TryBeginBackgroundRefresh())
+        {
+            return;
+        }
+        await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+        if (await FindToolWindowAsync(
+                    typeof(ComputeVisualizationToolWindow),
+                    0,
+                    false,
+                    cancellationToken)
+                is not ComputeVisualizationToolWindow window ||
+            window.DocumentUri == null)
+        {
+            return;
+        }
+        if (savedFilePath != null &&
+            !ComputeVisualizationRefreshLogic.IsHlslOrConfigRelevantPath(
+                savedFilePath,
+                ParseExtensions(GetOptions().FileExtensions)))
+        {
+            return;
+        }
+        if (!computeVisualizationRefreshGate.TryBeginBackgroundRefresh())
+        {
+            return;
+        }
+        var options = ComputeVisualizationRefreshLogic.OptionsForBackgroundRefresh(
+            window.SubmittedOptions);
+        var refreshCancellation =
+            computeVisualizationBackgroundRefreshCancellation.BeginNext(cancellationToken);
+        await ShowComputeVisualizationAsync(
+            window.DocumentUri,
+            options,
+            refreshCancellation.Token,
             window,
             cancellationToken);
     }

@@ -35,6 +35,17 @@ import {
   openEntryPointDataFlowLocationCommand,
   resolveEntryPointDataFlowRefresh,
 } from "./entryPointDataFlow";
+import {
+  ComputeHardwareProfile,
+  ComputeVisualization,
+  ComputeVisualizationOptions,
+  computeVisualizationRequestParams,
+  configureComputeVisualizationCommand,
+  openComputeVisualizationLocationCommand,
+  parseComputeVisualizationLocation,
+  parsePositiveDimension,
+  resolveComputeVisualizationRefresh,
+} from "./computeVisualization";
 import { Debouncer } from "./debouncer";
 import { PanelController } from "./panelController";
 import {
@@ -74,6 +85,10 @@ interface ManagedClient extends LifecycleClient {
     uri: vscode.Uri,
   ): Promise<PreprocessorExplorerReport | null>;
   entryPointDataFlow(uri: vscode.Uri): Promise<EntryPointDataFlow | null>;
+  computeVisualization(
+    uri: vscode.Uri,
+    options: ComputeVisualizationOptions,
+  ): Promise<ComputeVisualization | null>;
   dxcRuntime(): Promise<DxcRuntimeInfo | null>;
   variants(uri: vscode.Uri | undefined): Promise<VariantList | null>;
 }
@@ -192,6 +207,14 @@ interface EntryPointDataFlowViewState {
 
 let entryPointDataFlowState: EntryPointDataFlowViewState | undefined;
 
+interface ComputeVisualizationViewState {
+  readonly panel: vscode.WebviewPanel;
+  readonly controller: PanelController<ComputeVisualization>;
+  options: ComputeVisualizationOptions;
+}
+
+let computeVisualizationState: ComputeVisualizationViewState | undefined;
+
 // Debounces the refresh triggered by filesystem watcher events (external
 // shader/header file or shadertoolsconfig.json create/change/delete) into
 // one refresh of every open analysis panel, rather than one per event (a
@@ -215,6 +238,150 @@ function preprocessorExplorerLoadingHtml(): string {
 
 function entryPointDataFlowLoadingHtml(): string {
   return `<!doctype html><html><body style="color:var(--vscode-foreground);background:var(--vscode-editor-background);font-family:var(--vscode-font-family);padding:1rem 1.5rem;"><p>Tracing entry-point data flow…</p></body></html>`;
+}
+
+function computeVisualizationLoadingHtml(): string {
+  return `<!doctype html><html><body style="color:var(--vscode-foreground);background:var(--vscode-editor-background);font-family:var(--vscode-font-family);padding:1rem 1.5rem;"><p>Analyzing compute dispatch…</p></body></html>`;
+}
+
+async function promptComputeLimit(
+  title: string,
+  value: number,
+  prompt?: string,
+): Promise<number | undefined> {
+  const input = await vscode.window.showInputBox({
+    title,
+    ...(prompt === undefined ? {} : { prompt }),
+    value: String(value),
+    validateInput: (candidate) =>
+      parsePositiveDimension(candidate) === undefined
+        ? "Enter an integer from 1 through 4,294,967,295."
+        : undefined,
+  });
+  return input === undefined ? undefined : parsePositiveDimension(input);
+}
+
+async function configureComputeVisualization(
+  current: ComputeVisualizationOptions,
+): Promise<ComputeVisualizationOptions | null> {
+  const currentDispatch = current.dispatchDimensions ?? { x: 1, y: 1, z: 1 };
+  const workloadPrompt =
+    "Total logical workload threads/elements, not D3D Dispatch() group counts.";
+  const x = await promptComputeLimit(
+    "Logical workload threads: X",
+    currentDispatch.x,
+    workloadPrompt,
+  );
+  if (x === undefined) {
+    return null;
+  }
+  const y = await promptComputeLimit(
+    "Logical workload threads: Y",
+    currentDispatch.y,
+    workloadPrompt,
+  );
+  if (y === undefined) {
+    return null;
+  }
+  const z = await promptComputeLimit(
+    "Logical workload threads: Z",
+    currentDispatch.z,
+    workloadPrompt,
+  );
+  if (z === undefined) {
+    return null;
+  }
+
+  const profileChoice = await vscode.window.showQuickPick(
+    [
+      {
+        label: "No hardware profile",
+        description: "Do not estimate occupancy",
+        profile: false,
+      },
+      {
+        label: "Custom hardware profile",
+        description: "Estimate occupancy from explicit limits",
+        profile: true,
+      },
+    ],
+    {
+      title: "Compute occupancy profile",
+      placeHolder:
+        "Occupancy remains unknown unless explicit hardware limits are supplied.",
+    },
+  );
+  if (profileChoice === undefined) {
+    return null;
+  }
+
+  let hardwareProfile: ComputeHardwareProfile | undefined;
+  if (profileChoice.profile) {
+    const existing = current.hardwareProfile;
+    const name = await vscode.window.showInputBox({
+      title: "Hardware profile name",
+      value: existing?.name ?? "Custom GPU",
+      validateInput: (candidate) =>
+        candidate.trim().length === 0 ? "Enter a profile name." : undefined,
+    });
+    if (name === undefined) {
+      return null;
+    }
+    const waveSize = await promptComputeLimit(
+      "Hardware wave size",
+      existing?.waveSize ?? 32,
+    );
+    const maxThreadsPerGroup =
+      waveSize === undefined
+        ? undefined
+        : await promptComputeLimit(
+            "Maximum threads per group",
+            existing?.maxThreadsPerGroup ?? 1024,
+          );
+    const maxThreadsPerComputeUnit =
+      maxThreadsPerGroup === undefined
+        ? undefined
+        : await promptComputeLimit(
+            "Maximum resident threads per compute unit",
+            existing?.maxThreadsPerComputeUnit ?? 2048,
+          );
+    const maxGroupsPerComputeUnit =
+      maxThreadsPerComputeUnit === undefined
+        ? undefined
+        : await promptComputeLimit(
+            "Maximum resident groups per compute unit",
+            existing?.maxGroupsPerComputeUnit ?? 32,
+          );
+    const sharedMemoryBytesPerComputeUnit =
+      maxGroupsPerComputeUnit === undefined
+        ? undefined
+        : await promptComputeLimit(
+            "Shared-memory bytes per compute unit",
+            existing?.sharedMemoryBytesPerComputeUnit ?? 65536,
+          );
+    if (
+      waveSize === undefined ||
+      maxThreadsPerGroup === undefined ||
+      maxThreadsPerComputeUnit === undefined ||
+      maxGroupsPerComputeUnit === undefined ||
+      sharedMemoryBytesPerComputeUnit === undefined
+    ) {
+      return null;
+    }
+    hardwareProfile = {
+      name: name.trim(),
+      waveSize,
+      maxThreadsPerGroup,
+      maxThreadsPerComputeUnit,
+      maxGroupsPerComputeUnit,
+      sharedMemoryBytesPerComputeUnit,
+    };
+  }
+
+  return {
+    dispatchDimensions: { x, y, z },
+    ...(hardwareProfile === undefined ? {} : { hardwareProfile }),
+  };
 }
 
 // Fetches the current compilation info for the tracked document and applies it
@@ -368,6 +535,10 @@ async function refreshAllOpenAnalysisPanels(
     entryPointDataFlowState?.controller.refreshTracked();
   if (entryPointRefresh !== undefined) {
     tasks.push(entryPointRefresh);
+  }
+  const computeRefresh = computeVisualizationState?.controller.refreshTracked();
+  if (computeRefresh !== undefined) {
+    tasks.push(computeRefresh);
   }
   await Promise.all(tasks);
 }
@@ -643,6 +814,16 @@ class VscodeLanguageClient implements ManagedClient {
     return this.client.sendRequest<EntryPointDataFlow | null>(
       "hlsl/entryPointDataFlow",
       entryPointDataFlowRequestParams(uri.toString()),
+    );
+  }
+
+  public computeVisualization(
+    uri: vscode.Uri,
+    options: ComputeVisualizationOptions,
+  ): Promise<ComputeVisualization | null> {
+    return this.client.sendRequest<ComputeVisualization | null>(
+      "hlsl/computeVisualization",
+      computeVisualizationRequestParams(uri.toString(), options),
     );
   }
 
@@ -1456,6 +1637,124 @@ export async function activate(
         }
       },
     ),
+    vscode.commands.registerCommand(
+      "hlsl.showComputeVisualization",
+      async () => {
+        const editor = vscode.window.activeTextEditor;
+        if (editor?.document.languageId !== "hlsl") {
+          await vscode.window.showInformationMessage(
+            "Open an HLSL compute shader to visualize its dispatch.",
+          );
+          return;
+        }
+        const uri = editor.document.uri;
+        if (computeVisualizationState !== undefined) {
+          const { panel, controller } = computeVisualizationState;
+          const { switchingDocument } = controller.open(uri.toString());
+          if (switchingDocument) {
+            computeVisualizationState.options = {};
+            panel.webview.html = computeVisualizationLoadingHtml();
+          }
+          panel.reveal(vscode.ViewColumn.Beside);
+        } else {
+          const panel = vscode.window.createWebviewPanel(
+            "hlslComputeVisualization",
+            "Compute Visualization",
+            vscode.ViewColumn.Beside,
+            {
+              enableScripts: false,
+              enableCommandUris: [
+                configureComputeVisualizationCommand,
+                openComputeVisualizationLocationCommand,
+              ],
+            },
+          );
+          panel.webview.html = computeVisualizationLoadingHtml();
+          const controller = new PanelController<ComputeVisualization>(
+            {
+              setHtml: (html) => {
+                panel.webview.html = html;
+              },
+              setTitle: (title) => {
+                panel.title = title;
+              },
+            },
+            (uriString) =>
+              lifecycle.withClient((client) =>
+                client.computeVisualization(
+                  vscode.Uri.parse(uriString),
+                  computeVisualizationState?.options ?? {},
+                ),
+              ),
+            resolveComputeVisualizationRefresh,
+          );
+          controller.open(uri.toString());
+          panel.onDidDispose(() => {
+            if (computeVisualizationState?.panel === panel) {
+              computeVisualizationState.controller.dispose();
+              computeVisualizationState = undefined;
+            }
+          });
+          computeVisualizationState = { panel, controller, options: {} };
+        }
+        await computeVisualizationState.controller.refresh(uri.toString());
+      },
+    ),
+    vscode.commands.registerCommand(
+      configureComputeVisualizationCommand,
+      async () => {
+        const state = computeVisualizationState;
+        if (state === undefined) {
+          return;
+        }
+        const options = await configureComputeVisualization(state.options);
+        if (options === null || computeVisualizationState !== state) {
+          return;
+        }
+        state.options = options;
+        await state.controller.refreshTracked();
+      },
+    ),
+    vscode.commands.registerCommand(
+      openComputeVisualizationLocationCommand,
+      async (rawArgument: unknown) => {
+        const location = parseComputeVisualizationLocation(rawArgument);
+        if (location === undefined) {
+          await vscode.window.showErrorMessage(
+            "Unable to navigate: the compute-analysis location is invalid.",
+          );
+          return;
+        }
+        try {
+          const targetUri = vscode.Uri.parse(location.uri, true);
+          const range = new vscode.Range(
+            new vscode.Position(
+              location.range.start.line,
+              location.range.start.character,
+            ),
+            new vscode.Position(
+              location.range.end.line,
+              location.range.end.character,
+            ),
+          );
+          const document = await vscode.workspace.openTextDocument(targetUri);
+          const targetEditor = await vscode.window.showTextDocument(document, {
+            preserveFocus: false,
+            selection: range,
+          });
+          targetEditor.revealRange(
+            range,
+            vscode.TextEditorRevealType.InCenterIfOutsideViewport,
+          );
+        } catch (error) {
+          await vscode.window.showErrorMessage(
+            `Unable to navigate to the compute-analysis location: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+      },
+    ),
     vscode.commands.registerCommand("hlsl.selectVariant", async () => {
       const editor = vscode.window.activeTextEditor;
       const documentUri =
@@ -1636,6 +1935,7 @@ export async function activate(
         }, 500);
       }
       entryPointDataFlowState?.controller.scheduleDebouncedRefresh();
+      computeVisualizationState?.controller.scheduleDebouncedRefresh();
     }),
     {
       dispose(): void {
@@ -1691,6 +1991,8 @@ export async function deactivate(): Promise<void> {
   preprocessorExplorerState = undefined;
   entryPointDataFlowState?.controller.dispose();
   entryPointDataFlowState = undefined;
+  computeVisualizationState?.controller.dispose();
+  computeVisualizationState = undefined;
   watchedFileRefreshDebouncer?.dispose();
   watchedFileRefreshDebouncer = undefined;
   await lifecycle?.stop();

@@ -40,6 +40,7 @@
     "onCommand:hlsl.showResourceBindings",
     "onCommand:hlsl.showPreprocessorExplorer",
     "onCommand:hlsl.showEntryPointDataFlow",
+    "onCommand:hlsl.showComputeVisualization",
     "onCommand:hlsl.selectVariant"
   ],
   "capabilities": {
@@ -109,6 +110,11 @@
       {
         "command": "hlsl.showEntryPointDataFlow",
         "title": "HLSL: Show Entry-Point Data Flow",
+        "category": "HLSL"
+      },
+      {
+        "command": "hlsl.showComputeVisualization",
+        "title": "HLSL: Show Compute Visualization",
         "category": "HLSL"
       },
       {

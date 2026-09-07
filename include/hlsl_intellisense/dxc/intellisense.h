@@ -331,6 +331,53 @@ struct CompilationThreadGroupSize {
     std::uint32_t z{};
 };
 
+struct ComputeBarrierLocation {
+    std::string label;
+    SourceLocation location;
+    std::uint32_t start_offset{};
+    std::uint32_t end_offset{};
+};
+
+struct ComputeGroupSharedDeclaration {
+    std::string name;
+    std::string type;
+    std::string declaration;
+    SourceLocation location;
+    std::uint32_t start_offset{};
+    std::uint32_t end_offset{};
+    std::optional<std::uint64_t> bytes;
+    std::string size_unavailable_reason;
+};
+
+struct ComputeWaveSize {
+    bool known{};
+    std::optional<std::uint32_t> min;
+    std::optional<std::uint32_t> max;
+    std::optional<std::uint32_t> preferred;
+    std::string min_max_source;
+    std::string preferred_source;
+    std::string explanation;
+};
+
+struct ComputeCompilerMetadata {
+    bool barrier_locations_available{};
+    bool barrier_locations_truncated{};
+    std::string barrier_locations_unavailable_reason;
+    std::vector<ComputeBarrierLocation> barrier_locations;
+    bool group_shared_available{};
+    bool group_shared_truncated{};
+    std::string group_shared_unavailable_reason;
+    std::optional<std::uint64_t> group_shared_total_bytes;
+    std::string group_shared_total_bytes_unavailable_reason;
+    std::vector<ComputeGroupSharedDeclaration> group_shared_declarations;
+    ComputeWaveSize wave_size;
+};
+
+struct ComputeMetadataLimits {
+    std::size_t max_group_shared_declarations{256};
+    std::size_t max_barrier_locations{256};
+};
+
 // DXIL reflection extracted via IDxcUtils::CreateReflection and
 // ID3D12ShaderReflection. Unavailable for non-DXIL output (e.g. SPIR-V); in
 // that case `available` is false and `unavailable_reason` explains why,
@@ -342,6 +389,9 @@ struct CompilationReflection {
     std::vector<CompilationSignatureParameter> output_signature;
     std::vector<CompilationResourceBinding> resources;
     std::optional<CompilationThreadGroupSize> thread_group_size;
+    // Compiler-emitted barrier instruction count from
+    // D3D12_SHADER_DESC::cBarrierInstructions.
+    std::uint32_t barrier_instruction_count{};
     // Deterministic grouping/collision analysis over `resources`, computed
     // purely from the reflected register data above.
     ResourceBindingAnalysis binding_analysis;
@@ -553,6 +603,18 @@ struct CompilationInfo {
     // signature, root signature details unavailable on this platform, or
     // shader reflection metadata unavailable for this compiled output.
     std::optional<CompilationCompatibility> compatibility;
+    // Stable wave-size range read from the public PSV0 runtime-info layout in
+    // the compiled DXIL container. `available` describes PSV extraction;
+    // null min/max means PSV0 authoritatively reports no shader requirement.
+    struct PsvWaveSize {
+        bool available{};
+        std::optional<std::uint32_t> min;
+        std::optional<std::uint32_t> max;
+        std::string unavailable_reason;
+    } psv_wave_size;
+    // Compiler-owned cursor metadata derived from the same serialized
+    // translation-unit generation as this compilation result.
+    std::optional<ComputeCompilerMetadata> compute_metadata;
 };
 
 struct SignatureParameter {
@@ -660,6 +722,7 @@ struct ReachableFunction {
 struct EntryPointDataFlowLimits {
     std::size_t max_functions_visited{4096};
     std::size_t max_global_accesses{16384};
+    std::size_t max_barrier_locations{256};
     // Bounds the number of top-level declarations that
     // `unused_top_level_declarations` will actually reference-scan (each
     // scan is at least O(number of source files)); declarations beyond
@@ -723,14 +786,18 @@ struct EntryPointDataFlow {
     // functions/access kinds is reported once with the most conservative
     // combined kind: read_write dominates read or write alone).
     std::vector<GlobalAccess> global_accesses;
-    // True when any of the four independent bounded phases below stopped
+    // Compiler-resolved calls to HLSL barrier intrinsics in reachable
+    // functions. User functions with the same spelling are excluded because
+    // their resolved cursors have real source locations.
+    std::vector<ComputeBarrierLocation> barrier_locations;
+    // True when any of the bounded phases below stopped
     // early -- equivalent to `functions_visited_truncated ||
     // definitions_truncated || global_accesses_truncated ||
     // unused_declarations_truncated`. Provided as a convenience "was
     // anything incomplete" summary; callers that need to know *which*
     // section(s) of the result may be incomplete (to render an accurate,
     // section-specific warning rather than a single blanket one) should
-    // consult the four specific flags instead, since they are not
+    // consult the specific flags instead, since they are not
     // interchangeable: each gates a different, independent subset of the
     // response.
     bool truncated{};
@@ -775,6 +842,7 @@ struct EntryPointDataFlow {
     // `reachable_functions` (never a superset), but is independent of
     // whether `reachable_functions`/`unreachable_functions` are complete.
     bool global_accesses_truncated{};
+    bool barrier_locations_truncated{};
     // True specifically when the unused-top-level-declaration scan stopped
     // issuing further `FindReferencesInFile` lookups because it hit
     // `EntryPointDataFlowLimits::max_unused_declaration_candidates`.
@@ -868,7 +936,7 @@ class TranslationUnit final {
     // sources with the effective compiler arguments and returns the
     // compiler-authoritative configuration and reflection. DXC is invoked
     // directly; there is no fallback parser for HLSL source.
-    [[nodiscard]] CompilationInfo compilation_info() const;
+    [[nodiscard]] CompilationInfo compilation_info(const ComputeMetadataLimits& limits = {}) const;
     [[nodiscard]] std::vector<Signature> signatures_at(std::string_view path, std::uint32_t line,
                                                        std::uint32_t column) const;
     [[nodiscard]] std::vector<InlayHint>

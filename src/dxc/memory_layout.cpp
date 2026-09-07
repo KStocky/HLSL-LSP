@@ -802,6 +802,10 @@ std::optional<MemoryLayout> memory_layout_from_probe(DxcCreateInstanceProc creat
     probe_source += "\n";
 
     if (!is_cbuffer) {
+        if (!target.synthetic_member_declaration.empty()) {
+            probe_source += "struct " + target.type_name + " { " +
+                            target.synthetic_member_declaration + " };\n";
+        }
         // Struct probe: declare a RWStructuredBuffer<TypeName> to get natural layout.
         probe_source += "RWStructuredBuffer<" + target.type_name + "> " + probe_suffix +
                         "_sb : register(u0);\n";
@@ -1307,6 +1311,64 @@ std::optional<MemoryLayout> memory_layout_from_probe(DxcCreateInstanceProc creat
 
     layout.supported = true;
     return layout;
+}
+
+GroupSharedSizeProbeResult group_shared_size_from_probe(
+    DxcCreateInstanceProc create_instance, const std::vector<SourceFile>& sources,
+    const std::vector<std::string>& arguments, std::string_view main_path,
+    std::string_view compiler_formatted_declaration, std::string_view declarator_name) {
+    constexpr std::string_view prefix = "groupshared ";
+    if (!compiler_formatted_declaration.starts_with(prefix) || declarator_name.empty()) {
+        return {.unavailable_reason =
+                    "DXC's formatted declaration was not a recognized groupshared declaration"};
+    }
+
+    std::string member{compiler_formatted_declaration.substr(prefix.size())};
+    while (!member.empty() &&
+           (member.back() == ' ' || member.back() == '\t' || member.back() == '\r' ||
+            member.back() == '\n' || member.back() == ';')) {
+        member.pop_back();
+    }
+    const auto identifier_character = [](char value) {
+        return (value >= 'a' && value <= 'z') || (value >= 'A' && value <= 'Z') ||
+               (value >= '0' && value <= '9') || value == '_';
+    };
+    std::optional<std::size_t> declarator_offset;
+    for (auto offset = member.find(declarator_name); offset != std::string::npos;
+         offset = member.find(declarator_name, offset + 1)) {
+        const auto before_ok = offset == 0 || !identifier_character(member[offset - 1]);
+        const auto after = offset + declarator_name.size();
+        const auto after_ok = after == member.size() || !identifier_character(member[after]);
+        if (!before_ok || !after_ok) {
+            continue;
+        }
+        if (declarator_offset.has_value()) {
+            return {.unavailable_reason =
+                        "DXC's formatted declaration contains an ambiguous declarator name"};
+        }
+        declarator_offset = offset;
+    }
+    if (!declarator_offset.has_value()) {
+        return {.unavailable_reason =
+                    "DXC's formatted declaration does not contain its declarator name"};
+    }
+
+    constexpr std::string_view wrapper = "__hlsl_lsp_groupshared_wrapper_c7e3a1__";
+    constexpr std::string_view member_name = "__hlsl_lsp_groupshared_member_c7e3a1__";
+    member.replace(*declarator_offset, declarator_name.size(), member_name);
+    member += ';';
+    const auto layout =
+        memory_layout_from_probe(create_instance, sources, arguments, main_path,
+                                 ProbeTarget{.type_name = std::string{wrapper},
+                                             .selected_field = std::string{member_name},
+                                             .synthetic_member_declaration = std::move(member)});
+    if (!layout.has_value() || !layout->supported) {
+        return {.unavailable_reason =
+                    layout.has_value() && !layout->explanation.empty()
+                        ? layout->explanation
+                        : "DXC could not reflect the synthetic groupshared layout probe"};
+    }
+    return {.bytes = layout->allocation_size};
 }
 
 } // namespace hlsl_intellisense::dxc::detail

@@ -138,6 +138,17 @@ empty list whenever either the function-visit or definition-collection
 budget was hit, since the server leaves that list empty in both cases
 (an unvisited or uncollected function can't be proven dead code).
 
+Run **Tools > HLSL Compute Visualization** on a configured compute shader to
+inspect its reflected `numthreads` size, logical workload, derived D3D
+`Dispatch()` group count, launched and inactive edge threads, system-value
+mappings, group-shared memory, barriers, wave-size requirements, and optional
+hardware-dependent occupancy estimate. The X/Y/Z inputs are the desired total
+logical threads or elements - not `Dispatch()` group counts - and may all be
+left blank to default to exactly one reflected thread group. Hardware limits
+are optional and occupancy is never guessed without them. Edited values take
+effect only after **Apply / Refresh**; automatic background refreshes continue
+using the last successfully applied values.
+
 Both windows navigate every compiler-supplied symbol/location via its
 `selectionRange` (falling back to the wider `range` only if the
 `selectionRange` is absent or malformed) -- never a location guessed from

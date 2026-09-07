@@ -82,6 +82,16 @@ behavior, and DXIL/SPIR-V differences are documented in
 In Visual Studio, run **Tools > HLSL Shader Compilation**. In Visual Studio
 Code, run **HLSL: Show Shader Compilation** from the Command Palette.
 
+### Compute visualization
+
+The compiler-authoritative `hlsl/computeVisualization` request reports the
+active compute entry point's reflected `numthreads`, checked dispatch geometry,
+compiler barrier count, deterministic system-value mappings, explicit
+availability for source locations/shared memory/wave requirements, and an
+optional assumption-labelled hardware occupancy estimate. The exact request,
+response, bounds, and authority rules are documented in
+[`docs/compute-visualization.md`](docs/compute-visualization.md).
+
 ### Inlay hints
 
 Both editors use their native inlay-hint surfaces to show DXC-authoritative

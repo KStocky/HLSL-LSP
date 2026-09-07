@@ -84,7 +84,8 @@ shape:
         "dimension": "texture2D"
       }
     ],
-    "threadGroupSize": null
+    "threadGroupSize": null,
+    "barrierInstructionCount": 0
   }
 }
 ```
@@ -136,8 +137,10 @@ compiler arguments. Reflection is always attempted, but its availability
 depends on the output:
 
 - **DXIL** output supports full reflection: `reflection.available` is `true`,
-  and `inputSignature`, `outputSignature`, `resources`, and (for compute
-  shaders) `threadGroupSize` are populated from DXC's reflection API.
+  and `inputSignature`, `outputSignature`, `resources`,
+  `barrierInstructionCount`, and (for compute shaders) `threadGroupSize` are
+  populated from DXC's reflection API. `barrierInstructionCount` is
+  `D3D12_SHADER_DESC::cBarrierInstructions`.
 - **SPIR-V** output does not currently support this reflection path.
   `reflection.available` is `false` and `reflection.unavailableReason`
   explains why in prose; the signature and resource arrays are empty and

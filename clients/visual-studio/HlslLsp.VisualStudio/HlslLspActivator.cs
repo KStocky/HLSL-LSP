@@ -164,6 +164,7 @@ public sealed class HlslLspActivator :
         CompilationInfoBridge.Register(languageClient.GetCompilationInfoAsync);
         PreprocessorExplorerBridge.Register(languageClient.GetPreprocessorExplorerAsync);
         EntryPointDataFlowBridge.Register(languageClient.GetEntryPointDataFlowAsync);
+        ComputeVisualizationBridge.Register(languageClient.GetComputeVisualizationAsync);
         CallHierarchyBridge.RegisterPrepare(languageClient.PrepareCallHierarchyAsync);
         CallHierarchyBridge.RegisterIncomingCalls(languageClient.GetIncomingCallsAsync);
         CallHierarchyBridge.RegisterOutgoingCalls(languageClient.GetOutgoingCallsAsync);
@@ -423,6 +424,9 @@ public sealed class HlslLspActivator :
         joinableTaskFactory.RunAsync(
                 () => host.RefreshEntryPointDataFlowIfOpenAsync(null, cancellationToken))
             .FileAndForget("HlslLsp/RefreshEntryPointDataFlow");
+        joinableTaskFactory.RunAsync(
+                () => host.RefreshComputeVisualizationIfOpenAsync(null, cancellationToken))
+            .FileAndForget("HlslLsp/RefreshComputeVisualization");
         // The Call Hierarchy window issues its own request (re-fetching
         // incoming/outgoing calls for its current item, not a fresh
         // prepareCallHierarchy) and is refreshed independently, mirroring
@@ -485,6 +489,9 @@ public sealed class HlslLspActivator :
             joinableTaskFactory.RunAsync(
                     () => host.RefreshEntryPointDataFlowIfOpenAsync(moniker, disposalToken))
                 .FileAndForget("HlslLsp/RefreshEntryPointDataFlowOnSave");
+            joinableTaskFactory.RunAsync(
+                    () => host.RefreshComputeVisualizationIfOpenAsync(moniker, disposalToken))
+                .FileAndForget("HlslLsp/RefreshComputeVisualizationOnSave");
             // The Call Hierarchy window is refreshed independently on the
             // same save, matching the same non-file/unrelated-document
             // filtering performed inside RefreshCallHierarchyIfOpenAsync
@@ -726,6 +733,7 @@ public sealed class HlslLspActivator :
             return;
         }
         await host.RefreshEntryPointDataFlowIfOpenAsync(null, cancellationToken);
+        await host.RefreshComputeVisualizationIfOpenAsync(null, cancellationToken);
         // The Call Hierarchy window is refreshed independently on the same
         // debounced trigger, matching the same non-file/unrelated-document
         // filtering performed inside RefreshCallHierarchyIfOpenAsync (which

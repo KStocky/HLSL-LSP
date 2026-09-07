@@ -51,6 +51,12 @@
           <ButtonText>HLSL Call Hierarchy</ButtonText>
         </Strings>
       </Button>
+      <Button guid="guidHlslLspCommands" id="ShowComputeVisualization" priority="0x0107" type="Button">
+        <Parent guid="guidHlslLspCommands" id="HlslLspGroup"/>
+        <Strings>
+          <ButtonText>HLSL Compute Visualization</ButtonText>
+        </Strings>
+      </Button>
     </Buttons>
   </Commands>
   <Symbols>
@@ -64,6 +70,7 @@
       <IDSymbol name="ShowPreprocessorExplorer" value="0x0104"/>
       <IDSymbol name="ShowEntryPointDataFlow" value="0x0105"/>
       <IDSymbol name="ShowCallHierarchy" value="0x0106"/>
+      <IDSymbol name="ShowComputeVisualization" value="0x0107"/>
     </GuidSymbol>
   </Symbols>
 </CommandTable>

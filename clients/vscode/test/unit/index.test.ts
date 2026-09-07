@@ -1,4 +1,5 @@
 import "./compilationInfo.test";
+import "./computeVisualization.test";
 import "./configuration.test";
 import "./debouncer.test";
 import "./entryPointDataFlow.test";
