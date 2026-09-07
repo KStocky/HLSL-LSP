@@ -107,6 +107,14 @@ struct ComputeHardwareProfile {
     std::uint32_t shared_memory_bytes_per_compute_unit{};
 };
 
+[[nodiscard]] std::uint64_t checked_json_integer(std::uint64_t value,
+                                                 std::string_view description) {
+    if (value > max_json_safe_integer) {
+        invalid_params(std::string{description} + " exceeds the protocol's exact integer bound");
+    }
+    return value;
+}
+
 [[nodiscard]] std::uint32_t positive_u32_member(const Json& object, std::string_view name) {
     const auto& value = member(object, name);
     std::uint64_t parsed{};
@@ -141,7 +149,7 @@ struct ComputeHardwareProfile {
     if (right != 0 && left > max_json_safe_integer / right) {
         invalid_params(std::string{description} + " exceeds the protocol's exact integer bound");
     }
-    return left * right;
+    return checked_json_integer(left * right, description);
 }
 
 [[nodiscard]] std::uint64_t dimension_product(const ComputeDimensions& dimensions,
@@ -4018,7 +4026,8 @@ Json Server::compute_visualization(const std::optional<Json>& params,
         result["dispatchDimensions"] = compute_dimensions_json(dispatch);
         result["groupCount"] = compute_dimensions_json(groups);
         result["launchedThreads"] = launched_threads;
-        result["inactiveThreads"] = launched_threads - logical_threads;
+        result["inactiveThreads"] =
+            checked_json_integer(launched_threads - logical_threads, "inactiveThreads");
         result["systemValues"] = Json::array(
             {Json{{"semantic", "SV_DispatchThreadID"},
                   {"name", "dispatchThreadId"},
@@ -4088,12 +4097,14 @@ Json Server::compute_visualization(const std::optional<Json>& params,
                                          (threads_per_group % hardware->wave_size == 0 ? 0U : 1U);
             const auto resident_waves =
                 checked_multiply(resident_groups, waves_per_group, "estimatedResidentWaves");
-            result["occupancy"] = Json{{"hardwareProfile", hardware->name},
-                                       {"estimatedResidentGroups", resident_groups},
-                                       {"estimatedResidentThreads", resident_threads},
-                                       {"estimatedResidentWaves", resident_waves},
-                                       {"limitingFactors", std::move(limiting_factors)},
-                                       {"assumptions", std::move(assumptions)}};
+            result["occupancy"] =
+                Json{{"hardwareProfile", hardware->name},
+                     {"estimatedResidentGroups",
+                      checked_json_integer(resident_groups, "estimatedResidentGroups")},
+                     {"estimatedResidentThreads", resident_threads},
+                     {"estimatedResidentWaves", resident_waves},
+                     {"limitingFactors", std::move(limiting_factors)},
+                     {"assumptions", std::move(assumptions)}};
         }
     }
 

@@ -35,6 +35,16 @@ both editor clients consume JSON numbers. Malformed, non-positive,
 out-of-range, or overflowing values produce JSON-RPC `InvalidParams`
 (`-32602`).
 
+Every aggregate serialized as a JSON number is subject to the same
+`2^53 - 1` bound: `launchedThreads`, `inactiveThreads`,
+`occupancy.estimatedResidentGroups`, `estimatedResidentThreads`,
+`estimatedResidentWaves`, and any future non-null group-shared declaration or
+total byte count. The server rejects request inputs when rounding to whole
+thread groups would make a derived aggregate exceed that bound, even if the
+unrounded logical-workload product itself is still safe. Numeric aggregates
+are never silently rounded for IEEE-754 clients and are not encoded as
+strings.
+
 The document must be open. The request uses its current in-memory version,
 effective `shadertoolsconfig.json`, and active variant. A concurrent edit,
 include/configuration reanalysis, or variant change cancels or rejects a

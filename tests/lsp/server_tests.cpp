@@ -6216,12 +6216,17 @@ TEST_CASE("hlsl/computeVisualization rejects malformed, non-positive, and overfl
                          {"languageId", "hlsl"},
                          {"version", 1},
                          {"text", compute_visualization_shader()}}}}}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "hlsl/didChangeActiveVariant", .params = Json{{"variant", "Configured"}}}));
 
     const std::vector<Json> invalid_options{
         Json{{"dispatchDimensions", {{"x", 0}, {"y", 1}, {"z", 1}}}},
         Json{{"dispatchDimensions", {{"x", 1.5}, {"y", 1}, {"z", 1}}}},
         Json{{"dispatchDimensions", {{"x", 4'294'967'296ULL}, {"y", 1}, {"z", 1}}}},
         Json{{"dispatchDimensions", {{"x", 4'294'967'295ULL}, {"y", 4'294'967'295ULL}, {"z", 1}}}},
+        // The logical workload product is still exactly representable, but
+        // ceil-dividing by 8x4x1 launches 2^53 threads, which is not.
+        Json{{"dispatchDimensions", {{"x", 4'294'967'295ULL}, {"y", 2'097'152}, {"z", 1}}}},
         Json{{"hardwareProfile",
               {{"name", ""},
                {"waveSize", 32},
