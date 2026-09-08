@@ -1067,8 +1067,10 @@ class Resolver final {
             restore_original_sources(identity, result);
         } else {
             result.sources[logical_source_index].text = dxc_text;
+            result.sources[logical_source_index].rewritten = source_was_rewritten;
             if (physical_source_index) {
                 result.sources[*physical_source_index].text = dxc_text;
+                result.sources[*physical_source_index].rewritten = source_was_rewritten;
             }
             if (source_was_rewritten) {
                 rewritten_physical_paths_.insert(identity);
@@ -1122,6 +1124,7 @@ class Resolver final {
         const auto& original = emitted_files_.at(logical_paths->second.front()).original_text;
         for (const auto index : physical_source_indices_.at(std::string{identity})) {
             result.sources[index].text = original;
+            result.sources[index].rewritten = false;
         }
     }
 

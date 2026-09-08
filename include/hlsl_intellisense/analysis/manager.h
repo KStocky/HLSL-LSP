@@ -195,6 +195,9 @@ class Manager final {
                       const json_rpc::CancellationToken& cancellation);
     [[nodiscard]] std::vector<dxc::Symbol> symbols(std::string root_identity, std::int64_t version,
                                                    const json_rpc::CancellationToken& cancellation);
+    [[nodiscard]] std::vector<dxc::Symbol>
+    document_symbols(std::string root_identity, std::int64_t version,
+                     const json_rpc::CancellationToken& cancellation, bool& truncated);
 
     // Call-hierarchy queries: `path`/`line`/`column` are 0-based
     // client-supplied positions, resolved against the current translation

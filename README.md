@@ -460,6 +460,11 @@ DXC-oriented settings. See the
 merging, every supported property, path handling, examples, and editor-setting
 precedence.
 
+For Unreal Engine source trees, see the
+[Unreal Engine shader setup guide](docs/unreal-engine.md) for virtual roots,
+plugin mappings, compilation variants, generated-source requirements, and
+representative performance results.
+
 By default HLSL-LSP loads the bundled, pinned DXC runtime. A project can select
 a different compatible DXC runtime with the `hlsl.dxcRuntimeDirectory`
 `shadertoolsconfig.json` setting, the Visual Studio Code

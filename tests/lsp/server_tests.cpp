@@ -482,6 +482,7 @@ TEST_CASE("Server provides hierarchical document and searchable workspace symbol
         if (character == '\n') {
             source.push_back('\r');
         }
+
         source.push_back(character);
     }
     std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
@@ -538,6 +539,75 @@ TEST_CASE("Server provides hierarchical document and searchable workspace symbol
     CHECK(workspace_response->result[0]["kind"] == 12);
     CHECK(workspace_response->result[0]["containerName"] == "HLSL");
     CHECK(workspace_response->result[0]["location"]["uri"] == uri);
+}
+
+TEST_CASE("Document symbols convert DXC UTF-16 offsets in non-ASCII sources",
+          "[lsp][symbols][unicode][integration]") {
+    const auto uri = shader_uri();
+    const std::string source = "// BMP: \xC3\x97; supplementary: \xF0\x9F\x98\x80\r\n"
+                               "struct Payload { float value; };\r\n"
+                               "float4 main() : SV_Target { return 1.0; }\r\n";
+    hlsl_intellisense::lsp::Server server{[](const auto&) {}};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params =
+            Json{{"textDocument",
+                  {{"uri", uri}, {"languageId", "hlsl"}, {"version", 1}, {"text", source}}}}}));
+
+    const auto response = server.handle(
+        hlsl_intellisense::json_rpc::Request{.id = std::int64_t{2},
+                                             .method = "textDocument/documentSymbol",
+                                             .params = Json{{"textDocument", {{"uri", uri}}}}});
+    REQUIRE(response.has_value());
+    const auto* result = std::get_if<hlsl_intellisense::json_rpc::Response>(&*response);
+    REQUIRE(result != nullptr);
+    const auto payload = std::ranges::find_if(
+        result->result, [](const auto& symbol) { return symbol["name"] == "Payload"; });
+    REQUIRE(payload != result->result.end());
+    CHECK((*payload)["selectionRange"]["start"] == Json{{"line", 1}, {"character", 7}});
+    const auto main = std::ranges::find_if(
+        result->result, [](const auto& symbol) { return symbol["name"] == "main"; });
+    REQUIRE(main != result->result.end());
+    CHECK((*main)["selectionRange"]["start"] == Json{{"line", 2}, {"character", 7}});
+}
+
+TEST_CASE("Document symbols truncate compiler-expanded declaration floods",
+          "[lsp][symbols][limits][integration]") {
+    const auto uri = shader_uri();
+    std::string source;
+    for (std::size_t index = 0; index < 1100; ++index) {
+        source += "static float value" + std::to_string(index) + ";\n";
+    }
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    hlsl_intellisense::lsp::Server server{
+        [&notifications](const auto& value) { notifications.push_back(value); }};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params =
+            Json{{"textDocument",
+                  {{"uri", uri}, {"languageId", "hlsl"}, {"version", 1}, {"text", source}}}}}));
+
+    const auto response = server.handle(
+        hlsl_intellisense::json_rpc::Request{.id = std::int64_t{2},
+                                             .method = "textDocument/documentSymbol",
+                                             .params = Json{{"textDocument", {{"uri", uri}}}}});
+    REQUIRE(response.has_value());
+    const auto* result = std::get_if<hlsl_intellisense::json_rpc::Response>(&*response);
+    REQUIRE(result != nullptr);
+    CHECK(result->result.size() == 1024);
+    CHECK(std::ranges::any_of(notifications, [](const auto& notification) {
+        return notification.method == "window/logMessage" && notification.params.has_value() &&
+               (*notification.params)["message"].template get<std::string>().find("truncated") !=
+                   std::string::npos;
+    }));
 }
 
 TEST_CASE("Server provides semantic tokens and definitions", "[lsp][navigation][integration]") {
@@ -1377,7 +1447,8 @@ TEST_CASE("References and rename preserve identity across open roots and disk in
           "[lsp][references][rename]") {
     TestDirectory directory;
     const auto include_path = directory.path() / "shared.hlsli";
-    const std::string include_text = "static const float sharedValue = 1.0;\n";
+    const std::string include_text =
+        "// \xC3\x97 \xF0\x9F\x98\x80\r\nstatic const float sharedValue = 1.0;\r\n";
     {
         std::ofstream include{include_path};
         REQUIRE(include);
@@ -1387,11 +1458,13 @@ TEST_CASE("References and rename preserve identity across open roots and disk in
         (directory.path() / "a.hlsl").string());
     const auto second = hlsl_intellisense::workspace::DocumentUri::from_path(
         (directory.path() / "b.hlsl").string());
-    const std::string first_text = "#include \"shared.hlsli\"\n"
+    const std::string first_text = "// \xC3\x97 \xF0\x9F\x98\x80\r\n"
+                                   "#include \"shared.hlsli\"\r\n"
                                    "float4 main() : SV_Target { float sharedValue = 2.0; return "
-                                   "(sharedValue + ::sharedValue).xxxx; }\n";
-    const std::string second_text = "#include \"shared.hlsli\"\n"
-                                    "float4 main() : SV_Target { return sharedValue.xxxx; }\n";
+                                   "(sharedValue + ::sharedValue).xxxx; }\r\n";
+    const std::string second_text = "// \xE2\x86\x92\r\n"
+                                    "#include \"shared.hlsli\"\r\n"
+                                    "float4 main() : SV_Target { return sharedValue.xxxx; }\r\n";
 
     std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
     hlsl_intellisense::lsp::Server server{

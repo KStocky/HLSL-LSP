@@ -344,6 +344,9 @@ struct ComputeHardwareProfile {
     }
 }
 
+[[nodiscard]] std::optional<std::size_t> dxc_offset_at(std::string_view text, std::uint32_t line,
+                                                       std::uint32_t column);
+
 [[nodiscard]] std::size_t symbol_offset(std::string_view text, std::size_t offset,
                                         bool end_offset) {
     offset = (std::min)(offset, text.size());
@@ -355,6 +358,16 @@ struct ComputeHardwareProfile {
 
 [[nodiscard]] workspace::Range symbol_range(const dxc::Symbol& symbol,
                                             const workspace::SourceSnapshot& snapshot) {
+    if (symbol.extent.has_value()) {
+        const auto start =
+            dxc_offset_at(snapshot.text(), symbol.extent->start.line, symbol.extent->start.column);
+        const auto end =
+            dxc_offset_at(snapshot.text(), symbol.extent->end.line, symbol.extent->end.column);
+        if (start.has_value() && end.has_value() && *start <= *end) {
+            return {.start = workspace::lsp_position_at(snapshot.text(), *start),
+                    .end = workspace::lsp_position_at(snapshot.text(), *end)};
+        }
+    }
     const auto start =
         symbol_offset(snapshot.text(), static_cast<std::size_t>(symbol.start_offset), false);
     const auto normalized_end = symbol_offset(
@@ -367,8 +380,11 @@ struct ComputeHardwareProfile {
 [[nodiscard]] workspace::Range symbol_selection_range(const dxc::Symbol& symbol,
                                                       const workspace::SourceSnapshot& snapshot) {
     const auto text_size = snapshot.text().size();
-    const auto start =
-        symbol_offset(snapshot.text(), static_cast<std::size_t>(symbol.location.offset), false);
+    const auto location_offset =
+        dxc_offset_at(snapshot.text(), symbol.location.line, symbol.location.column);
+    const auto start = symbol_offset(
+        snapshot.text(), location_offset.value_or(static_cast<std::size_t>(symbol.location.offset)),
+        false);
     auto source_offset = start;
     auto name_offset = std::size_t{};
     while (source_offset < text_size && name_offset < symbol.name.size()) {
@@ -670,12 +686,6 @@ compilation_signature_parameter_json(const dxc::CompilationSignatureParameter& p
         {"componentType", parameter.component_type},  {"mask", parameter.mask},
         {"readWriteMask", parameter.read_write_mask}, {"stream", parameter.stream}};
 }
-
-// Forward-declared: needed here but defined later in this file (with
-// `append_semantic_token`), which itself needs types not yet declared this
-// early.
-[[nodiscard]] std::optional<std::size_t> dxc_offset_at(std::string_view text, std::uint32_t line,
-                                                       std::uint32_t column);
 
 // Builds an LSP `{uri, range}` location for a reflected resource's
 // declaration site, converting the compiler's 1-based byte line/column into
@@ -2071,15 +2081,22 @@ optional_string_setting(const Json& settings, const Json* hlsl, std::string_view
 }
 
 [[nodiscard]] workspace::Range reference_range(std::string_view text,
-                                               const dxc::Reference& reference) {
-    const auto start = static_cast<std::size_t>(reference.start_offset);
-    const auto end = static_cast<std::size_t>(reference.end_offset);
-    if (start > end || end > text.size()) {
-        throw HandlerError{json_rpc::content_modified_code,
-                           "Reference source changed after analysis"};
+                                               const dxc::Reference& reference,
+                                               std::string_view expected_name = {}) {
+    auto start = dxc_offset_at(text, reference.location.line, reference.location.column);
+    auto end = start.has_value() ? std::optional{*start + expected_name.size()} : std::nullopt;
+    if (expected_name.empty() || !end.has_value() || *end > text.size() ||
+        text.substr(*start, expected_name.size()) != expected_name) {
+        start = static_cast<std::size_t>(reference.start_offset);
+        end = static_cast<std::size_t>(reference.end_offset);
     }
-    return {.start = workspace::lsp_position_at(text, start),
-            .end = workspace::lsp_position_at(text, end)};
+    if (*start > *end || *end > text.size() ||
+        (!expected_name.empty() && text.substr(*start, *end - *start) != expected_name)) {
+        throw HandlerError{json_rpc::content_modified_code,
+                           "A referenced source file changed after analysis"};
+    }
+    return {.start = workspace::lsp_position_at(text, *start),
+            .end = workspace::lsp_position_at(text, *end)};
 }
 
 } // namespace
@@ -2655,7 +2672,8 @@ Json Server::references(const std::optional<Json>& params,
         if (!include_declaration &&
             target.identity() ==
                 workspace::DocumentUri::from_path(result.target.location.path).identity() &&
-            reference.start_offset == result.target.location.offset) {
+            reference.location.line == result.target.location.line &&
+            reference.location.column == result.target.location.column) {
             continue;
         }
         std::string text;
@@ -2672,15 +2690,9 @@ Json Server::references(const std::optional<Json>& params,
             }
             text = {std::istreambuf_iterator<char>{stream}, std::istreambuf_iterator<char>{}};
         }
-        const auto start = static_cast<std::size_t>(reference.start_offset);
-        const auto end = static_cast<std::size_t>(reference.end_offset);
-        if (start > end || end > text.size() ||
-            text.substr(start, end - start) != result.target.name) {
-            throw HandlerError{json_rpc::content_modified_code,
-                               "A referenced source file changed after analysis"};
-        }
         locations.push_back(
-            {{"uri", target.uri()}, {"range", lsp_range(reference_range(text, reference))}});
+            {{"uri", target.uri()},
+             {"range", lsp_range(reference_range(text, reference, result.target.name))}});
     }
     return locations;
 }
@@ -3251,8 +3263,11 @@ Json Server::entry_point_data_flow(const std::optional<Json>& params,
     // root's own document version) and tag this result with a generation
     // describing a *different* analysis than the one that actually
     // produced it.
+    dxc::EntryPointDataFlowLimits limits;
+    limits.max_unused_declaration_candidates = 16;
+    limits.max_definitions_collected = 1024;
     const auto flow_with_generation = analysis_.entry_point_data_flow(
-        snapshot.document_uri().identity(), snapshot.version(), {}, context.cancellation);
+        snapshot.document_uri().identity(), snapshot.version(), limits, context.cancellation);
     const auto& flow = flow_with_generation.value;
     const auto generation = flow_with_generation.generation;
     {
@@ -3361,11 +3376,13 @@ Json Server::prepare_rename(const std::optional<Json>& params,
 
     const auto offset = workspace::utf8_offset_at(result.request.text(), request_position);
     for (const auto& reference : result.references) {
+        const auto range = reference_range(result.request.text(), reference, result.target.name);
+        const auto start = workspace::utf8_offset_at(result.request.text(), range.start);
+        const auto end = workspace::utf8_offset_at(result.request.text(), range.end);
         if (workspace::DocumentUri::from_path(reference.location.path).identity() ==
                 result.request.document_uri().identity() &&
-            reference.start_offset <= offset && offset <= reference.end_offset) {
-            return {{"range", lsp_range(reference_range(result.request.text(), reference))},
-                    {"placeholder", result.target.name}};
+            start <= offset && offset <= end) {
+            return {{"range", lsp_range(range)}, {"placeholder", result.target.name}};
         }
     }
     return nullptr;
@@ -3424,15 +3441,9 @@ Json Server::rename(const std::optional<Json>& params, const json_rpc::RequestCo
         }
         Json edits = Json::array();
         for (const auto& reference : file.references) {
-            const auto start = static_cast<std::size_t>(reference.start_offset);
-            const auto end = static_cast<std::size_t>(reference.end_offset);
-            if (start > end || end > file.text.size() ||
-                file.text.substr(start, end - start) != result.target.name) {
-                throw HandlerError{json_rpc::content_modified_code,
-                                   "A referenced source file changed after analysis"};
-            }
-            edits.push_back({{"range", lsp_range(reference_range(file.text, reference))},
-                             {"newText", new_name}});
+            edits.push_back(
+                {{"range", lsp_range(reference_range(file.text, reference, result.target.name))},
+                 {"newText", new_name}});
         }
         Json version = file.version.has_value() ? Json(*file.version) : Json(nullptr);
         document_changes.push_back(
@@ -4439,8 +4450,9 @@ Json Server::document_symbols(const std::optional<Json>& params,
 
     Json result = Json::array();
     analyze_and_publish(snapshot.uri());
-    const auto symbols = analysis_.symbols(snapshot.document_uri().identity(), snapshot.version(),
-                                           context.cancellation);
+    bool truncated{};
+    const auto symbols = analysis_.document_symbols(
+        snapshot.document_uri().identity(), snapshot.version(), context.cancellation, truncated);
     {
         std::scoped_lock state_lock{state_mutex_};
         if (!documents_.contains(snapshot.uri()) ||
@@ -4449,6 +4461,14 @@ Json Server::document_symbols(const std::optional<Json>& params,
         }
     }
     append_document_symbols(result, symbols, snapshot);
+    if (truncated) {
+        sender_(json_rpc::Notification{
+            .method = "window/logMessage",
+            .params =
+                Json{{"type", 2},
+                     {"message", "Document symbols were truncated at 1024 declarations to keep the "
+                                 "request responsive."}}});
+    }
     return result;
 }
 

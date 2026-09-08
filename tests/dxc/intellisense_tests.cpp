@@ -327,10 +327,26 @@ TEST_CASE("DXC IntelliSense reports compiler-skipped preprocessor ranges", "[dxc
 
 TEST_CASE("DXC exposes rewritten-source skipped-range capability",
           "[dxc][preprocessor][platform]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.entry_point = "main";
+    const std::string source = "#if 1\n"
+                               "float4 main() : SV_Target { return 1.0.xxxx; }\n"
+                               "#else\n"
+                               "float4 main() : SV_Target { return 0.0.xxxx; }\n"
+                               "#endif\n";
+    auto translation_unit = intellisense.parse(
+        shader_path, {{.path = shader_path, .text = source, .rewritten = true}}, options);
 #ifdef _WIN32
     CHECK(hlsl_intellisense::dxc::supports_skipped_ranges_for_rewritten_sources());
+    CHECK_FALSE(translation_unit.skipped_ranges().empty());
+    CHECK(translation_unit.entry_point_data_flow().found);
 #else
     CHECK_FALSE(hlsl_intellisense::dxc::supports_skipped_ranges_for_rewritten_sources());
+    CHECK_THROWS_AS(translation_unit.skipped_ranges(), hlsl_intellisense::dxc::RuntimeError);
+    const auto flow = translation_unit.entry_point_data_flow();
+    CHECK_FALSE(flow.found);
+    CHECK(flow.explanation.find("unavailable") != std::string::npos);
 #endif
 }
 
@@ -1085,6 +1101,12 @@ TEST_CASE("DXC IntelliSense extracts hierarchical declaration symbols",
     CHECK(find_symbol(find_symbol, symbols, "main") != nullptr);
     CHECK(material->end_offset > material->start_offset);
     CHECK(material->location.path == shader_path);
+
+    bool truncated{};
+    const auto limited = translation_unit.symbols(shader_path, {}, 1, &truncated);
+    CHECK(truncated);
+    REQUIRE(limited.size() == 1);
+    CHECK(limited.front().name == "Mode");
 }
 
 TEST_CASE("DXC IntelliSense reports descriptor heaps below Shader Model 6.6",
@@ -3693,6 +3715,34 @@ TEST_CASE("Entry-point data flow rejects an ambiguous configured entry point nam
     CHECK(flow.reachable_functions.empty());
 }
 
+TEST_CASE("Entry-point data flow excludes definitions from inactive preprocessor branches",
+          "[dxc][entry-point-data-flow][integration][preprocessor]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.entry_point = "main";
+    const std::string source = "#define ACTIVE 1\n"
+                               "#if ACTIVE\n"
+                               "float activeHelper() { return 1.0; }\n"
+                               "float4 main() : SV_Target { return activeHelper().xxxx; }\n"
+                               "#else\n"
+                               "float inactiveHelper() { return 0.0; }\n"
+                               "float4 main() : SV_Target { return inactiveHelper().xxxx; }\n"
+                               "#endif\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+    REQUIRE(translation_unit.diagnostics().empty());
+
+    const auto flow = translation_unit.entry_point_data_flow();
+    REQUIRE(flow.found);
+    REQUIRE(flow.entry_point.has_value());
+    CHECK(flow.entry_point->location.line == 4);
+    CHECK(std::ranges::none_of(flow.unreachable_functions, [](const auto& function) {
+        return function.name == "inactiveHelper";
+    }));
+    CHECK(std::ranges::none_of(flow.unused_declarations, [](const auto& declaration) {
+        return declaration.name == "inactiveHelper";
+    }));
+}
+
 TEST_CASE("Entry-point data flow honors an explicit function-visit budget",
           "[dxc][entry-point-data-flow][integration]") {
     hlsl_intellisense::dxc::Intellisense intellisense;
@@ -4071,12 +4121,13 @@ TEST_CASE("Entry-point data flow bounds definition collection independently of t
     REQUIRE(bounded.found);
     CHECK(bounded.truncated);
     CHECK(bounded.definitions_truncated);
-    // The reachable subgraph is tiny and entirely visited within budget:
-    // this specific truncation cause must be independent of the other
-    // three.
+    // The reachable subgraph is tiny and entirely visited within budget.
+    // Unused-declaration scans are deliberately omitted once the complete
+    // definition universe is unavailable.
     CHECK_FALSE(bounded.functions_visited_truncated);
     CHECK_FALSE(bounded.global_accesses_truncated);
-    CHECK_FALSE(bounded.unused_declarations_truncated);
+    CHECK(bounded.unused_declarations_truncated);
+    CHECK(bounded.unused_declarations.empty());
     const auto has_name = [](const auto& candidates, std::string_view name) {
         return std::ranges::any_of(candidates,
                                    [name](const auto& symbol) { return symbol.name == name; });
@@ -4110,20 +4161,17 @@ TEST_CASE("Entry-point data flow bounds definition collection independently of t
     CHECK(has_name(full.unreachable_functions, "dead" + std::to_string(dead_function_count - 1)));
 }
 
-TEST_CASE("Entry-point data flow reports an incomplete, non-definitive not-found when a tight "
-          "definition budget is exhausted before the configured entry point is collected",
+TEST_CASE("Entry-point data flow resolves the configured entry point after its definition budget "
+          "is exhausted",
           "[dxc][entry-point-data-flow][integration]") {
     hlsl_intellisense::dxc::Intellisense intellisense;
     hlsl_intellisense::dxc::CompilerOptions options;
     options.entry_point = "main";
     // `main` is declared *after* a large corpus of unrelated dead
     // functions, so a small `max_definitions_collected` budget exhausts
-    // itself (in source order) before ever reaching `main`'s own
-    // definition. `found` must still be `false` (the entry point genuinely
-    // was not among the definitions collected), but this must be
-    // represented as an *incomplete* result -- `definitionsTruncated`/
-    // `truncated` set, and `explanation` noting the caveat -- never a
-    // silent, definitive "this document has no such entry point".
+    // itself (in source order) before ever reaching `main`. The bounded
+    // all-definition collection must stay truncated, while a cheap
+    // name-focused fallback still resolves the analysis root.
     constexpr int dead_function_count = 4000;
     std::string source;
     for (int index = 0; index < dead_function_count; ++index) {
@@ -4136,20 +4184,16 @@ TEST_CASE("Entry-point data flow reports an incomplete, non-definitive not-found
     hlsl_intellisense::dxc::EntryPointDataFlowLimits limits;
     limits.max_definitions_collected = 50;
     const auto flow = translation_unit.entry_point_data_flow(limits);
-    CHECK_FALSE(flow.found);
-    CHECK(flow.entry_point == std::nullopt);
-    CHECK(flow.reachable_functions.empty());
+    REQUIRE(flow.found);
+    REQUIRE(flow.entry_point.has_value());
+    CHECK(flow.entry_point->name == "main");
+    CHECK_FALSE(flow.reachable_functions.empty());
+    CHECK(flow.unreachable_functions.empty());
     CHECK(flow.definitions_truncated);
     CHECK(flow.truncated);
-    CHECK_FALSE(flow.explanation.empty());
-    // The explanation must not read as a plain, unqualified "not found":
-    // a client rendering only `explanation` (not the boolean flags) still
-    // needs to see that this is an incomplete search.
-    CHECK(flow.explanation.find("truncat") != std::string::npos);
+    CHECK(flow.explanation.empty());
 
-    // With a generous budget covering the whole corpus, the same
-    // translation unit resolves `main` normally, proving the budget above
-    // was the actual reason for the "not found" result.
+    // A generous budget additionally proves the unreachable-function set.
     hlsl_intellisense::dxc::EntryPointDataFlowLimits generous_limits;
     generous_limits.max_definitions_collected = 8192;
     const auto full = translation_unit.entry_point_data_flow(generous_limits);
