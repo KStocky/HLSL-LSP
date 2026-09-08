@@ -2081,15 +2081,22 @@ optional_string_setting(const Json& settings, const Json* hlsl, std::string_view
 }
 
 [[nodiscard]] workspace::Range reference_range(std::string_view text,
-                                               const dxc::Reference& reference) {
-    const auto start = static_cast<std::size_t>(reference.start_offset);
-    const auto end = static_cast<std::size_t>(reference.end_offset);
-    if (start > end || end > text.size()) {
-        throw HandlerError{json_rpc::content_modified_code,
-                           "Reference source changed after analysis"};
+                                               const dxc::Reference& reference,
+                                               std::string_view expected_name = {}) {
+    auto start = dxc_offset_at(text, reference.location.line, reference.location.column);
+    auto end = start.has_value() ? std::optional{*start + expected_name.size()} : std::nullopt;
+    if (expected_name.empty() || !end.has_value() || *end > text.size() ||
+        text.substr(*start, expected_name.size()) != expected_name) {
+        start = static_cast<std::size_t>(reference.start_offset);
+        end = static_cast<std::size_t>(reference.end_offset);
     }
-    return {.start = workspace::lsp_position_at(text, start),
-            .end = workspace::lsp_position_at(text, end)};
+    if (*start > *end || *end > text.size() ||
+        (!expected_name.empty() && text.substr(*start, *end - *start) != expected_name)) {
+        throw HandlerError{json_rpc::content_modified_code,
+                           "A referenced source file changed after analysis"};
+    }
+    return {.start = workspace::lsp_position_at(text, *start),
+            .end = workspace::lsp_position_at(text, *end)};
 }
 
 } // namespace
@@ -2682,15 +2689,9 @@ Json Server::references(const std::optional<Json>& params,
             }
             text = {std::istreambuf_iterator<char>{stream}, std::istreambuf_iterator<char>{}};
         }
-        const auto start = static_cast<std::size_t>(reference.start_offset);
-        const auto end = static_cast<std::size_t>(reference.end_offset);
-        if (start > end || end > text.size() ||
-            text.substr(start, end - start) != result.target.name) {
-            throw HandlerError{json_rpc::content_modified_code,
-                               "A referenced source file changed after analysis"};
-        }
         locations.push_back(
-            {{"uri", target.uri()}, {"range", lsp_range(reference_range(text, reference))}});
+            {{"uri", target.uri()},
+             {"range", lsp_range(reference_range(text, reference, result.target.name))}});
     }
     return locations;
 }
@@ -3371,11 +3372,13 @@ Json Server::prepare_rename(const std::optional<Json>& params,
 
     const auto offset = workspace::utf8_offset_at(result.request.text(), request_position);
     for (const auto& reference : result.references) {
+        const auto range = reference_range(result.request.text(), reference, result.target.name);
+        const auto start = workspace::utf8_offset_at(result.request.text(), range.start);
+        const auto end = workspace::utf8_offset_at(result.request.text(), range.end);
         if (workspace::DocumentUri::from_path(reference.location.path).identity() ==
                 result.request.document_uri().identity() &&
-            reference.start_offset <= offset && offset <= reference.end_offset) {
-            return {{"range", lsp_range(reference_range(result.request.text(), reference))},
-                    {"placeholder", result.target.name}};
+            start <= offset && offset <= end) {
+            return {{"range", lsp_range(range)}, {"placeholder", result.target.name}};
         }
     }
     return nullptr;
@@ -3434,15 +3437,9 @@ Json Server::rename(const std::optional<Json>& params, const json_rpc::RequestCo
         }
         Json edits = Json::array();
         for (const auto& reference : file.references) {
-            const auto start = static_cast<std::size_t>(reference.start_offset);
-            const auto end = static_cast<std::size_t>(reference.end_offset);
-            if (start > end || end > file.text.size() ||
-                file.text.substr(start, end - start) != result.target.name) {
-                throw HandlerError{json_rpc::content_modified_code,
-                                   "A referenced source file changed after analysis"};
-            }
-            edits.push_back({{"range", lsp_range(reference_range(file.text, reference))},
-                             {"newText", new_name}});
+            edits.push_back(
+                {{"range", lsp_range(reference_range(file.text, reference, result.target.name))},
+                 {"newText", new_name}});
         }
         Json version = file.version.has_value() ? Json(*file.version) : Json(nullptr);
         document_changes.push_back(

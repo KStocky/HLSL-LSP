@@ -1422,11 +1422,13 @@ TEST_CASE("References and rename preserve identity across open roots and disk in
         (directory.path() / "a.hlsl").string());
     const auto second = hlsl_intellisense::workspace::DocumentUri::from_path(
         (directory.path() / "b.hlsl").string());
-    const std::string first_text = "#include \"shared.hlsli\"\n"
+    const std::string first_text = "// \xC3\x97 \xF0\x9F\x98\x80\r\n"
+                                   "#include \"shared.hlsli\"\r\n"
                                    "float4 main() : SV_Target { float sharedValue = 2.0; return "
-                                   "(sharedValue + ::sharedValue).xxxx; }\n";
-    const std::string second_text = "#include \"shared.hlsli\"\n"
-                                    "float4 main() : SV_Target { return sharedValue.xxxx; }\n";
+                                   "(sharedValue + ::sharedValue).xxxx; }\r\n";
+    const std::string second_text = "// \xE2\x86\x92\r\n"
+                                    "#include \"shared.hlsli\"\r\n"
+                                    "float4 main() : SV_Target { return sharedValue.xxxx; }\r\n";
 
     std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
     hlsl_intellisense::lsp::Server server{
