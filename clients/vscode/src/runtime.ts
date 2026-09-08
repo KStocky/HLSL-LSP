@@ -176,6 +176,22 @@ async function validateRuntimeFiles(
   return [];
 }
 
+async function validateAnalysisWorker(
+  fileSystem: RuntimeFileSystem,
+  executablePath: string,
+  platform: NodeJS.Platform,
+): Promise<readonly string[]> {
+  if (platform !== "win32" && platform !== "linux") {
+    return [];
+  }
+  const worker = path.join(
+    path.dirname(executablePath),
+    platform === "win32" ? "hlsl-analysis-worker.exe" : "hlsl-analysis-worker",
+  );
+  await validateExecutable(fileSystem, worker, platform);
+  return [worker];
+}
+
 // Resolves the optional DXC runtime directory an editor client selects. An empty
 // value keeps the bundled runtime. A relative value resolves from the first
 // workspace folder so checked-in settings stay environment independent. The
@@ -216,9 +232,14 @@ export async function resolveServerRuntime(
       environment.workspaceFolders,
     );
     await validateExecutable(fileSystem, command, environment.platform);
+    const workerFiles = await validateAnalysisWorker(
+      fileSystem,
+      command,
+      environment.platform,
+    );
     // External Linux servers may resolve DXC through RUNPATH or the system
     // loader. Bundled runtimes remain strictly validated below.
-    const runtimeFiles =
+    const dxcFiles =
       environment.platform === "linux"
         ? []
         : await validateRuntimeFiles(fileSystem, command, environment.platform);
@@ -226,7 +247,7 @@ export async function resolveServerRuntime(
       command,
       workingDirectory: path.dirname(command),
       source: "configured",
-      runtimeFiles,
+      runtimeFiles: [...workerFiles, ...dxcFiles],
     };
   }
 
@@ -251,11 +272,14 @@ export async function resolveServerRuntime(
     environment.platform === "win32" ? "hlsl-lsp.exe" : "hlsl-lsp";
   const command = path.join(workingDirectory, executable);
   await validateExecutable(fileSystem, command, environment.platform);
-  const runtimeFiles = await validateRuntimeFiles(
-    fileSystem,
-    command,
-    environment.platform,
-  );
+  const runtimeFiles = [
+    ...(await validateAnalysisWorker(
+      fileSystem,
+      command,
+      environment.platform,
+    )),
+    ...(await validateRuntimeFiles(fileSystem, command, environment.platform)),
+  ];
   return {
     command,
     workingDirectory,

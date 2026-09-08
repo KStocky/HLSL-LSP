@@ -62,11 +62,12 @@ checksum-verified runtime staging directory.
 
 ## Selecting a custom DXC runtime
 
-By default the server loads the bundled `libdxcompiler.so` through its RPATH. An
-editor client or `shadertoolsconfig.json` can select a different runtime with
+By default each isolated analysis worker loads the bundled `libdxcompiler.so`
+through its RPATH. An editor client or `shadertoolsconfig.json` can select a
+different runtime with
 `hlsl.dxcRuntimeDirectory` (see the
 [`shadertoolsconfig.json` reference](shadertoolsconfig.md#dxc-runtime-selection)).
-The server then loads `libdxcompiler.so` from that directory by absolute path
+Each worker then loads `libdxcompiler.so` from that directory by absolute path
 with `RTLD_NOW | RTLD_LOCAL`. The directory must contain a `libdxcompiler.so`
 that satisfies the same glibc, `GLIBCXX`, and `IDxcIntelliSense` ABI
 requirements as the bundled runtime; the directory is validated before the
@@ -75,9 +76,9 @@ server restarts, and an incompatible selection is reported without looping.
 ## Reparse limitation
 
 DXC `1.9.2607` native `IDxcTranslationUnit::Reparse` has been observed to crash
-on Linux. Because an in-process native crash cannot be recovered safely,
-HLSL-LSP retains native `Reparse` on Windows but rebuilds the Linux translation
-unit through the same `IDxcIndex`, compiler arguments, and unsaved buffers.
+on Linux. HLSL-LSP retains native `Reparse` on Windows but avoids that known
+failure by rebuilding the Linux translation unit through the same `IDxcIndex`,
+compiler arguments, and unsaved buffers inside the isolated worker.
 The Linux runtime integration test verifies edits to both a root shader and an
 unsaved include, including updated navigation, hover, signatures, and
 diagnostics. No signal handler or other unsafe crash workaround is used.

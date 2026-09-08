@@ -98,6 +98,8 @@ target_sources(hlsl_lsp
     PRIVATE
         src/analysis/manager.cpp
         src/analysis/scheduler.cpp
+        src/analysis/worker_process.cpp
+        src/analysis/worker_protocol.cpp
         src/lsp/server.cpp
     PUBLIC
         FILE_SET HEADERS
@@ -105,6 +107,8 @@ target_sources(hlsl_lsp
         FILES
             include/hlsl_intellisense/analysis/manager.h
             include/hlsl_intellisense/analysis/scheduler.h
+            include/hlsl_intellisense/analysis/worker_process.h
+            include/hlsl_intellisense/analysis/worker_protocol.h
             include/hlsl_intellisense/lsp/server.h)
 target_link_libraries(hlsl_lsp
     PUBLIC
@@ -124,7 +128,16 @@ target_link_libraries(hlsl-lsp PRIVATE
 hlsl_enable_clang_tidy(hlsl-lsp)
 hlsl_copy_dxc_runtime(hlsl-lsp)
 
-install(TARGETS hlsl-lsp
+add_executable(hlsl-analysis-worker
+    src/app/analysis_worker_main.cpp)
+target_link_libraries(hlsl-analysis-worker PRIVATE
+    hlsl_lsp
+    hlsl_project_options)
+hlsl_enable_clang_tidy(hlsl-analysis-worker)
+hlsl_copy_dxc_runtime(hlsl-analysis-worker)
+add_dependencies(hlsl-lsp hlsl-analysis-worker)
+
+install(TARGETS hlsl-lsp hlsl-analysis-worker
     RUNTIME DESTINATION "."
     COMPONENT Runtime)
 install(FILES ${HLSL_DXC_RUNTIME_FILES}
@@ -145,6 +158,13 @@ if(EXISTS "${nlohmann_json_SOURCE_DIR}/LICENSE.MIT")
 endif()
 
 if(BUILD_TESTING)
+    add_executable(hlsl-worker-test-helper
+        tests/analysis/worker_process_test_helper.cpp)
+    target_link_libraries(hlsl-worker-test-helper PRIVATE
+        hlsl_json_rpc
+        hlsl_project_options)
+    hlsl_enable_clang_tidy(hlsl-worker-test-helper)
+
     add_executable(hlsl-intellisense-tests
         tests/dxc/compatibility_tests.cpp
         tests/dxc/corpus_tests.cpp
@@ -165,6 +185,8 @@ if(BUILD_TESTING)
     add_executable(hlsl-lsp-tests
         tests/analysis/manager_tests.cpp
         tests/analysis/scheduler_tests.cpp
+        tests/analysis/worker_process_tests.cpp
+        tests/analysis/worker_protocol_tests.cpp
         tests/lsp/server_tests.cpp)
     target_link_libraries(hlsl-lsp-tests PRIVATE
         Catch2::Catch2WithMain
@@ -172,7 +194,11 @@ if(BUILD_TESTING)
         hlsl_project_options)
     hlsl_enable_clang_tidy(hlsl-lsp-tests)
     target_compile_definitions(hlsl-lsp-tests PRIVATE
-        HLSL_TEST_DXC_RUNTIME_DIR="${DXC_RUNTIME_DIR}")
+        HLSL_TEST_DXC_RUNTIME_DIR="${DXC_RUNTIME_DIR}"
+        HLSL_TEST_WORKER_HELPER="$<TARGET_FILE:hlsl-worker-test-helper>")
+    add_dependencies(hlsl-lsp-tests
+        hlsl-analysis-worker
+        hlsl-worker-test-helper)
     hlsl_copy_dxc_runtime(hlsl-lsp-tests)
 
     add_executable(hlsl-json-rpc-tests
@@ -204,6 +230,7 @@ if(BUILD_TESTING)
         hlsl_project_options)
     target_compile_definitions(hlsl-analysis-benchmark PRIVATE
         HLSL_BENCHMARK_SHADER_DIR="${PROJECT_SOURCE_DIR}/benchmarks/shaders")
+    add_dependencies(hlsl-analysis-benchmark hlsl-analysis-worker)
     hlsl_enable_clang_tidy(hlsl-analysis-benchmark)
     hlsl_copy_dxc_runtime(hlsl-analysis-benchmark)
 

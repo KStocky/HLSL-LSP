@@ -2115,7 +2115,10 @@ Server::Server(NotificationSender sender, Logger logger, ServerOptions options,
                     analysis_completed(snapshot, diagnostics, generation);
                 },
                 options_.analysis, options_.analysis_hooks,
-                [this](std::string_view message) { log(message); }} {
+                [this](std::string_view message) { log(message); },
+                [this](const auto& snapshot, const auto& unavailable, std::uint64_t generation) {
+                    analysis_unavailable(snapshot, unavailable, generation);
+                }} {
     if (!sender_) {
         throw std::invalid_argument{"The LSP server requires a notification sender"};
     }
@@ -2415,15 +2418,18 @@ Json Server::initialize(const std::optional<Json>& params) {
 }
 
 Json Server::shutdown(const std::optional<Json>& params) {
-    std::scoped_lock state_lock{state_mutex_};
-    if (params.has_value() && !params->is_null()) {
-        invalid_params("Shutdown does not accept parameters");
+    {
+        std::scoped_lock state_lock{state_mutex_};
+        if (params.has_value() && !params->is_null()) {
+            invalid_params("Shutdown does not accept parameters");
+        }
+        if (state_ != State::running) {
+            throw HandlerError{json_rpc::invalid_request_code, "Shutdown is not valid now"};
+        }
+        state_ = State::shutdown;
+        clean_shutdown_ = true;
     }
-    if (state_ != State::running) {
-        throw HandlerError{json_rpc::invalid_request_code, "Shutdown is not valid now"};
-    }
-    state_ = State::shutdown;
-    clean_shutdown_ = true;
+    analysis_.shutdown();
     return nullptr;
 }
 
@@ -4700,6 +4706,7 @@ void Server::did_close(const std::optional<Json>& params) {
             documents_.did_close(uri);
             ++analysis_generations_[snapshot.document_uri().identity()];
             diagnostics_by_identity_.erase(snapshot.document_uri().identity());
+            unavailable_by_identity_.erase(snapshot.document_uri().identity());
         }
         invalidate_inlay_hints(false);
         refresh_inlay_hints = true;
@@ -5833,6 +5840,7 @@ void Server::analysis_completed(const workspace::SourceSnapshot& snapshot,
 
         const auto identity = snapshot.document_uri().identity();
         const auto existing = diagnostics_by_identity_.find(identity);
+        const bool was_unavailable = unavailable_by_identity_.erase(identity) != 0;
         // A cache hit (identical document version and diagnostics content,
         // where only the analysis generation advanced) still must refresh the
         // cached record so textDocument/codeAction sees the current
@@ -5846,7 +5854,7 @@ void Server::analysis_completed(const workspace::SourceSnapshot& snapshot,
         // effect for the user. A first publish (no existing record), a
         // different document version, or genuinely different diagnostics
         // always republishes.
-        const bool unchanged = existing != diagnostics_by_identity_.end() &&
+        const bool unchanged = !was_unavailable && existing != diagnostics_by_identity_.end() &&
                                existing->second.version == latest.version() &&
                                existing->second.diagnostics == filtered;
         diagnostics_by_identity_.insert_or_assign(identity,
@@ -5857,6 +5865,67 @@ void Server::analysis_completed(const workspace::SourceSnapshot& snapshot,
             publish_diagnostics(latest, filtered, generation);
         }
     }
+}
+
+void Server::analysis_unavailable(const workspace::SourceSnapshot& snapshot,
+                                  const analysis::AnalysisUnavailable& unavailable,
+                                  std::uint64_t generation) {
+    std::scoped_lock state_lock{state_mutex_};
+    if (!documents_.contains(snapshot.uri())) {
+        return;
+    }
+    const auto& state = documents_.document(snapshot.uri());
+    const auto expected = analysis_generations_.find(snapshot.document_uri().identity());
+    const auto latest = documents_.snapshot(snapshot.uri());
+    if (!state.open || expected == analysis_generations_.end() || expected->second != generation ||
+        latest.version() != snapshot.version()) {
+        return;
+    }
+
+    const auto identity = snapshot.document_uri().identity();
+    const auto existing = unavailable_by_identity_.find(identity);
+    if (existing != unavailable_by_identity_.end() && existing->second == generation) {
+        return;
+    }
+    unavailable_by_identity_.insert_or_assign(identity, generation);
+    diagnostics_by_identity_.erase(identity);
+
+    std::string_view reason{"workerError"};
+    switch (unavailable.reason) {
+    case analysis::AnalysisUnavailableReason::timed_out:
+        reason = "timedOut";
+        break;
+    case analysis::AnalysisUnavailableReason::worker_crashed:
+        reason = "workerCrashed";
+        break;
+    case analysis::AnalysisUnavailableReason::protocol_error:
+        reason = "protocolError";
+        break;
+    case analysis::AnalysisUnavailableReason::launch_failed:
+        reason = "launchFailed";
+        break;
+    case analysis::AnalysisUnavailableReason::worker_error:
+        reason = "workerError";
+        break;
+    }
+
+    const Json diagnostic{
+        {"range", Json{{"start", Json{{"line", 0}, {"character", 0}}},
+                       {"end", Json{{"line", 0}, {"character", 0}}}}},
+        {"severity", 1},
+        {"code", "hlsl-lsp/analysis-unavailable"},
+        {"source", "hlsl-lsp"},
+        {"message", "DXC analysis is temporarily unavailable. HLSL-LSP restarted the isolated "
+                    "analysis worker. " +
+                        unavailable.message},
+        {"data", Json{{"uri", snapshot.uri()},
+                      {"version", snapshot.version()},
+                      {"generation", generation},
+                      {"reason", reason}}}};
+    sender_(json_rpc::Notification{.method = "textDocument/publishDiagnostics",
+                                   .params = Json{{"uri", snapshot.uri()},
+                                                  {"version", snapshot.version()},
+                                                  {"diagnostics", Json::array({diagnostic})}}});
 }
 
 void Server::publish_diagnostics(const workspace::SourceSnapshot& snapshot,

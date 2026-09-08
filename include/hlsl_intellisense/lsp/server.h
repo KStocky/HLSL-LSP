@@ -236,6 +236,9 @@ class Server final {
     void analysis_completed(const workspace::SourceSnapshot& snapshot,
                             const std::vector<dxc::Diagnostic>& diagnostics,
                             std::uint64_t generation);
+    void analysis_unavailable(const workspace::SourceSnapshot& snapshot,
+                              const analysis::AnalysisUnavailable& unavailable,
+                              std::uint64_t generation);
     // A narrow, point-in-time copy of exactly the server state that
     // configuration resolution depends on, snapshotted under a single brief
     // state_mutex_ lock. The static configuration_for/variant_configuration_for
@@ -339,6 +342,10 @@ class Server final {
     // identity), used exclusively to derive textDocument/codeAction results.
     // Never populated from, or trusted against, a client-supplied payload.
     std::unordered_map<std::string, DiagnosticsRecord> diagnostics_by_identity_;
+    // The generation for which a dedicated analysis-unavailable diagnostic is
+    // currently displayed. A successful analysis always replaces it, even
+    // when the compiler diagnostics themselves are still empty.
+    std::unordered_map<std::string, std::uint64_t> unavailable_by_identity_;
     State state_{State::uninitialized};
     bool command_links_{};
     // Loop prevention: the runtime target already requested and the runtime issue

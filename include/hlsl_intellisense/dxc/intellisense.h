@@ -18,12 +18,12 @@ struct SourceFile {
     bool rewritten{};
 };
 
-// Selects the DXC runtime a language-server process loads. An empty directory
-// selects the bundled runtime resolved through the platform loader's default
-// search path (the directory that contains the executable). A non-empty
+// Selects the DXC runtime a DXC-hosting analysis-worker process loads. An empty
+// directory selects the bundled runtime resolved through the platform loader's
+// default search path (the directory that contains the executable). A non-empty
 // directory loads the platform DXC library from that directory instead. Because
-// DXC IntelliSense is loaded once per process, this selection is process-wide
-// and cannot vary per file.
+// DXC IntelliSense is loaded once per worker process, this selection is fixed
+// for that worker and cannot vary per file.
 struct RuntimeConfiguration {
     std::string directory;
 };

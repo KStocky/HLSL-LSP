@@ -6,8 +6,10 @@
 #include <hlsl_intellisense/workspace/document_store.h>
 #include <hlsl_intellisense/workspace/include_resolver.h>
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -25,12 +27,24 @@ struct AnalysisLimits {
     workspace::IncludeCacheLimits include_cache{};
 };
 
+struct AnalysisBudgets {
+    // Bounds initial and background parse/reparse work, including diagnostic
+    // extraction. A timed-out worker is terminated rather than left wedged.
+    std::chrono::milliseconds background_timeout{30'000};
+    // Bounds all editor-facing DXC queries.
+    std::chrono::milliseconds interactive_timeout{15'000};
+};
+
 struct AnalysisOptions {
     SchedulerOptions scheduler{};
     AnalysisLimits limits{};
+    AnalysisBudgets budgets{};
     // Selects the process-wide DXC runtime loaded by analysis workers. Empty
     // selects the bundled default.
     dxc::RuntimeConfiguration runtime{};
+    // Test/deployment seam. Empty selects hlsl-analysis-worker beside the
+    // current executable.
+    std::filesystem::path worker_executable{};
 };
 
 struct AnalysisMetrics {
@@ -54,6 +68,19 @@ struct AnalysisInput {
     std::vector<workspace::SourceSnapshot> open_documents;
     workspace::WorkspaceConfiguration configuration;
     std::uint64_t generation{};
+};
+
+enum class AnalysisUnavailableReason : std::uint8_t {
+    timed_out,
+    worker_crashed,
+    protocol_error,
+    launch_failed,
+    worker_error,
+};
+
+struct AnalysisUnavailable {
+    AnalysisUnavailableReason reason{AnalysisUnavailableReason::worker_error};
+    std::string message;
 };
 
 struct RootMetadata {
@@ -132,9 +159,12 @@ class Manager final {
     using DiagnosticsHandler = std::function<void(
         const workspace::SourceSnapshot&, const std::vector<dxc::Diagnostic>&, std::uint64_t)>;
     using ErrorHandler = std::function<void(std::string_view)>;
+    using UnavailableHandler = std::function<void(const workspace::SourceSnapshot&,
+                                                  const AnalysisUnavailable&, std::uint64_t)>;
 
     explicit Manager(DiagnosticsHandler diagnostics, AnalysisOptions options = {},
-                     std::shared_ptr<AnalysisHooks> hooks = {}, ErrorHandler errors = {});
+                     std::shared_ptr<AnalysisHooks> hooks = {}, ErrorHandler errors = {},
+                     UnavailableHandler unavailable = {});
     Manager(const Manager&) = delete;
     Manager& operator=(const Manager&) = delete;
     ~Manager();
@@ -223,7 +253,7 @@ class Manager final {
                    std::uint32_t line, std::uint32_t column,
                    const json_rpc::CancellationToken& cancellation);
     // Traces reachability and global/resource access from this root's own
-    // configured entry point; see dxc::TranslationUnit::entry_point_data_flow.
+    // configured entry point using the isolated worker's retained analysis.
     [[nodiscard]] WithGeneration<dxc::EntryPointDataFlow>
     entry_point_data_flow(std::string root_identity, std::int64_t version,
                           dxc::EntryPointDataFlowLimits limits,

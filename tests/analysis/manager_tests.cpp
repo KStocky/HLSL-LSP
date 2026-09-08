@@ -1,19 +1,23 @@
 #include <hlsl_intellisense/analysis/manager.h>
 
 #include <algorithm>
+#include <atomic>
 #include <catch2/catch_test_macros.hpp>
+#include <chrono>
 #include <condition_variable>
 #include <filesystem>
 #include <fstream>
 #include <future>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_set>
 #include <vector>
 
 namespace analysis = hlsl_intellisense::analysis;
 namespace json_rpc = hlsl_intellisense::json_rpc;
 namespace workspace = hlsl_intellisense::workspace;
+using namespace std::chrono_literals;
 
 namespace {
 
@@ -79,6 +83,28 @@ class Gate final {
                        .opaque_translation_unit_estimate = std::size_t{1024} * 1024U,
                        .include_cache = {.max_entries = 16,
                                          .max_estimated_bytes = std::size_t{1024} * 1024U}}};
+}
+
+[[nodiscard]] analysis::AnalysisOptions
+worker_test_options(std::chrono::milliseconds background_timeout = 2s,
+                    std::chrono::milliseconds interactive_timeout = 2s) {
+    auto options = test_options();
+    options.budgets.background_timeout = background_timeout;
+    options.budgets.interactive_timeout = interactive_timeout;
+    options.worker_executable = HLSL_TEST_WORKER_HELPER;
+    return options;
+}
+
+[[nodiscard]] bool wait_for_file(const std::filesystem::path& path,
+                                 std::chrono::milliseconds timeout = 2s) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (std::filesystem::exists(path)) {
+            return true;
+        }
+        std::this_thread::sleep_for(5ms);
+    }
+    return std::filesystem::exists(path);
 }
 
 [[nodiscard]] analysis::AnalysisInput
@@ -149,6 +175,14 @@ TEST_CASE("Analysis cache measures cold parse, cache hit, reparse, and completio
     // resolves to an identical cache key (e.g. a config/variant change that
     // does not affect this particular document).
     CHECK(diagnostic_versions == std::vector<std::int64_t>{1, 1, 2});
+}
+
+TEST_CASE("Manager runtime information is queried through an isolated worker",
+          "[analysis][worker][runtime]") {
+    analysis::Manager manager{[](const auto&, const auto&, std::uint64_t) {}, test_options()};
+    const auto runtime = manager.dxc_runtime_info();
+    CHECK_FALSE(runtime.library_path.empty());
+    CHECK_FALSE(runtime.version.empty());
 }
 
 TEST_CASE("Translation-unit cache evicts the least recently used idle root",
@@ -580,4 +614,365 @@ TEST_CASE("Entry-point data flow generation stays paired with the analysis that 
     const auto reparsed = manager.entry_point_data_flow(uri.identity(), 1, {}, cancellation);
     CHECK(reparsed.generation == post_reanalysis_generation);
     CHECK(reparsed.generation != baseline.generation);
+}
+
+TEST_CASE("Background worker timeout publishes one current unavailable result",
+          "[analysis][worker][timeout][diagnostics]") {
+    TestDirectory directory;
+    const auto dependency_path = directory.path() / "dependency.hlsli";
+    {
+        std::ofstream dependency{dependency_path};
+        REQUIRE(dependency);
+        dependency << "static const float4 value = 1.0.xxxx;\n";
+    }
+    const auto dependency = workspace::DocumentUri::from_path(dependency_path.string());
+    const auto uri = workspace::DocumentUri::from_path((directory.path() / "root.hlsl").string());
+    std::vector<analysis::AnalysisUnavailable> unavailable;
+    std::vector<std::int64_t> completed;
+    analysis::Manager manager{[&](const workspace::SourceSnapshot& snapshot, const auto&,
+                                  std::uint64_t) { completed.push_back(snapshot.version()); },
+                              worker_test_options(40ms),
+                              {},
+                              {},
+                              [&](const workspace::SourceSnapshot&,
+                                  const analysis::AnalysisUnavailable& failure,
+                                  std::uint64_t) { unavailable.push_back(failure); }};
+
+    auto request = input(uri, 1, "#include \"dependency.hlsli\"\n// HLSL_TEST_BACKGROUND_HANG\n");
+    request.generation = 7;
+    manager.analyze(std::move(request));
+    manager.wait_idle();
+    manager.wait_idle();
+
+    REQUIRE(unavailable.size() == 1);
+    CHECK(unavailable.front().reason == analysis::AnalysisUnavailableReason::timed_out);
+    CHECK(completed.empty());
+    const auto roots = manager.roots();
+    REQUIRE(roots.size() == 1);
+    CHECK(roots.front().version == 1);
+    CHECK(roots.front().dependency_identities.contains(dependency.identity()));
+    CHECK(manager.metrics().translation_units == 0);
+}
+
+TEST_CASE("Newer edit kills an obsolete hung worker without stale publication",
+          "[analysis][worker][timeout][supersession]") {
+    TestDirectory directory;
+    const auto path = directory.path() / "root.hlsl";
+    const auto uri = workspace::DocumentUri::from_path(path.string());
+    std::vector<std::int64_t> completed;
+    std::vector<analysis::AnalysisUnavailable> unavailable;
+    analysis::Manager manager{[&](const workspace::SourceSnapshot& snapshot, const auto&,
+                                  std::uint64_t) { completed.push_back(snapshot.version()); },
+                              worker_test_options(5s),
+                              {},
+                              {},
+                              [&](const workspace::SourceSnapshot&,
+                                  const analysis::AnalysisUnavailable& failure,
+                                  std::uint64_t) { unavailable.push_back(failure); }};
+
+    auto obsolete = input(uri, 1, "// HLSL_TEST_BACKGROUND_HANG\n");
+    obsolete.generation = 1;
+    manager.analyze(std::move(obsolete));
+    REQUIRE(wait_for_file(path.string() + ".worker-entered"));
+
+    const auto started = std::chrono::steady_clock::now();
+    auto current = input(uri, 2, "float4 main() : SV_Target { return 1.0.xxxx; }\n");
+    current.generation = 2;
+    manager.analyze(std::move(current));
+    manager.wait_idle();
+    CHECK(std::chrono::steady_clock::now() - started < 2s);
+
+    CHECK(unavailable.empty());
+    CHECK(completed == std::vector<std::int64_t>{2});
+    CHECK(manager.metrics().translation_units == 1);
+}
+
+TEST_CASE("Same-version configuration reanalysis supersedes a hung worker",
+          "[analysis][worker][configuration][supersession]") {
+    TestDirectory directory;
+    const auto path = directory.path() / "root.hlsl";
+    const auto uri = workspace::DocumentUri::from_path(path.string());
+    std::vector<std::uint64_t> completed_generations;
+    std::vector<analysis::AnalysisUnavailable> unavailable;
+    analysis::Manager manager{
+        [&](const workspace::SourceSnapshot&, const auto&, std::uint64_t generation) {
+            completed_generations.push_back(generation);
+        },
+        worker_test_options(5s),
+        {},
+        {},
+        [&](const workspace::SourceSnapshot&, const analysis::AnalysisUnavailable& failure,
+            std::uint64_t) { unavailable.push_back(failure); }};
+
+    auto obsolete = input(uri, 1, "// HLSL_TEST_BACKGROUND_HANG\n");
+    obsolete.generation = 1;
+    manager.analyze(std::move(obsolete));
+    REQUIRE(wait_for_file(path.string() + ".worker-entered"));
+
+    workspace::WorkspaceConfiguration changed_configuration;
+    changed_configuration.language_version = "2018";
+    auto current =
+        input(uri, 1, "float4 main() : SV_Target { return 1.0.xxxx; }\n", changed_configuration);
+    current.generation = 2;
+    manager.analyze(std::move(current));
+    manager.wait_idle();
+
+    CHECK(unavailable.empty());
+    CHECK(completed_generations == std::vector<std::uint64_t>{2});
+    const auto roots = manager.roots();
+    REQUIRE(roots.size() == 1);
+    CHECK(roots.front().configuration_fingerprint ==
+          analysis::Manager::configuration_fingerprint(changed_configuration));
+}
+
+TEST_CASE("Erase and shutdown promptly terminate a hung analysis worker",
+          "[analysis][worker][lifecycle]") {
+    SECTION("erase") {
+        TestDirectory directory;
+        const auto path = directory.path() / "erase.hlsl";
+        const auto uri = workspace::DocumentUri::from_path(path.string());
+        analysis::Manager manager{[](const auto&, const auto&, std::uint64_t) {},
+                                  worker_test_options(5s)};
+        manager.analyze(input(uri, 1, "// HLSL_TEST_BACKGROUND_HANG\n"));
+        REQUIRE(wait_for_file(path.string() + ".worker-entered"));
+
+        const auto started = std::chrono::steady_clock::now();
+        manager.erase(uri.identity());
+        manager.wait_idle();
+        CHECK(std::chrono::steady_clock::now() - started < 2s);
+        CHECK(manager.roots().empty());
+        CHECK(manager.metrics().translation_units == 0);
+    }
+
+    SECTION("shutdown") {
+        TestDirectory directory;
+        const auto path = directory.path() / "shutdown.hlsl";
+        const auto uri = workspace::DocumentUri::from_path(path.string());
+        analysis::Manager manager{[](const auto&, const auto&, std::uint64_t) {},
+                                  worker_test_options(5s)};
+        manager.analyze(input(uri, 1, "// HLSL_TEST_BACKGROUND_HANG\n"));
+        REQUIRE(wait_for_file(path.string() + ".worker-entered"));
+
+        const auto started = std::chrono::steady_clock::now();
+        manager.shutdown();
+        CHECK(std::chrono::steady_clock::now() - started < 2s);
+    }
+}
+
+TEST_CASE("Worker crash publishes unavailable once then automatically reparses",
+          "[analysis][worker][crash][recovery]") {
+    TestDirectory directory;
+    const auto path = directory.path() / "root.hlsl";
+    const auto uri = workspace::DocumentUri::from_path(path.string());
+    std::vector<analysis::AnalysisUnavailable> unavailable;
+    std::vector<std::int64_t> completed;
+    analysis::Manager manager{[&](const workspace::SourceSnapshot& snapshot, const auto&,
+                                  std::uint64_t) { completed.push_back(snapshot.version()); },
+                              worker_test_options(),
+                              {},
+                              {},
+                              [&](const workspace::SourceSnapshot&,
+                                  const analysis::AnalysisUnavailable& failure,
+                                  std::uint64_t) { unavailable.push_back(failure); }};
+
+    auto request = input(uri, 1, "// HLSL_TEST_BACKGROUND_CRASH_ONCE\n");
+    request.generation = 3;
+    manager.analyze(std::move(request));
+    manager.wait_idle();
+
+    REQUIRE(unavailable.size() == 1);
+    CHECK(unavailable.front().reason == analysis::AnalysisUnavailableReason::worker_crashed);
+    CHECK(completed == std::vector<std::int64_t>{1});
+    CHECK(manager.metrics().parse_count == 1);
+    CHECK(manager.metrics().translation_units == 1);
+    json_rpc::CancellationToken cancellation;
+    CHECK(manager.symbols(uri.identity(), 1, cancellation).empty());
+}
+
+TEST_CASE("Malformed worker results are explicit background and interactive failures",
+          "[analysis][worker][protocol][malformed]") {
+    SECTION("background") {
+        TestDirectory directory;
+        const auto uri =
+            workspace::DocumentUri::from_path((directory.path() / "background.hlsl").string());
+        std::vector<analysis::AnalysisUnavailable> unavailable;
+        analysis::Manager manager{[](const auto&, const auto&, std::uint64_t) {},
+                                  worker_test_options(),
+                                  {},
+                                  {},
+                                  [&](const workspace::SourceSnapshot&,
+                                      const analysis::AnalysisUnavailable& failure,
+                                      std::uint64_t) { unavailable.push_back(failure); }};
+        manager.analyze(input(uri, 1, "// HLSL_TEST_BACKGROUND_MALFORMED_RESULT\n"));
+        manager.wait_idle();
+        REQUIRE(unavailable.size() == 1);
+        CHECK(unavailable.front().reason == analysis::AnalysisUnavailableReason::protocol_error);
+    }
+
+    SECTION("interactive") {
+        TestDirectory directory;
+        const auto uri =
+            workspace::DocumentUri::from_path((directory.path() / "interactive.hlsl").string());
+        analysis::Manager manager{[](const auto&, const auto&, std::uint64_t) {},
+                                  worker_test_options()};
+        manager.analyze(input(uri, 1, "// HLSL_TEST_MALFORMED_INTERACTIVE\n"));
+        manager.wait_idle();
+
+        json_rpc::CancellationToken cancellation;
+        try {
+            static_cast<void>(manager.symbols(uri.identity(), 1, cancellation));
+            FAIL("Malformed worker result unexpectedly succeeded");
+        } catch (const json_rpc::HandlerError& error) {
+            CHECK(error.code() == json_rpc::internal_error_code);
+        }
+    }
+
+    SECTION("out-of-range numeric field") {
+        TestDirectory directory;
+        const auto uri =
+            workspace::DocumentUri::from_path((directory.path() / "numeric.hlsl").string());
+        analysis::Manager manager{[](const auto&, const auto&, std::uint64_t) {},
+                                  worker_test_options()};
+        manager.analyze(input(uri, 1, "// HLSL_TEST_OVERSIZED_INTERACTIVE\n"));
+        manager.wait_idle();
+
+        json_rpc::CancellationToken cancellation;
+        try {
+            static_cast<void>(manager.tokens(uri.identity(), 1, uri.path(), cancellation));
+            FAIL("Out-of-range worker result unexpectedly succeeded");
+        } catch (const json_rpc::HandlerError& error) {
+            CHECK(error.code() == json_rpc::internal_error_code);
+        }
+    }
+}
+
+TEST_CASE("Interactive DXC timeout returns promptly and schedules reconstruction",
+          "[analysis][worker][interactive][timeout]") {
+    TestDirectory directory;
+    const auto uri = workspace::DocumentUri::from_path((directory.path() / "root.hlsl").string());
+    analysis::Manager manager{[](const auto&, const auto&, std::uint64_t) {},
+                              worker_test_options(2s, 40ms)};
+    manager.analyze(input(uri, 1, "// HLSL_TEST_HANG_INTERACTIVE\n"));
+    manager.wait_idle();
+
+    json_rpc::CancellationToken cancellation;
+    const auto started = std::chrono::steady_clock::now();
+    try {
+        static_cast<void>(manager.symbols(uri.identity(), 1, cancellation));
+        FAIL("Timed-out worker query unexpectedly succeeded");
+    } catch (const json_rpc::HandlerError& error) {
+        CHECK(error.code() == json_rpc::server_cancelled_code);
+    }
+    CHECK(std::chrono::steady_clock::now() - started < 2s);
+    manager.wait_idle();
+    CHECK(manager.metrics().translation_units == 1);
+}
+
+TEST_CASE("Interactive worker crash returns server cancelled and reconstructs",
+          "[analysis][worker][interactive][crash]") {
+    TestDirectory directory;
+    const auto uri = workspace::DocumentUri::from_path((directory.path() / "root.hlsl").string());
+    analysis::Manager manager{[](const auto&, const auto&, std::uint64_t) {},
+                              worker_test_options()};
+    manager.analyze(input(uri, 1, "// HLSL_TEST_CRASH_INTERACTIVE\n"));
+    manager.wait_idle();
+
+    json_rpc::CancellationToken cancellation;
+    try {
+        static_cast<void>(manager.symbols(uri.identity(), 1, cancellation));
+        FAIL("Crashed worker query unexpectedly succeeded");
+    } catch (const json_rpc::HandlerError& error) {
+        CHECK(error.code() == json_rpc::server_cancelled_code);
+    }
+    manager.wait_idle();
+    CHECK(manager.metrics().translation_units == 1);
+}
+
+TEST_CASE("Replacing one worker reconstructs every root assigned to that process",
+          "[analysis][worker][interactive][recovery][ownership]") {
+    TestDirectory directory;
+    const auto first =
+        workspace::DocumentUri::from_path((directory.path() / "first.hlsl").string());
+    const auto second =
+        workspace::DocumentUri::from_path((directory.path() / "second.hlsl").string());
+    analysis::Manager manager{[](const auto&, const auto&, std::uint64_t) {},
+                              worker_test_options(2s, 40ms)};
+    manager.analyze(input(first, 1, "// HLSL_TEST_HANG_INTERACTIVE\n"));
+    manager.analyze(input(second, 1, "float4 main() : SV_Target { return 1.0.xxxx; }\n"));
+    manager.wait_idle();
+    CHECK(manager.metrics().parse_count == 2);
+    CHECK(manager.metrics().translation_units == 2);
+
+    json_rpc::CancellationToken cancellation;
+    CHECK_THROWS_AS(manager.symbols(first.identity(), 1, cancellation), json_rpc::HandlerError);
+    manager.wait_idle();
+
+    CHECK(manager.metrics().parse_count == 4);
+    CHECK(manager.metrics().translation_units == 2);
+    CHECK(manager.symbols(second.identity(), 1, cancellation).empty());
+}
+
+TEST_CASE("Every Manager DXC query family round-trips through the production worker",
+          "[analysis][worker][queries][roundtrip]") {
+    TestDirectory directory;
+    const auto uri = workspace::DocumentUri::from_path((directory.path() / "root.hlsl").string());
+    const std::string source = "#define SCALE 2.0\n"
+                               "struct Payload { float3 position; float weight; };\n"
+                               "float helper(float value) { return value * SCALE; }\n"
+                               "float4 main(float2 uv : TEXCOORD0) : SV_Target {\n"
+                               "  float value = helper(uv.x);\n"
+                               "  return value.xxxx;\n"
+                               "}\n"
+                               "#if 0\n"
+                               "float skipped;\n"
+                               "#endif\n";
+    workspace::WorkspaceConfiguration configuration;
+    configuration.target_profile = "ps_6_6";
+    configuration.entry_point = "main";
+    analysis::Manager manager{[](const auto&, const auto&, std::uint64_t) {}, test_options()};
+    manager.analyze(input(uri, 1, source, configuration));
+    manager.wait_idle();
+
+    json_rpc::CancellationToken cancellation;
+    static_cast<void>(manager.complete(uri.identity(), 1, uri.path(), 5, 30, cancellation));
+    REQUIRE(manager.definition(uri.identity(), 1, uri.path(), 5, 17, cancellation).has_value());
+    CHECK_FALSE(manager.references(uri.identity(), 1, uri.path(), 5, 17, cancellation).empty());
+    REQUIRE(manager.hover(uri.identity(), 1, uri.path(), 5, 17, cancellation).has_value());
+    static_cast<void>(manager.memory_layout(uri.identity(), 1, uri.path(), 2, 8, cancellation));
+
+    const auto compilation =
+        manager.compilation_info_with_generation(uri.identity(), 1, uri.path(), cancellation);
+    CHECK(compilation.value.success);
+    CHECK(compilation.generation != 0);
+    CHECK_FALSE(manager.signatures(uri.identity(), 1, uri.path(), 5, 17, cancellation).empty());
+
+    const auto argument_offset = static_cast<std::uint32_t>(source.find("uv.x"));
+    static_cast<void>(manager.inlay_hints(
+        uri.identity(), 1, uri.path(),
+        {{.start = 0, .end = static_cast<std::uint32_t>(source.size())}},
+        {{.line = 5, .column = 23, .argument_offsets = {argument_offset}}}, {}, cancellation));
+    CHECK_FALSE(manager.tokens(uri.identity(), 1, uri.path(), cancellation).empty());
+    CHECK_FALSE(manager.skipped_ranges(uri.identity(), 1, cancellation).empty());
+    CHECK_FALSE(manager.macro_definitions(uri.identity(), 1, cancellation).empty());
+    CHECK_FALSE(manager.symbols(uri.identity(), 1, cancellation).empty());
+
+    bool truncated = true;
+    CHECK_FALSE(manager.document_symbols(uri.identity(), 1, cancellation, truncated).empty());
+    CHECK_FALSE(truncated);
+
+    const auto helper = manager.callable_at(uri.identity(), 1, uri.path(), 3, 7, cancellation);
+    REQUIRE(helper.value.has_value());
+    CHECK_FALSE(
+        manager.outgoing_calls(uri.identity(), 1, uri.path(), 4, 8, cancellation).value.empty());
+    CHECK_FALSE(
+        manager.incoming_calls(uri.identity(), 1, uri.path(), 3, 7, cancellation).value.empty());
+    const auto data_flow = manager.entry_point_data_flow(uri.identity(), 1, {}, cancellation);
+    CHECK(data_flow.value.found);
+    const auto verified = manager.verify_call_hierarchy_identity(
+        uri.identity(), 1, helper.value->location.path, helper.value->location.line,
+        helper.value->location.column, helper.value->start_offset, helper.value->cursor_kind,
+        helper.value->name, cancellation);
+    REQUIRE(verified.has_value());
+    CHECK(*verified == helper.generation);
+    CHECK(manager.content_generation(uri.identity(), 1, cancellation) == helper.generation);
 }

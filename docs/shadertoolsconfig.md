@@ -299,9 +299,10 @@ By default HLSL-LSP loads the bundled, pinned DXC runtime. `hlsl.dxcRuntimeDirec
 selects a different compatible DXC runtime for a project without changing the
 bundled default for other workspaces.
 
-DXC IntelliSense is loaded once into the language-server process, so the runtime
-cannot vary per file. The selection therefore has *process-wide, workspace-level*
-semantics:
+DXC IntelliSense is loaded only in the language server's isolated analysis
+worker processes. Every worker is launched with the same selected runtime, so
+the runtime cannot vary per file. The selection therefore has *process-wide,
+workspace-level* semantics:
 
 - The value is a directory that must contain the platform DXC compiler library
   (`dxcompiler.dll`, plus `dxil.dll`, on Windows; `libdxcompiler.so` on Linux).

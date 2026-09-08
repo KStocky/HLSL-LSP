@@ -7,6 +7,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -46,6 +47,18 @@ using Clock = std::chrono::steady_clock;
             .configuration = {}};
 }
 
+[[nodiscard]] std::string generated_large_shader() {
+    constexpr std::size_t function_count = 4096;
+    std::ostringstream source;
+    for (std::size_t index = 0; index < function_count; ++index) {
+        source << "float generated" << index
+               << "(float value) { return value + " << index << ".0; }\n";
+    }
+    source << "float4 main() : SV_Target { return generated" << function_count - 1U
+           << "(1.0).xxxx; }\n";
+    return source.str();
+}
+
 } // namespace
 
 int main() {
@@ -55,6 +68,7 @@ int main() {
         auto source = read_file(shader_path);
         const auto uri = workspace::DocumentUri::from_path(shader_path.string());
         std::atomic_size_t diagnostics{};
+        std::atomic_size_t diagnostic_items{};
         std::vector<std::string> errors;
         analysis::AnalysisOptions options{
             .scheduler = {.worker_count = 1, .queue_capacity = 8},
@@ -66,7 +80,10 @@ int main() {
                                          .max_estimated_bytes =
                                              std::size_t{1024} * 1024U}}};
         analysis::Manager manager{
-            [&diagnostics](const auto&, const auto&, std::uint64_t) { diagnostics.fetch_add(1); },
+            [&diagnostics, &diagnostic_items](const auto&, const auto& items, std::uint64_t) {
+                diagnostics.fetch_add(1);
+                diagnostic_items.fetch_add(items.size());
+            },
             options, {},
             [&errors](std::string_view error) { errors.emplace_back(error); }};
 
@@ -98,12 +115,22 @@ int main() {
             manager.wait_idle();
         }
 
+        const auto generated_source = generated_large_shader();
+        const auto generated_uri =
+            workspace::DocumentUri::from_path((shader_directory / "generated-large.hlsl").string());
+        const auto generated_start = Clock::now();
+        manager.analyze(make_input(generated_uri, 1, generated_source));
+        manager.wait_idle();
+        const auto generated_microseconds = microseconds_since(generated_start);
+
         const auto metrics = manager.metrics();
         std::cout << "{\n"
                   << "  \"coldParseWallMicroseconds\": " << cold_microseconds << ",\n"
                   << "  \"warmCacheWallMicroseconds\": " << warm_microseconds << ",\n"
                   << "  \"reparseWallMicroseconds\": " << reparse_microseconds << ",\n"
                   << "  \"completionWallMicroseconds\": " << completion_microseconds << ",\n"
+                  << "  \"generatedLargeBytes\": " << generated_source.size() << ",\n"
+                  << "  \"generatedLargeWallMicroseconds\": " << generated_microseconds << ",\n"
                   << "  \"parseCount\": " << metrics.parse_count << ",\n"
                   << "  \"reparseCount\": " << metrics.reparse_count << ",\n"
                   << "  \"cacheHits\": " << metrics.cache_hits << ",\n"
@@ -117,7 +144,10 @@ int main() {
                   << "}\n";
 
         const auto structurally_valid =
-            errors.empty() && diagnostics.load() >= 4 && metrics.parse_count >= 3 &&
+            errors.empty() && diagnostics.load() >= 5 && diagnostic_items.load() == 0 &&
+            generated_source.size() >= std::size_t{200} * 1024U &&
+            generated_microseconds < std::uint64_t{30} * 1000U * 1000U &&
+            metrics.parse_count >= 4 &&
             metrics.reparse_count >= 1 && metrics.completion_count == 1 &&
             metrics.cache_hits >= 1 && metrics.cache_misses >= 4 &&
             metrics.cache_evictions >= 1 && metrics.translation_units <= 2 &&

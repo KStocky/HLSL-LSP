@@ -1,7 +1,9 @@
 #include <hlsl_intellisense/lsp/server.h>
 
 #include <charconv>
+#include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <exception>
 #include <iostream>
@@ -29,6 +31,38 @@ namespace {
         return false;
     }
     result = parsed;
+    return true;
+}
+
+void print_usage(std::ostream& output) {
+    output << "Usage: hlsl-lsp [options]\n"
+              "  --disable-semantic-tokens\n"
+              "  --trace-protocol\n"
+              "  --trace-source\n"
+              "  --dxc-runtime <directory>\n"
+              "  --analysis-workers <count>\n"
+              "  --analysis-queue-capacity <count>\n"
+              "  --analysis-background-timeout-ms <milliseconds> (default: 30000)\n"
+              "  --analysis-background-timeout-seconds <seconds>\n"
+              "  --analysis-interactive-timeout-ms <milliseconds> (default: 15000)\n"
+              "  --analysis-interactive-timeout-seconds <seconds>\n"
+              "  --request-workers <count>\n"
+              "  --request-queue-capacity <count>\n"
+              "  --translation-unit-count <count>\n"
+              "  --translation-unit-memory-mb <MiB>\n"
+              "  --include-cache-count <count>\n"
+              "  --include-cache-memory-mb <MiB>\n";
+}
+
+[[nodiscard]] bool duration_from_positive(std::size_t value, std::size_t multiplier,
+                                          std::chrono::milliseconds& result) {
+    using Rep = std::chrono::milliseconds::rep;
+    const auto maximum = static_cast<std::uintmax_t>((std::numeric_limits<Rep>::max)());
+    if (value > maximum / multiplier) {
+        return false;
+    }
+    const auto scaled = static_cast<std::uintmax_t>(value) * multiplier;
+    result = std::chrono::milliseconds{static_cast<Rep>(scaled)};
     return true;
 }
 
@@ -80,6 +114,10 @@ int main(int argc, char* argv[]) {
     hlsl_intellisense::lsp::ServerOptions options;
     for (int index = 1; index < argc; ++index) {
         const std::string_view argument{argv[index]};
+        if (argument == "--help" || argument == "-h") {
+            print_usage(std::cout);
+            return EXIT_SUCCESS;
+        }
         if (argument == "--disable-semantic-tokens") {
             options.semantic_tokens = false;
             continue;
@@ -114,6 +152,18 @@ int main(int argc, char* argv[]) {
             options.analysis.scheduler.worker_count = value;
         } else if (argument == "--analysis-queue-capacity") {
             options.analysis.scheduler.queue_capacity = value;
+        } else if (argument == "--analysis-background-timeout-ms" ||
+                   argument == "--analysis-background-timeout-seconds" ||
+                   argument == "--analysis-interactive-timeout-ms" ||
+                   argument == "--analysis-interactive-timeout-seconds") {
+            const auto seconds = argument.ends_with("-seconds");
+            auto& timeout = argument.starts_with("--analysis-background")
+                                ? options.analysis.budgets.background_timeout
+                                : options.analysis.budgets.interactive_timeout;
+            if (!duration_from_positive(value, seconds ? 1000U : 1U, timeout)) {
+                std::cerr << "HLSL-LSP: duration argument is too large: " << argument << '\n';
+                return EXIT_FAILURE;
+            }
         } else if (argument == "--request-workers") {
             options.request_worker_count = value;
         } else if (argument == "--request-queue-capacity") {

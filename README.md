@@ -404,17 +404,29 @@ them.
 
 `$/cancelRequest` is supported for integer and string request IDs. Queued work
 returns LSP `RequestCancelled` (`-32800`) promptly. DXC exposes no safe
-interrupt primitive for an in-flight COM call, so cancellation can return to
-the client while that call finishes on its owning worker; its result is
-suppressed and the translation unit is not accessed concurrently or destroyed
-early. Shutdown cancels queued and active work, waits for any such DXC call,
-then destroys DXC state on the same worker.
+interrupt primitive for an in-flight COM call, so every analysis scheduler
+worker owns a persistent `hlsl-analysis-worker` child process. All DXC state,
+translation units, reparses, diagnostics, and interactive queries live in that
+child; the language-server process never keeps an in-process DXC fallback.
+Cancellation, superseding edits, close, configuration changes, and shutdown
+terminate a child that is stuck inside DXC. Because one child owns multiple
+hashed roots, terminating it invalidates all of those translation units and
+queues or lazily performs safe reanalysis before they can be queried again.
+
+Initial/background DXC work has a 30 second deadline and interactive requests
+have a 15 second deadline. A timeout, crash, or malformed private-protocol
+reply terminates the exact child, never the language server. Background
+failures publish a generation-safe `hlsl-lsp/analysis-unavailable` diagnostic;
+the next successful analysis replaces it. Interactive failures return an
+explicit retryable JSON-RPC error rather than waiting indefinitely.
 
 Defaults can be tuned with positive integer command-line arguments:
 
 ```text
 --analysis-workers 2
 --analysis-queue-capacity 64
+--analysis-background-timeout-ms 30000
+--analysis-interactive-timeout-ms 15000
 --request-workers 4
 --request-queue-capacity 64
 --translation-unit-count 16
@@ -422,6 +434,11 @@ Defaults can be tuned with positive integer command-line arguments:
 --include-cache-count 512
 --include-cache-memory-mb 8
 ```
+
+The timeout options also accept
+`--analysis-background-timeout-seconds` and
+`--analysis-interactive-timeout-seconds`. `hlsl-lsp --help` lists all
+supported command-line options. Every duration must be a positive integer.
 
 Queue, entry, and memory capacities must be at least the analysis worker count.
 The translation-unit memory budget must also provide at least the 4 MiB opaque
@@ -433,11 +450,11 @@ file changes do not reparse unrelated completed roots. Macro-computed includes
 and roots whose first analysis is still pending conservatively depend on all
 open documents until DXC analysis establishes precise metadata.
 
-The `--dxc-runtime <directory>` argument selects the DXC runtime the process
-loads instead of the bundled default; the editor clients pass it when a runtime
-is configured. The directory must contain the platform DXC compiler library and
-is validated at startup. The active runtime path and version are reported by the
-`hlsl/dxcRuntime` request.
+The `--dxc-runtime <directory>` argument selects the DXC runtime every isolated
+analysis worker loads instead of the bundled default; the editor clients pass it
+when a runtime is configured. The directory must contain the platform DXC
+compiler library and is validated at startup. The active runtime path and
+version are reported by the `hlsl/dxcRuntime` request.
 
 The checked-in representative shader benchmark reports cold parse, warm cache,
 reparse, completion, hit/miss/eviction, and estimated-memory metrics:
@@ -469,9 +486,10 @@ By default HLSL-LSP loads the bundled, pinned DXC runtime. A project can select
 a different compatible DXC runtime with the `hlsl.dxcRuntimeDirectory`
 `shadertoolsconfig.json` setting, the Visual Studio Code
 `hlsl.dxcRuntimeDirectory` setting, or Visual Studio's **Tools > Options >
-HLSL-LSP > DXC runtime directory**. Because DXC IntelliSense is loaded once per
-process, the selection is process-wide, is validated before a controlled
-restart, and reports invalid or conflicting choices without looping. See the
+HLSL-LSP > DXC runtime directory**. Every isolated analysis worker uses the same
+selection, so it is process-wide at the server configuration level, is
+validated before a controlled restart, and reports invalid or conflicting
+choices without looping. See the
 [DXC runtime selection](docs/shadertoolsconfig.md#dxc-runtime-selection) section
 for precedence, workspace-relative paths, and diagnostics.
 
