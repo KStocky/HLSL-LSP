@@ -1447,7 +1447,8 @@ TEST_CASE("References and rename preserve identity across open roots and disk in
           "[lsp][references][rename]") {
     TestDirectory directory;
     const auto include_path = directory.path() / "shared.hlsli";
-    const std::string include_text = "static const float sharedValue = 1.0;\n";
+    const std::string include_text =
+        "// \xC3\x97 \xF0\x9F\x98\x80\r\nstatic const float sharedValue = 1.0;\r\n";
     {
         std::ofstream include{include_path};
         REQUIRE(include);

@@ -3453,6 +3453,13 @@ auto TranslationUnit::skipped_ranges() const -> std::vector<SourceRange> {
     if (!implementation_) {
         throw std::logic_error{"Translation unit is not initialized"};
     }
+    const auto has_rewritten_sources = std::ranges::any_of(
+        implementation_->sources, [](const auto& source) { return source.rewritten; });
+    if (has_rewritten_sources && !supports_skipped_ranges_for_rewritten_sources()) {
+        throw RuntimeError{
+            "DXC skipped-range analysis is unavailable for rewritten source buffers on this "
+            "platform"};
+    }
 
     std::vector<SourceRange> result;
     for (const auto& source : implementation_->sources) {
@@ -3696,14 +3703,17 @@ auto TranslationUnit::entry_point_data_flow(
     }
 
     ComPtr<IDxcCursor> root;
-    check(implementation_->translation_unit->GetCursor(root.put()), "GetCursor");
-    std::vector<CompilerSkippedRange> skipped_ranges;
     const auto has_rewritten_sources = std::ranges::any_of(
         implementation_->sources, [](const auto& source) { return source.rewritten; });
-    if (!has_rewritten_sources || supports_skipped_ranges_for_rewritten_sources()) {
-        skipped_ranges = compiler_skipped_ranges(*implementation_->translation_unit.get(),
-                                                 implementation_->sources);
+    if (has_rewritten_sources && !supports_skipped_ranges_for_rewritten_sources()) {
+        result.explanation =
+            "Entry-point data flow is unavailable because DXC skipped-range analysis is unsafe "
+            "for rewritten source buffers on this platform";
+        return result;
     }
+    check(implementation_->translation_unit->GetCursor(root.put()), "GetCursor");
+    auto skipped_ranges =
+        compiler_skipped_ranges(*implementation_->translation_unit.get(), implementation_->sources);
     std::vector<ComPtr<IDxcCursor>> all_definitions;
     std::unordered_set<std::string> seen_definitions;
     std::uint64_t definition_collection_node_count = 0;

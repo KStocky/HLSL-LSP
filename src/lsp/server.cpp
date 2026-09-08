@@ -2672,7 +2672,8 @@ Json Server::references(const std::optional<Json>& params,
         if (!include_declaration &&
             target.identity() ==
                 workspace::DocumentUri::from_path(result.target.location.path).identity() &&
-            reference.start_offset == result.target.location.offset) {
+            reference.location.line == result.target.location.line &&
+            reference.location.column == result.target.location.column) {
             continue;
         }
         std::string text;

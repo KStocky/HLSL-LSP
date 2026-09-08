@@ -327,10 +327,26 @@ TEST_CASE("DXC IntelliSense reports compiler-skipped preprocessor ranges", "[dxc
 
 TEST_CASE("DXC exposes rewritten-source skipped-range capability",
           "[dxc][preprocessor][platform]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.entry_point = "main";
+    const std::string source = "#if 1\n"
+                               "float4 main() : SV_Target { return 1.0.xxxx; }\n"
+                               "#else\n"
+                               "float4 main() : SV_Target { return 0.0.xxxx; }\n"
+                               "#endif\n";
+    auto translation_unit = intellisense.parse(
+        shader_path, {{.path = shader_path, .text = source, .rewritten = true}}, options);
 #ifdef _WIN32
     CHECK(hlsl_intellisense::dxc::supports_skipped_ranges_for_rewritten_sources());
+    CHECK_FALSE(translation_unit.skipped_ranges().empty());
+    CHECK(translation_unit.entry_point_data_flow().found);
 #else
     CHECK_FALSE(hlsl_intellisense::dxc::supports_skipped_ranges_for_rewritten_sources());
+    CHECK_THROWS_AS(translation_unit.skipped_ranges(), hlsl_intellisense::dxc::RuntimeError);
+    const auto flow = translation_unit.entry_point_data_flow();
+    CHECK_FALSE(flow.found);
+    CHECK(flow.explanation.find("unavailable") != std::string::npos);
 #endif
 }
 
