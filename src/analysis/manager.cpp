@@ -732,6 +732,19 @@ std::vector<dxc::Symbol> Manager::symbols(std::string root_identity, std::int64_
         [](Impl::Entry& entry) { return entry.translation_unit.symbols(); });
 }
 
+std::vector<dxc::Symbol> Manager::document_symbols(std::string root_identity, std::int64_t version,
+                                                   const json_rpc::CancellationToken& cancellation,
+                                                   bool& truncated) {
+    constexpr std::size_t max_document_symbols = 1024;
+    return implementation_->query<std::vector<dxc::Symbol>>(
+        std::move(root_identity), version, cancellation,
+        [cancellation, &truncated](Impl::Entry& entry) {
+            return entry.translation_unit.symbols(
+                entry.root_path, [cancellation] { cancellation.throw_if_cancellation_requested(); },
+                max_document_symbols, &truncated);
+        });
+}
+
 WithGeneration<std::optional<dxc::CallableSymbol>>
 Manager::callable_at(std::string root_identity, std::int64_t version, std::string path,
                      std::uint32_t line, std::uint32_t column,

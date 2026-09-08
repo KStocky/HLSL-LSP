@@ -623,8 +623,12 @@ class TaskRanges final {
            kind == DxcCursor_ClassTemplatePartialSpecialization;
 }
 
-[[nodiscard]] auto cursor_symbols(IDxcCursor& cursor, std::uint32_t depth) -> std::vector<Symbol> {
-    if (depth >= 64) {
+[[nodiscard]] auto
+cursor_symbols(IDxcCursor& cursor, std::uint32_t depth, std::string_view requested_path,
+               const std::function<void()>& cancellation_checkpoint, std::uint64_t& node_count,
+               std::size_t max_symbols, std::size_t& symbol_count, bool& truncated)
+    -> std::vector<Symbol> {
+    if (depth >= 64 || truncated) {
         return {};
     }
 
@@ -636,6 +640,12 @@ class TaskRanges final {
         check(cursor.GetChildren(skip, page_size, &child_count, &raw_children), "GetChildren");
         TaskCursors children{raw_children, child_count};
         for (unsigned index = 0; index < child_count; ++index) {
+            if (truncated) {
+                break;
+            }
+            if ((++node_count % 512) == 0 && cancellation_checkpoint) {
+                cancellation_checkpoint();
+            }
             auto* child = children[index];
             if (child == nullptr) {
                 continue;
@@ -652,16 +662,6 @@ class TaskRanges final {
                 continue;
             }
 
-            char* spelling{};
-            check(child->GetSpelling(&spelling), "GetSpelling");
-            TaskString owned_spelling{spelling};
-            auto nested = is_container ? cursor_symbols(*child, depth + 1) : std::vector<Symbol>{};
-            if (owned_spelling.view().empty()) {
-                result.insert(result.end(), std::make_move_iterator(nested.begin()),
-                              std::make_move_iterator(nested.end()));
-                continue;
-            }
-
             ComPtr<IDxcSourceLocation> location;
             check(child->GetLocation(location.put()), "GetLocation");
             BOOL location_is_null{};
@@ -669,16 +669,43 @@ class TaskRanges final {
             if (location_is_null != FALSE) {
                 continue;
             }
-
+            const auto source_location = make_source_location(*location.get());
             ComPtr<IDxcSourceRange> extent;
             check(child->GetExtent(extent.put()), "GetExtent");
+            const auto source_range = safe_source_range(extent.get());
+            const auto& source_path =
+                source_range.has_value() ? source_range->start.path : source_location.path;
+            if (!requested_path.empty() && source_path != requested_path) {
+                continue;
+            }
+
+            char* spelling{};
+            check(child->GetSpelling(&spelling), "GetSpelling");
+            TaskString owned_spelling{spelling};
+            if (!owned_spelling.view().empty()) {
+                if (symbol_count >= max_symbols) {
+                    truncated = true;
+                    break;
+                }
+                ++symbol_count;
+            }
+            auto nested = is_container ? cursor_symbols(*child, depth + 1, requested_path,
+                                                        cancellation_checkpoint, node_count,
+                                                        max_symbols, symbol_count, truncated)
+                                       : std::vector<Symbol>{};
+            if (owned_spelling.view().empty()) {
+                result.insert(result.end(), std::make_move_iterator(nested.begin()),
+                              std::make_move_iterator(nested.end()));
+                continue;
+            }
+
             unsigned start_offset{};
             unsigned end_offset{};
             check(extent->GetOffsets(&start_offset, &end_offset), "GetOffsets");
             result.push_back(Symbol{
                 .name = std::string{owned_spelling.view()},
                 .cursor_kind = static_cast<std::uint32_t>(kind),
-                .location = make_source_location(*location.get()),
+                .location = std::move(source_location),
                 .start_offset = start_offset,
                 .end_offset = end_offset,
                 .extent = safe_source_range(extent.get()),
@@ -3432,10 +3459,21 @@ auto TranslationUnit::macro_definitions() const -> std::vector<MacroDefinition> 
     return result;
 }
 
-auto TranslationUnit::symbols() const -> std::vector<Symbol> {
+auto TranslationUnit::symbols(std::string_view path,
+                              const std::function<void()>& cancellation_checkpoint,
+                              std::size_t max_symbols, bool* truncated) const
+    -> std::vector<Symbol> {
     ComPtr<IDxcCursor> root;
     check(implementation_->translation_unit->GetCursor(root.put()), "GetCursor");
-    return cursor_symbols(*root.get(), 0);
+    std::uint64_t node_count{};
+    std::size_t symbol_count{};
+    bool collection_truncated{};
+    auto result = cursor_symbols(*root.get(), 0, path, cancellation_checkpoint, node_count,
+                                 max_symbols, symbol_count, collection_truncated);
+    if (truncated != nullptr) {
+        *truncated = collection_truncated;
+    }
+    return result;
 }
 
 auto TranslationUnit::callable_at(std::string_view path, std::uint32_t line,

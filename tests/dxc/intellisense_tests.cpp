@@ -1085,6 +1085,12 @@ TEST_CASE("DXC IntelliSense extracts hierarchical declaration symbols",
     CHECK(find_symbol(find_symbol, symbols, "main") != nullptr);
     CHECK(material->end_offset > material->start_offset);
     CHECK(material->location.path == shader_path);
+
+    bool truncated{};
+    const auto limited = translation_unit.symbols(shader_path, {}, 1, &truncated);
+    CHECK(truncated);
+    REQUIRE(limited.size() == 1);
+    CHECK(limited.front().name == "Mode");
 }
 
 TEST_CASE("DXC IntelliSense reports descriptor heaps below Shader Model 6.6",

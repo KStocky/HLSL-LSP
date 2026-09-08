@@ -575,6 +575,41 @@ TEST_CASE("Document symbols convert DXC UTF-16 offsets in non-ASCII sources",
     CHECK((*main)["selectionRange"]["start"] == Json{{"line", 2}, {"character", 7}});
 }
 
+TEST_CASE("Document symbols truncate compiler-expanded declaration floods",
+          "[lsp][symbols][limits][integration]") {
+    const auto uri = shader_uri();
+    std::string source;
+    for (std::size_t index = 0; index < 1100; ++index) {
+        source += "static float value" + std::to_string(index) + ";\n";
+    }
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    hlsl_intellisense::lsp::Server server{
+        [&notifications](const auto& value) { notifications.push_back(value); }};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params =
+            Json{{"textDocument",
+                  {{"uri", uri}, {"languageId", "hlsl"}, {"version", 1}, {"text", source}}}}}));
+
+    const auto response = server.handle(
+        hlsl_intellisense::json_rpc::Request{.id = std::int64_t{2},
+                                             .method = "textDocument/documentSymbol",
+                                             .params = Json{{"textDocument", {{"uri", uri}}}}});
+    REQUIRE(response.has_value());
+    const auto* result = std::get_if<hlsl_intellisense::json_rpc::Response>(&*response);
+    REQUIRE(result != nullptr);
+    CHECK(result->result.size() == 1024);
+    CHECK(std::ranges::any_of(notifications, [](const auto& notification) {
+        return notification.method == "window/logMessage" && notification.params.has_value() &&
+               (*notification.params)["message"].template get<std::string>().find("truncated") !=
+                   std::string::npos;
+    }));
+}
+
 TEST_CASE("Server provides semantic tokens and definitions", "[lsp][navigation][integration]") {
     const auto uri = shader_uri();
     const auto source = valid_hlsl();

@@ -4446,8 +4446,9 @@ Json Server::document_symbols(const std::optional<Json>& params,
 
     Json result = Json::array();
     analyze_and_publish(snapshot.uri());
-    const auto symbols = analysis_.symbols(snapshot.document_uri().identity(), snapshot.version(),
-                                           context.cancellation);
+    bool truncated{};
+    const auto symbols = analysis_.document_symbols(
+        snapshot.document_uri().identity(), snapshot.version(), context.cancellation, truncated);
     {
         std::scoped_lock state_lock{state_mutex_};
         if (!documents_.contains(snapshot.uri()) ||
@@ -4456,6 +4457,14 @@ Json Server::document_symbols(const std::optional<Json>& params,
         }
     }
     append_document_symbols(result, symbols, snapshot);
+    if (truncated) {
+        sender_(json_rpc::Notification{
+            .method = "window/logMessage",
+            .params =
+                Json{{"type", 2},
+                     {"message", "Document symbols were truncated at 1024 declarations to keep the "
+                                 "request responsive."}}});
+    }
     return result;
 }
 

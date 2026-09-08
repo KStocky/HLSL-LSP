@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -951,7 +952,10 @@ class TranslationUnit final {
     // source in the current unsaved translation-unit snapshot.
     [[nodiscard]] std::vector<SourceRange> skipped_ranges() const;
     [[nodiscard]] std::vector<MacroDefinition> macro_definitions() const;
-    [[nodiscard]] std::vector<Symbol> symbols() const;
+    [[nodiscard]] std::vector<Symbol>
+    symbols(std::string_view path = {}, const std::function<void()>& cancellation_checkpoint = {},
+            std::size_t max_symbols = (std::numeric_limits<std::size_t>::max)(),
+            bool* truncated = nullptr) const;
 
     // Resolves the callable declaration/definition at `path`/`line`/`column`
     // (a call site or the callable's own name), for
