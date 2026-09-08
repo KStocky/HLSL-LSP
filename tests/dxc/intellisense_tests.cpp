@@ -4105,12 +4105,13 @@ TEST_CASE("Entry-point data flow bounds definition collection independently of t
     REQUIRE(bounded.found);
     CHECK(bounded.truncated);
     CHECK(bounded.definitions_truncated);
-    // The reachable subgraph is tiny and entirely visited within budget:
-    // this specific truncation cause must be independent of the other
-    // three.
+    // The reachable subgraph is tiny and entirely visited within budget.
+    // Unused-declaration scans are deliberately omitted once the complete
+    // definition universe is unavailable.
     CHECK_FALSE(bounded.functions_visited_truncated);
     CHECK_FALSE(bounded.global_accesses_truncated);
-    CHECK_FALSE(bounded.unused_declarations_truncated);
+    CHECK(bounded.unused_declarations_truncated);
+    CHECK(bounded.unused_declarations.empty());
     const auto has_name = [](const auto& candidates, std::string_view name) {
         return std::ranges::any_of(candidates,
                                    [name](const auto& symbol) { return symbol.name == name; });
