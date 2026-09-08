@@ -230,6 +230,7 @@ if(BUILD_TESTING)
         hlsl_project_options)
     target_compile_definitions(hlsl-analysis-benchmark PRIVATE
         HLSL_BENCHMARK_SHADER_DIR="${PROJECT_SOURCE_DIR}/benchmarks/shaders")
+    add_dependencies(hlsl-analysis-benchmark hlsl-analysis-worker)
     hlsl_enable_clang_tidy(hlsl-analysis-benchmark)
     hlsl_copy_dxc_runtime(hlsl-analysis-benchmark)
 

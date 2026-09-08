@@ -50,7 +50,10 @@ class Scheduler final {
 
     [[nodiscard]] bool submit(std::string root, std::int64_t version, WorkPriority priority,
                               json_rpc::CancellationToken cancellation, Work work,
-                              const std::function<void()>& admitted = {});
+                              const std::function<void()>& admitted = {},
+                              // Recovery queued by a task already running for
+                              // this root must not cancel that same task.
+                              bool supersede_running = true);
     void cancel_root(std::string_view root);
     void wait_idle();
     void shutdown();

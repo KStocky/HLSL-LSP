@@ -57,6 +57,10 @@ class WorkerProcess final {
                                          std::chrono::milliseconds timeout,
                                          const json_rpc::CancellationToken& cancellation);
 
+    // Discards the current child without permanently stopping this controller.
+    // The next request launches a clean replacement.
+    void reset() noexcept;
+
     // Attempts the protocol shutdown handshake, then forcibly terminates only
     // this controller's child if it does not exit within the configured bound.
     void shutdown() noexcept;

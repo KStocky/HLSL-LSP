@@ -4,6 +4,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <nlohmann/json.hpp>
 
+#include <cstdint>
 #include <sstream>
 #include <string>
 
@@ -30,7 +31,9 @@ void write_request(std::stringstream& input, std::uint64_t id, std::string metho
 }
 
 [[nodiscard]] Json analyze_params(std::string source) {
+    const auto cache_key = source;
     return Json{{"rootIdentity", "file:///worker-test.hlsl"},
+                {"cacheKey", cache_key},
                 {"path", "worker-test.hlsl"},
                 {"sources", Json::array({Json{{"path", "worker-test.hlsl"},
                                               {"text", std::move(source)},
@@ -62,19 +65,14 @@ TEST_CASE("Analysis worker retains and reparses translation units",
     json_rpc::FrameReader reader{output, analysis::analysis_worker_max_payload_size};
     const auto first = read_response(reader);
     CHECK(first.at("id") == 1);
-    CHECK_FALSE(first.at("result").at("reparsed").get<bool>());
+    CHECK(first.at("result").at("kind").get<std::uint8_t>() ==
+          static_cast<std::uint8_t>(analysis::WorkerAnalysisKind::parsed));
     CHECK_FALSE(first.at("result").at("diagnostics").empty());
 
     const auto second = read_response(reader);
     CHECK(second.at("id") == 2);
-#ifdef _WIN32
-    CHECK(second.at("result").at("reparsed").get<bool>());
-#else
-    // TranslationUnit::reparse rebuilds on Linux because pinned DXC crashes
-    // in its native reparse path, but the worker protocol still retains the
-    // logical translation-unit entry.
-    CHECK(second.at("result").at("reparsed").get<bool>());
-#endif
+    CHECK(second.at("result").at("kind").get<std::uint8_t>() ==
+          static_cast<std::uint8_t>(analysis::WorkerAnalysisKind::reparsed));
     CHECK(second.at("result").at("diagnostics").empty());
 
     const auto shutdown = read_response(reader);

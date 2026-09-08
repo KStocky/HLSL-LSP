@@ -41,7 +41,7 @@ Scheduler::~Scheduler() { shutdown(); }
 
 bool Scheduler::submit(std::string root, std::int64_t version, WorkPriority priority,
                        json_rpc::CancellationToken cancellation, Work work,
-                       const std::function<void()>& admitted) {
+                       const std::function<void()>& admitted, bool supersede_running) {
     if (root.empty() || !work) {
         throw std::invalid_argument{"Scheduled work requires a root and callable"};
     }
@@ -68,9 +68,11 @@ bool Scheduler::submit(std::string root, std::int64_t version, WorkPriority prio
                 if (admitted) {
                     admitted();
                 }
-                if (const auto running = worker.running.find(root);
-                    running != worker.running.end()) {
-                    running->second.cancel();
+                if (supersede_running) {
+                    if (const auto running = worker.running.find(root);
+                        running != worker.running.end()) {
+                        running->second.cancel();
+                    }
                 }
                 pending->cancellation.cancel();
                 *pending = Task{.root = std::move(root),
@@ -109,7 +111,7 @@ bool Scheduler::submit(std::string root, std::int64_t version, WorkPriority prio
     if (admitted) {
         admitted();
     }
-    if (priority == WorkPriority::background) {
+    if (priority == WorkPriority::background && supersede_running) {
         if (const auto running = worker.running.find(root); running != worker.running.end()) {
             running->second.cancel();
         }

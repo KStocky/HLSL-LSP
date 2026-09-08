@@ -953,6 +953,18 @@ class WorkerProcess::Impl final {
         child->close_pipes();
     }
 
+    void reset() noexcept {
+        std::shared_ptr<ChildProcess> child;
+        {
+            std::scoped_lock lock{child_mutex_};
+            child = std::exchange(child_, nullptr);
+        }
+        if (child) {
+            child->terminate();
+            child->close_pipes();
+        }
+    }
+
   private:
     [[nodiscard]] std::shared_ptr<ChildProcess> ensure_child() {
         std::scoped_lock lock{child_mutex_};
@@ -1108,6 +1120,13 @@ Json WorkerProcess::request(std::string_view method, Json params, std::chrono::m
                             const json_rpc::CancellationToken& cancellation) {
     const auto implementation = impl_;
     return implementation->request(method, std::move(params), timeout, cancellation);
+}
+
+void WorkerProcess::reset() noexcept {
+    const auto implementation = impl_;
+    if (implementation) {
+        implementation->reset();
+    }
 }
 
 void WorkerProcess::shutdown() noexcept {

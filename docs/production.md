@@ -15,15 +15,23 @@ logs; do not use it when logs may be uploaded or shared.
 
 ## Crash diagnostics
 
-The executable installs a minimal native crash breadcrumb before loading DXC.
-On Windows, fatal SEH failures write to standard error and remain available to
-Windows Error Reporting. On Linux, fatal signals write to standard error and
-are re-raised so the normal core-dump policy remains effective. Set
-`ulimit -c unlimited` before launching the editor when a Linux core is needed.
-The handlers deliberately do not attempt in-process recovery from a DXC crash.
+The language-server executable installs a minimal native crash breadcrumb. DXC
+itself is loaded only in persistent `hlsl-analysis-worker` child processes.
+Each analysis scheduler owner hashes to exactly one child, which retains that
+owner's translation units and serves every compiler query. A DXC crash,
+deadline, cancellation, or malformed private-protocol reply terminates that
+exact child and invalidates every parent cache entry assigned to it; there is
+no in-process compiler fallback that can hang the language server.
 
-Ordinary C++ and protocol failures are reported through the existing top-level
-error path and return a nonzero process status.
+Background failures publish a stale-safe
+`hlsl-lsp/analysis-unavailable` diagnostic and retain dependency metadata for
+future invalidation. A later successful reanalysis clears the diagnostic.
+Interactive failures return a JSON-RPC cancellation/internal error and
+schedule or require safe reconstruction instead of returning guessed data.
+
+Top-level server startup and LSP framing failures are reported through the
+existing error path and return a nonzero process status. Private analysis-worker
+failures are contained and recovered as described above.
 
 ## Resource limits
 
@@ -33,6 +41,8 @@ All queues and caches are bounded. Defaults and command-line overrides are:
 |---|---:|---|
 | Analysis workers | 2 | `--analysis-workers N` |
 | Analysis queue | 64 | `--analysis-queue-capacity N` |
+| Background DXC deadline | 30 seconds | `--analysis-background-timeout-ms N` or `--analysis-background-timeout-seconds N` |
+| Interactive DXC deadline | 15 seconds | `--analysis-interactive-timeout-ms N` or `--analysis-interactive-timeout-seconds N` |
 | Request workers | 4 | `--request-workers N` |
 | Request queue | 64 | `--request-queue-capacity N` |
 | Translation units | 16 | `--translation-unit-count N` |
@@ -41,9 +51,11 @@ All queues and caches are bounded. Defaults and command-line overrides are:
 | Include metadata estimate | 8 MiB | `--include-cache-memory-mb N` |
 | JSON-RPC payload | 16 MiB | fixed safety limit |
 | JSON-RPC header line | 8 KiB | fixed safety limit |
+| Private analysis-worker payload | 64 MiB | fixed safety limit |
 
 Every numeric override must be positive, cache capacity must remain sufficient
-for every worker, and overflowing memory values are rejected before startup.
+for every worker, and overflowing memory or duration values are rejected before
+startup. `hlsl-lsp --help` prints the complete option list.
 Translation-unit memory is an estimate because DXC does not expose its native
 allocation size.
 
@@ -102,6 +114,13 @@ standalone HLSL documents and does not parse or map embedded `HLSLPROGRAM`
 regions in `.shader` files. `tests/corpus/unity/Embedded.shader` records that
 boundary but is not sent directly to DXC. Supporting it requires a separate
 host-language parser and source mapping layer.
+
+The structural analysis benchmark also generates a compiler-clean shader with
+thousands of declarations at runtime. This covers ordinary large-translation-
+unit latency and diagnostic quality without checking engine-owned shader
+source into the repository. Deterministic timeout, crash, cancellation, and
+worker-replacement tests use the private test helper because a real compiler
+hang must not be required for a reliable test suite.
 
 ## Reproducible artifacts
 

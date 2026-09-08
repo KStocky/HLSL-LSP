@@ -37,6 +37,7 @@ void test("an explicit server and its runtime take precedence over the bundle", 
   const command = path.join(workspace, "tools", "hlsl-lsp.exe");
   fileSystem.add(
     command,
+    path.join(path.dirname(command), "hlsl-analysis-worker.exe"),
     path.join(path.dirname(command), "dxcompiler.dll"),
     path.join(path.dirname(command), "dxil.dll"),
   );
@@ -51,7 +52,7 @@ void test("an explicit server and its runtime take precedence over the bundle", 
 
   assert.equal(runtime.command, command);
   assert.equal(runtime.source, "configured");
-  assert.equal(runtime.runtimeFiles.length, 2);
+  assert.equal(runtime.runtimeFiles.length, 3);
 });
 
 void test("the Windows x64 bundle requires the executable and both DXC files", async () => {
@@ -60,6 +61,7 @@ void test("the Windows x64 bundle requires the executable and both DXC files", a
   const directory = path.join(extensionPath, "server", "win32-x64");
   fileSystem.add(
     path.join(directory, "hlsl-lsp.exe"),
+    path.join(directory, "hlsl-analysis-worker.exe"),
     path.join(directory, "dxcompiler.dll"),
   );
 
@@ -92,7 +94,8 @@ void test("the Linux x64 bundle requires an executable DXC runtime", async () =>
   const extensionPath = path.resolve("extension");
   const directory = path.join(extensionPath, "server", "linux-x64");
   const command = path.join(directory, "hlsl-lsp");
-  fileSystem.add(command);
+  const worker = path.join(directory, "hlsl-analysis-worker");
+  fileSystem.add(command, worker);
   fileSystem.inaccessible.add(path.normalize(command));
 
   await assert.rejects(
@@ -131,6 +134,7 @@ void test("the Linux x64 bundle requires an executable DXC runtime", async () =>
   assert.equal(runtime.command, command);
   assert.equal(runtime.source, "bundled");
   assert.deepEqual(runtime.runtimeFiles, [
+    worker,
     path.join(directory, "libdxcompiler.so"),
   ]);
 });
@@ -138,7 +142,8 @@ void test("the Linux x64 bundle requires an executable DXC runtime", async () =>
 void test("an external Linux server may resolve DXC through its loader", async () => {
   const fileSystem = new FakeFileSystem();
   const command = path.resolve("tools", "hlsl-lsp");
-  fileSystem.add(command);
+  const worker = path.join(path.dirname(command), "hlsl-analysis-worker");
+  fileSystem.add(command, worker);
 
   const runtime = await resolveServerRuntime(command, {
     platform: "linux",
@@ -148,7 +153,7 @@ void test("an external Linux server may resolve DXC through its loader", async (
     fileSystem,
   });
   assert.equal(runtime.source, "configured");
-  assert.deepEqual(runtime.runtimeFiles, []);
+  assert.deepEqual(runtime.runtimeFiles, [worker]);
 });
 
 void test("a relative external path requires a workspace", async () => {

@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -1783,6 +1784,90 @@ TEST_CASE("Server applies workspace configuration to DXC analysis",
     REQUIRE(notifications.size() == 1);
     CHECK(notifications.front().method == "textDocument/publishDiagnostics");
     CHECK((*notifications.front().params)["diagnostics"].empty());
+}
+
+TEST_CASE("Server publishes and clears generation-safe analysis unavailable diagnostics",
+          "[lsp][analysis][worker][timeout][diagnostics]") {
+    TestDirectory directory;
+    const auto document = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "timeout.hlsl").string());
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    hlsl_intellisense::lsp::ServerOptions options;
+    options.analysis.worker_executable = HLSL_TEST_WORKER_HELPER;
+    options.analysis.budgets.background_timeout = std::chrono::milliseconds{250};
+    hlsl_intellisense::lsp::Server server{
+        [&notifications](const auto& value) { notifications.push_back(value); }, {}, options};
+
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params = Json{{"textDocument",
+                        {{"uri", document.uri()},
+                         {"languageId", "hlsl"},
+                         {"version", 1},
+                         {"text", "// HLSL_TEST_BACKGROUND_HANG\n"}}}}}));
+
+    REQUIRE(notifications.size() == 1);
+    REQUIRE(notifications.front().method == "textDocument/publishDiagnostics");
+    const auto& unavailable = (*notifications.front().params)["diagnostics"];
+    REQUIRE(unavailable.size() == 1);
+    CHECK(unavailable[0]["code"] == "hlsl-lsp/analysis-unavailable");
+    CHECK(unavailable[0]["source"] == "hlsl-lsp");
+    CHECK(unavailable[0]["data"]["reason"] == "timedOut");
+    CHECK(unavailable[0]["data"]["version"] == 1);
+
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didChange",
+        .params = Json{
+            {"textDocument", {{"uri", document.uri()}, {"version", 2}}},
+            {"contentChanges",
+             Json::array({Json{{"text", "float4 main() : SV_Target { return 1.0.xxxx; }\n"}}})}}}));
+
+    REQUIRE(notifications.size() == 2);
+    REQUIRE(notifications.back().method == "textDocument/publishDiagnostics");
+    CHECK((*notifications.back().params)["version"] == 2);
+    CHECK((*notifications.back().params)["diagnostics"].empty());
+}
+
+TEST_CASE("LSP shutdown promptly terminates pathological background analysis",
+          "[lsp][analysis][worker][shutdown]") {
+    TestDirectory directory;
+    const auto path = directory.path() / "shutdown.hlsl";
+    const auto document = hlsl_intellisense::workspace::DocumentUri::from_path(path.string());
+    hlsl_intellisense::lsp::ServerOptions options;
+    options.background_analysis = true;
+    options.analysis.worker_executable = HLSL_TEST_WORKER_HELPER;
+    options.analysis.budgets.background_timeout = std::chrono::seconds{10};
+    hlsl_intellisense::lsp::Server server{[](const auto&) {}, {}, options};
+
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params = Json{{"textDocument",
+                        {{"uri", document.uri()},
+                         {"languageId", "hlsl"},
+                         {"version", 1},
+                         {"text", "// HLSL_TEST_BACKGROUND_HANG\n"}}}}}));
+
+    const auto entered = std::filesystem::path{path.string() + ".worker-entered"};
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{2};
+    while (!std::filesystem::exists(entered) && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds{2});
+    }
+    REQUIRE(std::filesystem::exists(entered));
+
+    const auto started = std::chrono::steady_clock::now();
+    const auto result = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{2}, .method = "shutdown", .params = std::nullopt});
+    REQUIRE(result.has_value());
+    CHECK(std::chrono::steady_clock::now() - started < std::chrono::seconds{2});
+    server.wait_for_analysis();
 }
 
 TEST_CASE("Server resolves virtual include mappings for DXC",
@@ -3875,9 +3960,9 @@ TEST_CASE("Server rejects hlsl/compilationInfo for invalid or unopened documents
 
 TEST_CASE("Server supersedes an in-flight hlsl/compilationInfo request when the document changes",
           "[lsp][compilation-info][safety]") {
-    // A concurrent edit for the same root cancels the in-flight interactive
-    // work (mirroring memory_layout/hover), so the request surfaces as
-    // RequestCancelled rather than completing against stale content.
+    // A concurrent edit for the same root supersedes the in-flight interactive
+    // work (distinct from an explicit $/cancelRequest), so the request surfaces
+    // as ContentModified rather than completing against stale content.
     const auto uri = shader_uri();
     auto hooks = std::make_shared<hlsl_intellisense::analysis::AnalysisHooks>();
     std::promise<void> entered;
@@ -3919,7 +4004,7 @@ TEST_CASE("Server supersedes an in-flight hlsl/compilationInfo request when the 
     REQUIRE(result.has_value());
     const auto* error = std::get_if<hlsl_intellisense::json_rpc::ErrorResponse>(&*result);
     REQUIRE(error != nullptr);
-    CHECK(error->error.code == hlsl_intellisense::json_rpc::request_cancelled_code);
+    CHECK(error->error.code == hlsl_intellisense::json_rpc::content_modified_code);
     server.wait_for_analysis();
 }
 
