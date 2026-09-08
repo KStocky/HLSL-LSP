@@ -1308,13 +1308,13 @@ compiler_skipped_ranges(IDxcTranslationUnit& translation_unit,
     unsigned start{};
     unsigned end{};
     check(extent.GetOffsets(&start, &end), "GetOffsets");
-    return std::ranges::any_of(ranges, [&source_range, start, end](const auto& range) {
+    return std::ranges::any_of(ranges, [&source_range, start](const auto& range) {
         if (range.path != source_range->start.path) {
             return false;
         }
         // Compare DXC offsets only with other DXC offsets. Both can drift from
         // the submitted source text, but share the compiler's internal coordinate space.
-        return start < range.end && end > range.start;
+        return start >= range.start && start < range.end;
     });
 }
 
@@ -1434,6 +1434,54 @@ void collect_callable_definitions(IDxcCursor& cursor, std::vector<ComPtr<IDxcCur
     }
     const auto parent_kind = cursor_kind(*parent.get());
     return !type_cursor(parent_kind);
+}
+
+void collect_named_entry_point_candidates(IDxcCursor& cursor, std::string_view name,
+                                          std::span<const CompilerSkippedRange> skipped_ranges,
+                                          const std::function<void()>& cancellation_checkpoint,
+                                          std::uint32_t depth, std::uint64_t& node_count,
+                                          std::unordered_set<std::string>& seen,
+                                          std::vector<ComPtr<IDxcCursor>>& result) {
+    if (depth >= 64) {
+        return;
+    }
+    for_each_child(cursor, [&](IDxcCursor& child) {
+        if ((++node_count % 512) == 0 && cancellation_checkpoint) {
+            cancellation_checkpoint();
+        }
+        const auto kind = cursor_kind(child);
+        if (kind == DxcCursor_FunctionDecl && cursor_spelling(child) == name) {
+            BOOL is_definition{};
+            check(child.IsDefinition(&is_definition), "IsDefinition");
+            if (is_definition == FALSE || !is_valid_entry_point_candidate(child)) {
+                return;
+            }
+            ComPtr<IDxcSourceRange> extent;
+            check(child.GetExtent(extent.put()), "GetExtent");
+            if (extent.get() == nullptr ||
+                cursor_in_skipped_ranges(*extent.get(), skipped_ranges)) {
+                return;
+            }
+            const auto source_range = safe_source_range(extent.get());
+            unsigned start{};
+            unsigned end{};
+            check(extent->GetOffsets(&start, &end), "GetOffsets");
+            if (source_range.has_value()) {
+                auto key = source_range->start.path + '\n' + std::to_string(start) + ':' +
+                           std::to_string(end);
+                if (!seen.insert(std::move(key)).second) {
+                    return;
+                }
+            }
+            result.push_back(adopt_addref(&child));
+            return;
+        }
+        if (symbol_container(kind)) {
+            collect_named_entry_point_candidates(child, name, skipped_ranges,
+                                                 cancellation_checkpoint, depth + 1, node_count,
+                                                 seen, result);
+        }
+    });
 }
 
 // True when `referenced` is a variable declared at file/namespace scope
@@ -2890,6 +2938,7 @@ auto TranslationUnit::compilation_info(const ComputeMetadataLimits& limits) cons
     ComputeCompilerMetadata metadata;
     EntryPointDataFlowLimits flow_limits;
     flow_limits.max_barrier_locations = limits.max_barrier_locations;
+    flow_limits.max_unused_declaration_candidates = 0;
     const auto flow = entry_point_data_flow(flow_limits);
     metadata.barrier_locations_available = flow.found;
     metadata.barrier_locations_truncated = flow.barrier_locations_truncated ||
@@ -3697,6 +3746,14 @@ auto TranslationUnit::entry_point_data_flow(
         // reachable) with a valid cursor.
         entry_point_candidates.push_back(adopt_addref(candidate.get()));
     }
+    if (definitions_truncated) {
+        entry_point_candidates.clear();
+        std::unordered_set<std::string> seen_entry_points;
+        std::uint64_t entry_point_node_count{};
+        collect_named_entry_point_candidates(*root.get(), entry_point_name, skipped_ranges,
+                                             cancellation_checkpoint, 0, entry_point_node_count,
+                                             seen_entry_points, entry_point_candidates);
+    }
     if (entry_point_candidates.empty()) {
         result.explanation = "The configured entry point '" + entry_point_name +
                              "' does not resolve to a top-level function definition in this "
@@ -3996,9 +4053,13 @@ auto TranslationUnit::entry_point_data_flow(
     result.global_accesses = scanner.global_accesses();
     result.barrier_locations = scanner.barrier_locations();
     bool unused_declarations_truncated = false;
+    auto unused_limits = limits;
+    if (definitions_truncated) {
+        unused_limits.max_unused_declaration_candidates = 0;
+    }
     result.unused_declarations = unused_top_level_declarations(
         *implementation_->translation_unit.get(), *root.get(), implementation_->sources,
-        entry_point_name, limits, cancellation_checkpoint, skipped_ranges,
+        entry_point_name, unused_limits, cancellation_checkpoint, skipped_ranges,
         unused_declarations_truncated);
     result.functions_visited_truncated = functions_visited_truncated;
     result.definitions_truncated = definitions_truncated;

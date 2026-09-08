@@ -4144,20 +4144,17 @@ TEST_CASE("Entry-point data flow bounds definition collection independently of t
     CHECK(has_name(full.unreachable_functions, "dead" + std::to_string(dead_function_count - 1)));
 }
 
-TEST_CASE("Entry-point data flow reports an incomplete, non-definitive not-found when a tight "
-          "definition budget is exhausted before the configured entry point is collected",
+TEST_CASE("Entry-point data flow resolves the configured entry point after its definition budget "
+          "is exhausted",
           "[dxc][entry-point-data-flow][integration]") {
     hlsl_intellisense::dxc::Intellisense intellisense;
     hlsl_intellisense::dxc::CompilerOptions options;
     options.entry_point = "main";
     // `main` is declared *after* a large corpus of unrelated dead
     // functions, so a small `max_definitions_collected` budget exhausts
-    // itself (in source order) before ever reaching `main`'s own
-    // definition. `found` must still be `false` (the entry point genuinely
-    // was not among the definitions collected), but this must be
-    // represented as an *incomplete* result -- `definitionsTruncated`/
-    // `truncated` set, and `explanation` noting the caveat -- never a
-    // silent, definitive "this document has no such entry point".
+    // itself (in source order) before ever reaching `main`. The bounded
+    // all-definition collection must stay truncated, while a cheap
+    // name-focused fallback still resolves the analysis root.
     constexpr int dead_function_count = 4000;
     std::string source;
     for (int index = 0; index < dead_function_count; ++index) {
@@ -4170,20 +4167,16 @@ TEST_CASE("Entry-point data flow reports an incomplete, non-definitive not-found
     hlsl_intellisense::dxc::EntryPointDataFlowLimits limits;
     limits.max_definitions_collected = 50;
     const auto flow = translation_unit.entry_point_data_flow(limits);
-    CHECK_FALSE(flow.found);
-    CHECK(flow.entry_point == std::nullopt);
-    CHECK(flow.reachable_functions.empty());
+    REQUIRE(flow.found);
+    REQUIRE(flow.entry_point.has_value());
+    CHECK(flow.entry_point->name == "main");
+    CHECK_FALSE(flow.reachable_functions.empty());
+    CHECK(flow.unreachable_functions.empty());
     CHECK(flow.definitions_truncated);
     CHECK(flow.truncated);
-    CHECK_FALSE(flow.explanation.empty());
-    // The explanation must not read as a plain, unqualified "not found":
-    // a client rendering only `explanation` (not the boolean flags) still
-    // needs to see that this is an incomplete search.
-    CHECK(flow.explanation.find("truncat") != std::string::npos);
+    CHECK(flow.explanation.empty());
 
-    // With a generous budget covering the whole corpus, the same
-    // translation unit resolves `main` normally, proving the budget above
-    // was the actual reason for the "not found" result.
+    // A generous budget additionally proves the unreachable-function set.
     hlsl_intellisense::dxc::EntryPointDataFlowLimits generous_limits;
     generous_limits.max_definitions_collected = 8192;
     const auto full = translation_unit.entry_point_data_flow(generous_limits);

@@ -3262,8 +3262,11 @@ Json Server::entry_point_data_flow(const std::optional<Json>& params,
     // root's own document version) and tag this result with a generation
     // describing a *different* analysis than the one that actually
     // produced it.
+    dxc::EntryPointDataFlowLimits limits;
+    limits.max_unused_declaration_candidates = 16;
+    limits.max_definitions_collected = 1024;
     const auto flow_with_generation = analysis_.entry_point_data_flow(
-        snapshot.document_uri().identity(), snapshot.version(), {}, context.cancellation);
+        snapshot.document_uri().identity(), snapshot.version(), limits, context.cancellation);
     const auto& flow = flow_with_generation.value;
     const auto generation = flow_with_generation.generation;
     {
