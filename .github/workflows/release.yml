@@ -47,6 +47,10 @@ jobs:
               (Get-FileHash out/build/release-repro/hlsl-lsp.exe).Hash) {
             throw 'Release server build is not reproducible'
           }
+          if ((Get-FileHash out/build/release/hlsl-analysis-worker.exe).Hash -ne `
+              (Get-FileHash out/build/release-repro/hlsl-analysis-worker.exe).Hash) {
+            throw 'Release analysis worker build is not reproducible'
+          }
 
       - name: Upload Windows x64 runtime
         uses: actions/upload-artifact@v6
@@ -149,6 +153,7 @@ jobs:
             --config Release \
             --prefix out/package/linux-x64
           test -x out/package/linux-x64/hlsl-lsp
+          test -x out/package/linux-x64/hlsl-analysis-worker
           test -f out/package/linux-x64/libdxcompiler.so
           readelf -d out/package/linux-x64/hlsl-lsp | grep -F '$ORIGIN'
           env -u LD_LIBRARY_PATH out/package/linux-x64/hlsl-lsp </dev/null
@@ -158,6 +163,7 @@ jobs:
             -DBUILD_TESTING=OFF
           cmake --build out/build/release-repro --target hlsl-lsp
           cmp out/build/release/hlsl-lsp out/build/release-repro/hlsl-lsp
+          cmp out/build/release/hlsl-analysis-worker out/build/release-repro/hlsl-analysis-worker
           export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
           tar --sort=name "--mtime=@${SOURCE_DATE_EPOCH}" \
             --owner=0 --group=0 --numeric-owner \

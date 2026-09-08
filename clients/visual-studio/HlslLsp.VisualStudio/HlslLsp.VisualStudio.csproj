@@ -65,6 +65,8 @@
   <Target Name="IncludeHlslLspServer" BeforeTargets="GetVsixSourceItems">
     <Error Condition="!Exists('$(HlslLspServerDir)\hlsl-lsp.exe')"
            Text="Build hlsl-lsp first or set HlslLspServerDir. Missing: $(HlslLspServerDir)\hlsl-lsp.exe" />
+    <Error Condition="!Exists('$(HlslLspServerDir)\hlsl-analysis-worker.exe')"
+           Text="Analysis worker is missing: $(HlslLspServerDir)\hlsl-analysis-worker.exe" />
     <Error Condition="!Exists('$(HlslLspServerDir)\dxcompiler.dll')"
            Text="DXC runtime is missing: $(HlslLspServerDir)\dxcompiler.dll" />
     <Error Condition="!Exists('$(HlslLspServerDir)\dxil.dll')"
@@ -76,6 +78,7 @@
         <VsixSubPath>Client</VsixSubPath>
       </Content>
       <Content Include="$(HlslLspServerDir)\hlsl-lsp.exe;
+                        $(HlslLspServerDir)\hlsl-analysis-worker.exe;
                         $(HlslLspServerDir)\dxcompiler.dll;
                         $(HlslLspServerDir)\dxil.dll"
                Visible="false">

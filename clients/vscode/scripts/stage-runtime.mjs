@@ -9,8 +9,13 @@ function argument(name) {
 const serverDirectoryValue = argument("--server-dir");
 const platform = argument("--platform") ?? "win32-x64";
 const runtimes = {
-  "win32-x64": ["hlsl-lsp.exe", "dxcompiler.dll", "dxil.dll"],
-  "linux-x64": ["hlsl-lsp", "libdxcompiler.so"],
+  "win32-x64": [
+    "hlsl-lsp.exe",
+    "hlsl-analysis-worker.exe",
+    "dxcompiler.dll",
+    "dxil.dll",
+  ],
+  "linux-x64": ["hlsl-lsp", "hlsl-analysis-worker", "libdxcompiler.so"],
 };
 const files = runtimes[platform];
 if (!serverDirectoryValue || files === undefined) {
@@ -42,6 +47,10 @@ await Promise.all(
   ),
 );
 if (platform === "linux-x64") {
-  await chmod(path.join(destination, "hlsl-lsp"), 0o755);
+  await Promise.all(
+    ["hlsl-lsp", "hlsl-analysis-worker"].map((file) =>
+      chmod(path.join(destination, file), 0o755),
+    ),
+  );
 }
 console.log(`Staged ${files.join(", ")} in ${destination}`);
