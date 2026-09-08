@@ -118,6 +118,9 @@ DispatchResponse Dispatcher::dispatch(const Request& request,
         cancellation.throw_if_cancellation_requested();
         return Response{.id = request.id, .result = std::move(result)};
     } catch (const HandlerError& error) {
+        if (cancellation.is_cancellation_requested()) {
+            return make_error(request.id, request_cancelled_code, "Request cancelled");
+        }
         return make_error(request.id, error.code(), error.what(), error.data());
     } catch (const std::exception&) {
         if (cancellation.is_cancellation_requested()) {

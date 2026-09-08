@@ -137,3 +137,47 @@ TEST_CASE("Dispatcher cancellation is tracked before and during request executio
           json_rpc::request_cancelled_code);
     dispatcher.finish_request(queued.id, queued_cancellation);
 }
+
+TEST_CASE("Dispatcher cancellation takes precedence over a concurrent handler error",
+          "[json-rpc][dispatcher][cancellation]") {
+    json_rpc::Dispatcher dispatcher;
+    std::mutex mutex;
+    std::condition_variable entered;
+    std::condition_variable release;
+    bool handler_entered{};
+    bool handler_released{};
+    dispatcher.register_request_handler(
+        "failing",
+        [&](const std::optional<json_rpc::Json>&,
+            const json_rpc::RequestContext&) -> json_rpc::Json {
+            {
+                std::scoped_lock lock{mutex};
+                handler_entered = true;
+            }
+            entered.notify_one();
+            std::unique_lock lock{mutex};
+            release.wait(lock, [&] { return handler_released; });
+            throw json_rpc::HandlerError{json_rpc::server_cancelled_code, "Server cancelled"};
+        });
+
+    const json_rpc::Request request{
+        .id = std::string{"failing"}, .method = "failing", .params = std::nullopt};
+    const auto cancellation = dispatcher.begin_request(request.id);
+    auto response =
+        std::async(std::launch::async, [&] { return dispatcher.dispatch(request, cancellation); });
+    {
+        std::unique_lock lock{mutex};
+        entered.wait(lock, [&] { return handler_entered; });
+    }
+    dispatcher.dispatch(json_rpc::Notification{.method = "$/cancelRequest",
+                                               .params = json_rpc::Json{{"id", "failing"}}});
+    {
+        std::scoped_lock lock{mutex};
+        handler_released = true;
+    }
+    release.notify_one();
+
+    const auto result = response.get();
+    CHECK(std::get<json_rpc::ErrorResponse>(result).error.code == json_rpc::request_cancelled_code);
+    dispatcher.finish_request(request.id, cancellation);
+}
