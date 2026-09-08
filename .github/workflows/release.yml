@@ -87,6 +87,11 @@ jobs:
             exit $LASTEXITCODE
           }
 
+      - name: Verify Visual Studio compatibility
+        run: >-
+          python tools/validate_visual_studio_vsix.py
+          clients/visual-studio/HlslLsp.VisualStudio/bin/Release/net472/HlslLsp.VisualStudio.vsix
+
       - name: Normalize Visual Studio VSIX
         shell: pwsh
         run: |

@@ -3,6 +3,11 @@
 This VSIX supplies DXC diagnostics and IntelliSense through a bundled
 `hlsl-lsp.exe`.
 
+It supports the 64-bit Community, Professional, and Enterprise editions of
+Visual Studio 2022 17.14 or newer and Visual Studio 2026. Visual Studio 17.14 is
+the minimum because the client compiles against and uses the 17.14 Visual
+Studio SDK and language-server client.
+
 Visual Studio's HLSL Tools extension claims the same file extensions and is not
 currently compatible with HLSL-LSP. Disable or uninstall HLSL Tools before
 installing this VSIX.

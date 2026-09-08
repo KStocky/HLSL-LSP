@@ -165,6 +165,12 @@ jobs:
             exit $LASTEXITCODE
           }
 
+      - name: Verify Visual Studio compatibility
+        if: matrix.compiler == 'msvc'
+        run: >-
+          python tools/validate_visual_studio_vsix.py
+          clients/visual-studio/HlslLsp.VisualStudio/bin/Release/net472/HlslLsp.VisualStudio.vsix
+
       - name: Normalize Visual Studio VSIX
         if: matrix.compiler == 'msvc'
         shell: pwsh
@@ -235,7 +241,10 @@ jobs:
         run: python tools/normalize_zip.py clients/vscode/hlsl-lsp-vscode.vsix
 
       - name: Test reproducible ZIP normalization
-        run: python -m unittest tests/tools/test_normalize_zip.py
+        run: >-
+          python -m unittest
+          tests/tools/test_normalize_zip.py
+          tests/tools/test_validate_visual_studio_vsix.py
 
       - name: Verify packaged Linux executable mode
         working-directory: clients/vscode

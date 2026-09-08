@@ -26,7 +26,8 @@ with:
 - Selectable DXC runtime: the bundled default or an explicit compatible runtime
 - Transitive, virtual, open-buffer, and dependency-aware include handling
 - Bounded, cancellable, version-coalesced background analysis
-- Visual Studio 2026 and Visual Studio Code clients under `clients/`
+- Visual Studio 2022 17.14+, Visual Studio 2026, and Visual Studio Code clients
+  under `clients/`
 
 The Visual Studio extension serves a similar purpose to
 [Tim Jones' HLSL Tools](https://github.com/tgjones/HlslTools), while using
@@ -254,6 +255,9 @@ The easiest way to install HLSL-LSP is to download
 Close Visual Studio, run the downloaded VSIX, and follow the installer prompts.
 Restart Visual Studio and open an `.hlsl` or `.hlsli` file; the bundled language
 server starts automatically.
+
+The VSIX supports the 64-bit Community, Professional, and Enterprise editions
+of Visual Studio 2022 17.14 or newer and Visual Studio 2026.
 
 > [!NOTE]
 > Release artifacts are not yet code-signed. Windows Smart App Control may
