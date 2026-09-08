@@ -344,6 +344,9 @@ struct ComputeHardwareProfile {
     }
 }
 
+[[nodiscard]] std::optional<std::size_t> dxc_offset_at(std::string_view text, std::uint32_t line,
+                                                       std::uint32_t column);
+
 [[nodiscard]] std::size_t symbol_offset(std::string_view text, std::size_t offset,
                                         bool end_offset) {
     offset = (std::min)(offset, text.size());
@@ -355,6 +358,16 @@ struct ComputeHardwareProfile {
 
 [[nodiscard]] workspace::Range symbol_range(const dxc::Symbol& symbol,
                                             const workspace::SourceSnapshot& snapshot) {
+    if (symbol.extent.has_value()) {
+        const auto start =
+            dxc_offset_at(snapshot.text(), symbol.extent->start.line, symbol.extent->start.column);
+        const auto end =
+            dxc_offset_at(snapshot.text(), symbol.extent->end.line, symbol.extent->end.column);
+        if (start.has_value() && end.has_value() && *start <= *end) {
+            return {.start = workspace::lsp_position_at(snapshot.text(), *start),
+                    .end = workspace::lsp_position_at(snapshot.text(), *end)};
+        }
+    }
     const auto start =
         symbol_offset(snapshot.text(), static_cast<std::size_t>(symbol.start_offset), false);
     const auto normalized_end = symbol_offset(
@@ -367,8 +380,11 @@ struct ComputeHardwareProfile {
 [[nodiscard]] workspace::Range symbol_selection_range(const dxc::Symbol& symbol,
                                                       const workspace::SourceSnapshot& snapshot) {
     const auto text_size = snapshot.text().size();
-    const auto start =
-        symbol_offset(snapshot.text(), static_cast<std::size_t>(symbol.location.offset), false);
+    const auto location_offset =
+        dxc_offset_at(snapshot.text(), symbol.location.line, symbol.location.column);
+    const auto start = symbol_offset(
+        snapshot.text(), location_offset.value_or(static_cast<std::size_t>(symbol.location.offset)),
+        false);
     auto source_offset = start;
     auto name_offset = std::size_t{};
     while (source_offset < text_size && name_offset < symbol.name.size()) {
@@ -670,12 +686,6 @@ compilation_signature_parameter_json(const dxc::CompilationSignatureParameter& p
         {"componentType", parameter.component_type},  {"mask", parameter.mask},
         {"readWriteMask", parameter.read_write_mask}, {"stream", parameter.stream}};
 }
-
-// Forward-declared: needed here but defined later in this file (with
-// `append_semantic_token`), which itself needs types not yet declared this
-// early.
-[[nodiscard]] std::optional<std::size_t> dxc_offset_at(std::string_view text, std::uint32_t line,
-                                                       std::uint32_t column);
 
 // Builds an LSP `{uri, range}` location for a reflected resource's
 // declaration site, converting the compiler's 1-based byte line/column into

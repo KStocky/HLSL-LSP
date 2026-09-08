@@ -636,6 +636,7 @@ struct Symbol {
     SourceLocation location;
     std::uint32_t start_offset{};
     std::uint32_t end_offset{};
+    std::optional<SourceRange> extent;
     std::vector<Symbol> children;
 };
 

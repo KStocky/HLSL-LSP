@@ -482,6 +482,7 @@ TEST_CASE("Server provides hierarchical document and searchable workspace symbol
         if (character == '\n') {
             source.push_back('\r');
         }
+
         source.push_back(character);
     }
     std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
@@ -538,6 +539,40 @@ TEST_CASE("Server provides hierarchical document and searchable workspace symbol
     CHECK(workspace_response->result[0]["kind"] == 12);
     CHECK(workspace_response->result[0]["containerName"] == "HLSL");
     CHECK(workspace_response->result[0]["location"]["uri"] == uri);
+}
+
+TEST_CASE("Document symbols convert DXC UTF-16 offsets in non-ASCII sources",
+          "[lsp][symbols][unicode][integration]") {
+    const auto uri = shader_uri();
+    const std::string source = "// BMP: \xC3\x97; supplementary: \xF0\x9F\x98\x80\r\n"
+                               "struct Payload { float value; };\r\n"
+                               "float4 main() : SV_Target { return 1.0; }\r\n";
+    hlsl_intellisense::lsp::Server server{[](const auto&) {}};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params =
+            Json{{"textDocument",
+                  {{"uri", uri}, {"languageId", "hlsl"}, {"version", 1}, {"text", source}}}}}));
+
+    const auto response = server.handle(
+        hlsl_intellisense::json_rpc::Request{.id = std::int64_t{2},
+                                             .method = "textDocument/documentSymbol",
+                                             .params = Json{{"textDocument", {{"uri", uri}}}}});
+    REQUIRE(response.has_value());
+    const auto* result = std::get_if<hlsl_intellisense::json_rpc::Response>(&*response);
+    REQUIRE(result != nullptr);
+    const auto payload = std::ranges::find_if(
+        result->result, [](const auto& symbol) { return symbol["name"] == "Payload"; });
+    REQUIRE(payload != result->result.end());
+    CHECK((*payload)["selectionRange"]["start"] == Json{{"line", 1}, {"character", 7}});
+    const auto main = std::ranges::find_if(
+        result->result, [](const auto& symbol) { return symbol["name"] == "main"; });
+    REQUIRE(main != result->result.end());
+    CHECK((*main)["selectionRange"]["start"] == Json{{"line", 2}, {"character", 7}});
 }
 
 TEST_CASE("Server provides semantic tokens and definitions", "[lsp][navigation][integration]") {

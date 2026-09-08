@@ -681,6 +681,7 @@ class TaskRanges final {
                 .location = make_source_location(*location.get()),
                 .start_offset = start_offset,
                 .end_offset = end_offset,
+                .extent = safe_source_range(extent.get()),
                 .children = std::move(nested),
             });
         }
@@ -2122,6 +2123,7 @@ class BodyScanner final {
             .location = declaration_location,
             .start_offset = start,
             .end_offset = end,
+            .extent = safe_source_range(extent.get()),
             .children = {},
         });
     });
