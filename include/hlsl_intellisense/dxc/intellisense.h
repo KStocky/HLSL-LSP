@@ -14,6 +14,7 @@ namespace hlsl_intellisense::dxc {
 struct SourceFile {
     std::string path;
     std::string text;
+    bool rewritten{};
 };
 
 // Selects the DXC runtime a language-server process loads. An empty directory

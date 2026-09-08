@@ -1241,6 +1241,56 @@ void append_named_callables(IDxcCursor& parent, std::string_view name,
     return result;
 }
 
+struct CompilerSkippedRange {
+    std::string path;
+    std::uint32_t start{};
+    std::uint32_t end{};
+};
+
+[[nodiscard]] std::vector<CompilerSkippedRange>
+compiler_skipped_ranges(IDxcTranslationUnit& translation_unit,
+                        const std::vector<SourceFile>& sources) {
+    std::vector<CompilerSkippedRange> result;
+    for (const auto& source : sources) {
+        ComPtr<IDxcFile> file;
+        check(translation_unit.GetFile(source.path.c_str(), file.put()), "GetFile");
+        unsigned count{};
+        IDxcSourceRange** ranges{};
+        check(translation_unit.GetSkippedRanges(file.get(), &count, &ranges), "GetSkippedRanges");
+        TaskRanges owned_ranges{ranges, count};
+        for (unsigned index = 0; index < count; ++index) {
+            const auto source_range = safe_source_range(owned_ranges[index]);
+            if (!source_range.has_value()) {
+                continue;
+            }
+            unsigned start{};
+            unsigned end{};
+            check(owned_ranges[index]->GetOffsets(&start, &end), "GetOffsets");
+            result.push_back({.path = source_range->start.path, .start = start, .end = end});
+        }
+    }
+    return result;
+}
+
+[[nodiscard]] bool cursor_in_skipped_ranges(IDxcSourceRange& extent,
+                                            std::span<const CompilerSkippedRange> ranges) {
+    const auto source_range = safe_source_range(&extent);
+    if (!source_range.has_value()) {
+        return false;
+    }
+    unsigned start{};
+    unsigned end{};
+    check(extent.GetOffsets(&start, &end), "GetOffsets");
+    return std::ranges::any_of(ranges, [&source_range, start, end](const auto& range) {
+        if (range.path != source_range->start.path) {
+            return false;
+        }
+        // Compare DXC offsets only with other DXC offsets. Both can drift from
+        // the submitted source text, but share the compiler's internal coordinate space.
+        return start < range.end && end > range.start;
+    });
+}
+
 // Pages through `cursor`'s children (DXC's GetChildren is paginated) and
 // invokes `callback` once per non-null child, in order.
 template <typename Callback> void for_each_child(IDxcCursor& cursor, Callback&& callback) {
@@ -1285,6 +1335,8 @@ void collect_callable_definitions(IDxcCursor& cursor, std::vector<ComPtr<IDxcCur
                                   std::uint32_t depth,
                                   const std::function<void()>& cancellation_checkpoint,
                                   std::uint64_t& node_count, std::size_t max_definitions,
+                                  std::span<const CompilerSkippedRange> skipped_ranges,
+                                  std::unordered_set<std::string>& seen_definitions,
                                   bool& truncated) {
     if (depth >= 64 || truncated) {
         return;
@@ -1301,6 +1353,24 @@ void collect_callable_definitions(IDxcCursor& cursor, std::vector<ComPtr<IDxcCur
             BOOL is_definition{};
             check(child.IsDefinition(&is_definition), "IsDefinition");
             if (is_definition != FALSE) {
+                ComPtr<IDxcSourceRange> extent;
+                check(child.GetExtent(extent.put()), "GetExtent");
+                if (extent.get() != nullptr) {
+                    if (cursor_in_skipped_ranges(*extent.get(), skipped_ranges)) {
+                        return;
+                    }
+                    const auto source_range = safe_source_range(extent.get());
+                    unsigned start{};
+                    unsigned end{};
+                    check(extent->GetOffsets(&start, &end), "GetOffsets");
+                    if (source_range.has_value()) {
+                        auto key = source_range->start.path + '\n' + std::to_string(start) + ':' +
+                                   std::to_string(end);
+                        if (!seen_definitions.insert(std::move(key)).second) {
+                            return;
+                        }
+                    }
+                }
                 if (out.size() >= max_definitions) {
                     truncated = true;
                     return;
@@ -1311,7 +1381,8 @@ void collect_callable_definitions(IDxcCursor& cursor, std::vector<ComPtr<IDxcCur
         }
         if (symbol_container(kind)) {
             collect_callable_definitions(child, out, depth + 1, cancellation_checkpoint, node_count,
-                                         max_definitions, truncated);
+                                         max_definitions, skipped_ranges, seen_definitions,
+                                         truncated);
         }
     });
 }
@@ -2072,7 +2143,8 @@ class BodyScanner final {
 [[nodiscard]] std::vector<Symbol> unused_top_level_declarations(
     IDxcTranslationUnit& translation_unit, IDxcCursor& root, const std::vector<SourceFile>& sources,
     std::string_view entry_point_name, const EntryPointDataFlowLimits& limits,
-    const std::function<void()>& cancellation_checkpoint, bool& truncated) {
+    const std::function<void()>& cancellation_checkpoint,
+    std::span<const CompilerSkippedRange> skipped_ranges, bool& truncated) {
     std::vector<Symbol> result;
     std::uint64_t node_count = 0;
     std::uint64_t reference_scans_performed = 0;
@@ -2102,18 +2174,21 @@ class BodyScanner final {
         if (location.get() == nullptr) {
             return;
         }
+        const auto declaration_location = make_source_location(*location.get());
+        ComPtr<IDxcSourceRange> extent;
+        check(child.GetExtent(extent.put()), "GetExtent");
+        if (extent.get() != nullptr && cursor_in_skipped_ranges(*extent.get(), skipped_ranges)) {
+            return;
+        }
         if (reference_scans_performed >= limits.max_unused_declaration_candidates) {
             truncated = true;
             return;
         }
         ++reference_scans_performed;
-        const auto declaration_location = make_source_location(*location.get());
         if (has_any_reference(translation_unit, child, sources, declaration_location,
                               cancellation_checkpoint)) {
             return;
         }
-        ComPtr<IDxcSourceRange> extent;
-        check(child.GetExtent(extent.put()), "GetExtent");
         unsigned start{};
         unsigned end{};
         check(extent->GetOffsets(&start, &end), "GetOffsets");
@@ -3535,12 +3610,20 @@ auto TranslationUnit::entry_point_data_flow(
 
     ComPtr<IDxcCursor> root;
     check(implementation_->translation_unit->GetCursor(root.put()), "GetCursor");
+    std::vector<CompilerSkippedRange> skipped_ranges;
+    const auto has_rewritten_sources = std::ranges::any_of(
+        implementation_->sources, [](const auto& source) { return source.rewritten; });
+    if (!has_rewritten_sources || supports_skipped_ranges_for_rewritten_sources()) {
+        skipped_ranges = compiler_skipped_ranges(*implementation_->translation_unit.get(),
+                                                 implementation_->sources);
+    }
     std::vector<ComPtr<IDxcCursor>> all_definitions;
+    std::unordered_set<std::string> seen_definitions;
     std::uint64_t definition_collection_node_count = 0;
     bool definitions_truncated = false;
     collect_callable_definitions(*root.get(), all_definitions, 0, cancellation_checkpoint,
                                  definition_collection_node_count, limits.max_definitions_collected,
-                                 definitions_truncated);
+                                 skipped_ranges, seen_definitions, definitions_truncated);
     // Assigned immediately after collection -- before the entry point is
     // resolved -- so that every subsequent return path (including the
     // "not found"/"ambiguous" early returns below, which never reach the
@@ -3877,7 +3960,8 @@ auto TranslationUnit::entry_point_data_flow(
     bool unused_declarations_truncated = false;
     result.unused_declarations = unused_top_level_declarations(
         *implementation_->translation_unit.get(), *root.get(), implementation_->sources,
-        entry_point_name, limits, cancellation_checkpoint, unused_declarations_truncated);
+        entry_point_name, limits, cancellation_checkpoint, skipped_ranges,
+        unused_declarations_truncated);
     result.functions_visited_truncated = functions_visited_truncated;
     result.definitions_truncated = definitions_truncated;
     result.global_accesses_truncated = scanner.access_truncated();

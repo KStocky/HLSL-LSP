@@ -3693,6 +3693,34 @@ TEST_CASE("Entry-point data flow rejects an ambiguous configured entry point nam
     CHECK(flow.reachable_functions.empty());
 }
 
+TEST_CASE("Entry-point data flow excludes definitions from inactive preprocessor branches",
+          "[dxc][entry-point-data-flow][integration][preprocessor]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.entry_point = "main";
+    const std::string source = "#define ACTIVE 1\n"
+                               "#if ACTIVE\n"
+                               "float activeHelper() { return 1.0; }\n"
+                               "float4 main() : SV_Target { return activeHelper().xxxx; }\n"
+                               "#else\n"
+                               "float inactiveHelper() { return 0.0; }\n"
+                               "float4 main() : SV_Target { return inactiveHelper().xxxx; }\n"
+                               "#endif\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+    REQUIRE(translation_unit.diagnostics().empty());
+
+    const auto flow = translation_unit.entry_point_data_flow();
+    REQUIRE(flow.found);
+    REQUIRE(flow.entry_point.has_value());
+    CHECK(flow.entry_point->location.line == 4);
+    CHECK(std::ranges::none_of(flow.unreachable_functions, [](const auto& function) {
+        return function.name == "inactiveHelper";
+    }));
+    CHECK(std::ranges::none_of(flow.unused_declarations, [](const auto& declaration) {
+        return declaration.name == "inactiveHelper";
+    }));
+}
+
 TEST_CASE("Entry-point data flow honors an explicit function-visit budget",
           "[dxc][entry-point-data-flow][integration]") {
     hlsl_intellisense::dxc::Intellisense intellisense;

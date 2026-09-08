@@ -438,6 +438,7 @@ TEST_CASE("Configured ShaderTestFramework macro includes rewrite virtual paths f
                           std::filesystem::absolute(root_path).lexically_normal().generic_string(),
                           &hlsl_intellisense::dxc::SourceFile::path);
     REQUIRE(source != resolution.sources.end());
+    CHECK(source->rewritten);
     CHECK(source->text.find("STF_ASSERTIONS") == std::string::npos);
     CHECK(source->text.find(
               std::filesystem::absolute(tree.path("Test/STF/AssertionsV1/Framework.hlsli"))
