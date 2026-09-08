@@ -19,7 +19,7 @@ using Microsoft.VisualStudio.TextManager.Interop;
 namespace HlslLsp.VisualStudio.Bootstrap;
 
 [PackageRegistration(UseManagedResourcesOnly = true, AllowsBackgroundLoading = true)]
-[InstalledProductRegistration("HLSL-LSP", "DXC-powered HLSL IntelliSense", "0.13.0")]
+[InstalledProductRegistration("HLSL-LSP", "DXC-powered HLSL IntelliSense", "0.13.1")]
 [ProvideSettingsManifest(PackageRelativeManifestFile = "HlslLsp.registration.json")]
 [ProvideMenuResource("Menus.ctmenu", 1)]
 [ProvideToolWindow(typeof(MemoryLayoutToolWindow))]
