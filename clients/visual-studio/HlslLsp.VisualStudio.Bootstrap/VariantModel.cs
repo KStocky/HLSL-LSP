@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -14,6 +15,44 @@ public sealed class VariantModel
     public bool Default { get; set; }
 
     public bool Applicable { get; set; }
+
+    public string EntryPoint { get; set; }
+}
+
+internal static class VariantSelection
+{
+    internal static VariantListModel ForContext(
+        VariantListModel source,
+        string callableName)
+    {
+        if (source?.Variants == null)
+        {
+            return source;
+        }
+        var applicable = source.Variants
+            .Where(variant => variant != null && variant.Applicable)
+            .ToArray();
+        if (!string.IsNullOrEmpty(callableName) &&
+            applicable.Any(
+                variant => string.Equals(
+                    variant.EntryPoint,
+                    callableName,
+                    StringComparison.Ordinal)))
+        {
+            applicable = applicable
+                .Where(
+                    variant => string.Equals(
+                        variant.EntryPoint,
+                        callableName,
+                        StringComparison.Ordinal))
+                .ToArray();
+        }
+        return new VariantListModel
+        {
+            ActiveVariant = source.ActiveVariant,
+            Variants = applicable,
+        };
+    }
 }
 
 public sealed class VariantListModel

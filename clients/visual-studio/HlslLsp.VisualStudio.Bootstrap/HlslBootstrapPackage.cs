@@ -70,6 +70,7 @@ public sealed class HlslBootstrapPackage : AsyncPackage
     private IComponentModel callHierarchyComponentModel;
     private IVsEditorAdaptersFactoryService callHierarchyEditorAdapters;
     private IVsRunningDocumentTable callHierarchyRunningDocuments;
+    private IVsTextManager commandTextManager;
     public const string PackageGuidString = "5ac7fbe7-1b9f-45eb-bca6-ffb9ae1ab67f";
 
     private static readonly object Gate = new();
@@ -147,25 +148,30 @@ public sealed class HlslBootstrapPackage : AsyncPackage
             throw new InvalidOperationException(
                 "Visual Studio's command service is unavailable.");
         }
+        commandTextManager =
+            await GetServiceAsync(typeof(SVsTextManager)) as IVsTextManager;
         var commandSet = new Guid("cedfa85a-cd51-4825-af1f-0e05bd475426");
-        commands.AddCommand(
-            new OleMenuCommand(
+        var memoryLayout = new OleMenuCommand(
                 (_, _) => JoinableTaskFactory.RunAsync(
                         () => ShowMemoryLayoutAsync(DisposalToken))
                     .FileAndForget("HlslLsp/ShowMemoryLayout"),
-                new CommandID(commandSet, 0x0100)));
-        commands.AddCommand(
-            new OleMenuCommand(
+                new CommandID(commandSet, 0x0100));
+        memoryLayout.BeforeQueryStatus += OnHlslContextCommandBeforeQueryStatus;
+        commands.AddCommand(memoryLayout);
+        var selectVariant = new OleMenuCommand(
                 (_, _) => JoinableTaskFactory.RunAsync(
                         () => SelectVariantAsync(DisposalToken))
                     .FileAndForget("HlslLsp/SelectVariant"),
-                new CommandID(commandSet, 0x0101)));
-        commands.AddCommand(
-            new OleMenuCommand(
+                new CommandID(commandSet, 0x0101));
+        selectVariant.BeforeQueryStatus += OnHlslContextCommandBeforeQueryStatus;
+        commands.AddCommand(selectVariant);
+        var compilationInfo = new OleMenuCommand(
                 (_, _) => JoinableTaskFactory.RunAsync(
                         () => ShowCompilationInfoAsync(DisposalToken))
                     .FileAndForget("HlslLsp/ShowCompilationInfo"),
-                new CommandID(commandSet, 0x0102)));
+                new CommandID(commandSet, 0x0102));
+        compilationInfo.BeforeQueryStatus += OnHlslContextCommandBeforeQueryStatus;
+        commands.AddCommand(compilationInfo);
         commands.AddCommand(
             new OleMenuCommand(
                 (_, _) => JoinableTaskFactory.RunAsync(
@@ -178,18 +184,20 @@ public sealed class HlslBootstrapPackage : AsyncPackage
                         () => ShowPreprocessorExplorerAsync(DisposalToken))
                     .FileAndForget("HlslLsp/ShowPreprocessorExplorer"),
                 new CommandID(commandSet, 0x0104)));
-        commands.AddCommand(
-            new OleMenuCommand(
+        var entryPointDataFlow = new OleMenuCommand(
                 (_, _) => JoinableTaskFactory.RunAsync(
                         () => ShowEntryPointDataFlowAsync(DisposalToken))
                     .FileAndForget("HlslLsp/ShowEntryPointDataFlow"),
-                new CommandID(commandSet, 0x0105)));
-        commands.AddCommand(
-            new OleMenuCommand(
+                new CommandID(commandSet, 0x0105));
+        entryPointDataFlow.BeforeQueryStatus += OnHlslContextCommandBeforeQueryStatus;
+        commands.AddCommand(entryPointDataFlow);
+        var callHierarchy = new OleMenuCommand(
                 (_, _) => JoinableTaskFactory.RunAsync(
                         () => ShowCallHierarchyAsync(DisposalToken))
                     .FileAndForget("HlslLsp/ShowCallHierarchy"),
-                new CommandID(commandSet, 0x0106)));
+                new CommandID(commandSet, 0x0106));
+        callHierarchy.BeforeQueryStatus += OnHlslContextCommandBeforeQueryStatus;
+        commands.AddCommand(callHierarchy);
         commands.AddCommand(
             new OleMenuCommand(
                 (_, _) => JoinableTaskFactory.RunAsync(
@@ -201,23 +209,14 @@ public sealed class HlslBootstrapPackage : AsyncPackage
     private async Task ShowMemoryLayoutAsync(CancellationToken cancellationToken)
     {
         await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
-        var textManager = await GetServiceAsync(typeof(SVsTextManager)) as IVsTextManager;
-        if (textManager == null ||
-            ErrorHandler.Failed(textManager.GetActiveView(1, null, out var view)) ||
-            view == null ||
-            ErrorHandler.Failed(view.GetCaretPos(out var line, out var character)) ||
-            ErrorHandler.Failed(view.GetBuffer(out var lines)) ||
-            lines is not IVsUserData userData)
+        if (!TryGetActiveHlslEditorContext(
+                out var uri,
+                out var line,
+                out var character,
+                out _))
         {
             return;
         }
-        var monikerKey = VSConstants.VsTextBufferUserDataGuid.VsBufferMoniker_guid;
-        if (ErrorHandler.Failed(userData.GetData(ref monikerKey, out var value)) ||
-            value is not string moniker)
-        {
-            return;
-        }
-        var uri = new Uri(Path.GetFullPath(moniker));
 
         await ShowMemoryLayoutAsync(uri, line, character, cancellationToken);
     }
@@ -256,7 +255,7 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         if (uri == null)
         {
             await ShowInformationAsync(
-                "Open an HLSL document, then run Tools > HLSL Shader Compilation.",
+                "Open an HLSL document, then choose HLSL > Shader Compilation.",
                 cancellationToken);
             return;
         }
@@ -359,7 +358,7 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         CancellationToken cancellationToken)
     {
         // A background save/variant refresh must never supersede an explicit
-        // Tools command that the user is waiting for.
+        // command that the user is waiting for.
         if (Volatile.Read(ref explicitCompilationInfoRequests) != 0)
         {
             return;
@@ -871,7 +870,7 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         if (uri == null)
         {
             await ShowInformationAsync(
-                "Open an HLSL document, then run Tools > HLSL Entry-Point Data Flow.",
+                "Open an HLSL document, then choose HLSL > Entry-Point Data Flow.",
                 cancellationToken);
             return;
         }
@@ -922,7 +921,7 @@ public sealed class HlslBootstrapPackage : AsyncPackage
     {
         var generation = Interlocked.Increment(ref entryPointDataFlowRequestGeneration);
         // Captured before the request starts, independent of whether the
-        // caller already held a window reference: the explicit Tools command
+        // caller already held a window reference: the explicit command
         // below always passes existingWindow: null, even when the window is
         // already open and already showing good content for this exact
         // document, so using existingWindow's null-ness alone to decide
@@ -1214,7 +1213,7 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         return (containingLine.LineNumber, point.Position - containingLine.Start.Position);
     }
 
-    // The custom Call Hierarchy surface (Tools > HLSL Call Hierarchy):
+    // The custom Call Hierarchy surface (HLSL > Call Hierarchy):
     // Visual Studio 17.14's generic ILanguageClient infrastructure does not
     // route the editor's built-in View Call Hierarchy command to any
     // language client, regardless of the callHierarchyProvider capability
@@ -1227,31 +1226,17 @@ public sealed class HlslBootstrapPackage : AsyncPackage
     private async Task ShowCallHierarchyAsync(CancellationToken cancellationToken)
     {
         await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
-        var textManager = await GetServiceAsync(typeof(SVsTextManager)) as IVsTextManager;
-        if (textManager == null ||
-            ErrorHandler.Failed(textManager.GetActiveView(1, null, out var view)) ||
-            view == null ||
-            ErrorHandler.Failed(view.GetCaretPos(out var line, out var character)) ||
-            ErrorHandler.Failed(view.GetBuffer(out var lines)) ||
-            lines is not IVsUserData userData)
+        if (!TryGetActiveHlslEditorContext(
+                out var uri,
+                out var line,
+                out var character,
+                out var lines))
         {
             await ShowInformationAsync(
-                "Open an HLSL document, place the caret on a function, then run " +
-                "Tools > HLSL Call Hierarchy.",
+                "Open an HLSL document and place the caret on a function.",
                 cancellationToken);
             return;
         }
-        var monikerKey = VSConstants.VsTextBufferUserDataGuid.VsBufferMoniker_guid;
-        if (ErrorHandler.Failed(userData.GetData(ref monikerKey, out var value)) ||
-            value is not string moniker)
-        {
-            await ShowInformationAsync(
-                "Open an HLSL document, place the caret on a function, then run " +
-                "Tools > HLSL Call Hierarchy.",
-                cancellationToken);
-            return;
-        }
-        var uri = new Uri(Path.GetFullPath(moniker));
 
         // Anchors the explicit request's caret position in the live
         // buffer so later background refreshes can re-resolve the same
@@ -1358,6 +1343,23 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         {
             return;
         }
+        if (failureMessage == null && item == null)
+        {
+            await JoinableTaskFactory.SwitchToMainThreadAsync(ambientCancellationToken);
+            if (await FindToolWindowAsync(
+                        typeof(CallHierarchyExplorerToolWindow),
+                        0,
+                        false,
+                        ambientCancellationToken)
+                    is CallHierarchyExplorerToolWindow existingWindow)
+            {
+                existingWindow.SetNotCallable();
+            }
+            await ShowInformationAsync(
+                "No callable symbol was found at the selected position.",
+                ambientCancellationToken);
+            return;
+        }
 
         await JoinableTaskFactory.SwitchToMainThreadAsync(ambientCancellationToken);
         var window = await ShowToolWindowAsync(
@@ -1368,14 +1370,6 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         WireCallHierarchyWindow(window, ambientCancellationToken);
         if (generation != Interlocked.Read(ref callHierarchyRequestGeneration))
         {
-            return;
-        }
-        if (failureMessage == null && item == null)
-        {
-            // An authoritative "no callable symbol here" result, not a
-            // transient failure -- always overwrites, mirroring
-            // EntryPointDataFlowToolWindow's found:false handling.
-            window?.SetNotCallable();
             return;
         }
         if (failureMessage != null)
@@ -1399,7 +1393,7 @@ public sealed class HlslBootstrapPackage : AsyncPackage
     // is already known from the previous response, so no new
     // prepareCallHierarchy call is needed -- see docs/call-hierarchy.md.
     // Treated as an explicit, gated, timeout-bounded operation exactly like
-    // the Tools command itself, since a concurrent background refresh must
+    // the context command itself, since a concurrent background refresh must
     // not silently drop or be dropped by it. A failed drill-in never
     // mutates the tool window's persisted state (unlike a failed
     // root/refresh): the currently displayed frame is left exactly as-is
@@ -1754,7 +1748,7 @@ public sealed class HlslBootstrapPackage : AsyncPackage
             // whatever it is -- would silently overwrite or undo that
             // navigation. Discard it outright rather than reconciling a
             // now-outdated result with a since-changed stack; the next
-            // refresh trigger (or a manual Tools command) will re-capture
+            // refresh trigger (or a manual context command) will re-capture
             // a correct revision and path from the user's actual current
             // position.
             return;
@@ -1848,21 +1842,64 @@ public sealed class HlslBootstrapPackage : AsyncPackage
 
     private async Task SelectVariantAsync(CancellationToken cancellationToken)
     {
-        var uri = await GetActiveDocumentUriAsync(cancellationToken);
+        await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+        if (!TryGetActiveHlslEditorContext(
+                out var uri,
+                out var line,
+                out var character,
+                out _))
+        {
+            await ShowInformationAsync(
+                "Open an HLSL document to select a shader variant.",
+                cancellationToken);
+            return;
+        }
         VariantListModel variants = null;
         try
         {
             variants = await VariantBridge.ListAsync(uri, cancellationToken);
         }
-        catch (Exception)
+        catch (OperationCanceledException)
         {
-            // A missing or failed server connection is reported below.
+            throw;
         }
-        if (variants?.Variants == null || variants.Variants.Count == 0)
+        catch (Exception error)
+        {
+            await ShowInformationAsync(
+                "Could not load shader variants: " + error.Message,
+                cancellationToken);
+            return;
+        }
+        string callableName = null;
+        try
+        {
+            var prepared = await CallHierarchyBridge.PrepareAsync(
+                uri,
+                line,
+                character,
+                cancellationToken);
+            if (prepared != null && prepared.Count > 0)
+            {
+                callableName = prepared[0].Name;
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception error)
+        {
+            ActivityLog.LogWarning(
+                nameof(HlslBootstrapPackage),
+                "Could not resolve the shader-variant caret context: " + error);
+        }
+        variants = VariantSelection.ForContext(variants, callableName);
+        if ((variants?.Variants == null || variants.Variants.Count == 0) &&
+            string.IsNullOrEmpty(variants?.ActiveVariant))
         {
             await ShowInformationAsync(
                 VariantBridge.IsAvailable
-                    ? "No shader variants are declared under hlsl.variants in shadertoolsconfig.json."
+                    ? "No shader variants apply to this file or selected entry point."
                     : "Open an HLSL document so the language server can load shader variants.",
                 cancellationToken);
             return;
@@ -1879,22 +1916,62 @@ public sealed class HlslBootstrapPackage : AsyncPackage
     private async Task<Uri> GetActiveDocumentUriAsync(CancellationToken cancellationToken)
     {
         await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
-        var textManager = await GetServiceAsync(typeof(SVsTextManager)) as IVsTextManager;
-        if (textManager == null ||
-            ErrorHandler.Failed(textManager.GetActiveView(1, null, out var view)) ||
-            view == null ||
-            ErrorHandler.Failed(view.GetBuffer(out var lines)) ||
-            lines is not IVsUserData userData)
+        return TryGetActiveHlslEditorContext(out var uri, out _, out _, out _)
+            ? uri
+            : null;
+    }
+
+    private void OnHlslContextCommandBeforeQueryStatus(object sender, EventArgs eventArgs)
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        _ = eventArgs;
+        if (sender is OleMenuCommand command)
         {
-            return null;
+            var available =
+                TryGetActiveHlslEditorContext(out _, out _, out _, out _);
+            command.Visible = available;
+            command.Enabled = available;
+        }
+    }
+
+    private bool TryGetActiveHlslEditorContext(
+        out Uri uri,
+        out int line,
+        out int character,
+        out IVsTextLines lines)
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        uri = null;
+        line = 0;
+        character = 0;
+        lines = null;
+        if (commandTextManager == null ||
+            ErrorHandler.Failed(commandTextManager.GetActiveView(1, null, out var view)) ||
+            view == null ||
+            ErrorHandler.Failed(view.GetCaretPos(out line, out character)) ||
+            ErrorHandler.Failed(view.GetBuffer(out var bufferLines)) ||
+            bufferLines is not IVsUserData userData)
+        {
+            return false;
         }
         var monikerKey = VSConstants.VsTextBufferUserDataGuid.VsBufferMoniker_guid;
         if (ErrorHandler.Failed(userData.GetData(ref monikerKey, out var value)) ||
             value is not string moniker)
         {
-            return null;
+            return false;
         }
-        return new Uri(Path.GetFullPath(moniker));
+        var extension = Path.GetExtension(moniker);
+        if (!string.Equals(extension, ".hlsl", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(extension, ".hlsli", StringComparison.OrdinalIgnoreCase) &&
+            !ParseExtensions(GetOptions().FileExtensions).Contains(
+                extension,
+                StringComparer.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+        uri = new Uri(Path.GetFullPath(moniker));
+        lines = bufferLines;
+        return true;
     }
 
     private async Task ShowInformationAsync(string message, CancellationToken cancellationToken)

@@ -47,8 +47,10 @@ Changes apply to open and future documents. Shutdown never waits for a failed
 LSP broker operation and bounds child-process cleanup.
 
 When a `shadertoolsconfig.json` declares named compilation variants under
-`hlsl.variants`, run **Tools > HLSL Select Shader Variant** to pick the active
-variant for the current document. Changing the active variant reanalyzes open
+`hlsl.variants`, right-click the shader and choose
+**HLSL > Select Shader Variant**. The picker contains only variants applicable
+to that file; on a configured entry point it narrows further to that entry
+point. Changing the active variant reanalyzes open
 documents and restarts the language server only if the variant selects a
 different DXC runtime. See the repository's
 [named compilation variants](../../docs/shadertoolsconfig.md#named-compilation-variants)
@@ -59,7 +61,7 @@ active variant and the picker's own state stay in sync either way, because
 the server reports its resulting variant back through a
 `hlsl/activeVariantChanged` notification after the command completes.
 
-Run **Tools > HLSL Shader Compilation** to open a tool window with the active
+Choose **HLSL > Shader Compilation** from the editor context menu to open a tool window with the active
 HLSL document's effective compiler configuration, compiler success/failure and
 diagnostics, output type and size, DXC reflection (signatures, resource
 bindings, and thread-group size), and include directories/resolved include
@@ -96,10 +98,10 @@ language client, regardless of whether it advertises the standard
 `callHierarchyProvider: true` capability -- unlike hover, signature help,
 and go-to-definition, that SDK has no bespoke call-hierarchy hookup at all.
 A prior version of this document assumed otherwise; this has since been
-confirmed incorrect, and this client now ships a **custom** Tools command
+confirmed incorrect, and this client now ships a **custom** editor-context command
 and tool window instead of relying on any built-in surface.
 
-Run **Tools > HLSL Call Hierarchy** with the caret on a function to open a
+Right-click a function and choose **HLSL > Call Hierarchy** to open a
 dedicated tool window. It issues `textDocument/prepareCallHierarchy` at the
 caret, then `callHierarchy/incomingCalls` and `callHierarchy/outgoingCalls`
 for the resolved item, and shows the selected callable plus its incoming
@@ -119,7 +121,7 @@ translated client-side into a plain, LSP-agnostic exception so the
 Bootstrap assembly issuing the tool window never depends on
 StreamJsonRpc/LSP wire types).
 
-Run **Tools > HLSL Entry-Point Data Flow** to open a tool window that
+Right-click an entry point and choose **HLSL > Entry-Point Data Flow** to open a tool window that
 traces every function transitively reachable from the active HLSL
 document's configured entry point, alongside the globals/resources those
 functions read or write and the functions/declarations unused for the
@@ -224,7 +226,8 @@ Visual Studio LSP traces can be enabled with `"hlsl.trace.server": "Verbose"`.
 
 `HlslLsp.VisualStudio.Tests` covers the language client's custom-notification
 wiring (`hlsl/activeVariantChanged`, `hlsl/didChangeActiveVariant`,
-`hlsl/dxcRuntimeRestartRequired`) with real `StreamJsonRpc` instances
+`hlsl/dxcRuntimeRestartRequired`, `hlsl/configurationChanged`, and explicit
+configuration-file save notifications) with real `StreamJsonRpc` instances
 connected over an in-memory duplex stream, driven through the same
 `ILanguageClientCustomMessage2` entry points (`CustomMessageTarget`,
 `AttachForCustomMessageAsync`) Visual Studio itself uses — concrete

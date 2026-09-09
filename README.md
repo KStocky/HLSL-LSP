@@ -61,9 +61,9 @@ alignment, and packed offset, with a Memory Layout action backed by the
 cross-editor `hlsl/memoryLayout` protocol. Layout rules and limitations are
 documented in [`docs/memory-layout.md`](docs/memory-layout.md).
 
-In Visual Studio, select **Memory Layout** in Quick Info or use
-**Tools > HLSL Memory Layout**. In Visual Studio Code, select the hover action
-or run **HLSL: Show Memory Layout** from the Command Palette.
+In Visual Studio, select **Memory Layout** in Quick Info or right-click the
+declaration and choose **HLSL > Memory Layout**. In Visual Studio Code, select
+the hover action or run **HLSL: Show Memory Layout** from the Command Palette.
 
 ### Shader compilation
 
@@ -80,8 +80,9 @@ explains those limitations instead of fabricating output. Protocol, refresh
 behavior, and DXIL/SPIR-V differences are documented in
 [`docs/compilation-info.md`](docs/compilation-info.md).
 
-In Visual Studio, run **Tools > HLSL Shader Compilation**. In Visual Studio
-Code, run **HLSL: Show Shader Compilation** from the Command Palette.
+In Visual Studio, right-click the shader and choose
+**HLSL > Shader Compilation**. In Visual Studio Code, run
+**HLSL: Show Shader Compilation** from the Command Palette.
 
 ### Compute visualization
 
@@ -219,7 +220,7 @@ generated sources that cannot be represented as file URIs are not renamed.
 Call hierarchy shows compiler-resolved incoming and outgoing calls without
 conflating overloads. Visual Studio Code uses its built-in **Show Call
 Hierarchy** command; Visual Studio exposes the same server results through
-**Tools > HLSL Call Hierarchy** because its current LSP client does not
+**HLSL > Call Hierarchy** in the editor context menu because its current LSP client does not
 implement the standard call-hierarchy methods. A dedicated Entry-Point Data
 Flow view traces the active variant's configured entry point, reports
 reachable and recursive functions, conservatively classifies global and
@@ -228,8 +229,9 @@ declarations. Traversal is bounded and uses the current unsaved document and
 includes. See [`docs/call-hierarchy.md`](docs/call-hierarchy.md) for identity,
 staleness, access-classification, and DXC limitation details.
 
-In Visual Studio, run **Tools > HLSL Entry-Point Data Flow**. In Visual Studio
-Code, run **HLSL: Show Entry-Point Data Flow** from the Command Palette.
+In Visual Studio, right-click the entry point and choose
+**HLSL > Entry-Point Data Flow**. In Visual Studio Code, run
+**HLSL: Show Entry-Point Data Flow** from the Command Palette.
 
 ### Navigation bar
 
@@ -501,8 +503,8 @@ A shader file can also declare named compilation variants under `hlsl.variants`,
 combining an entry point, stage/target profile, macros, and platform settings
 with deterministic inheritance and per-file applicability. Select the active
 variant with **HLSL: Select Shader Variant** in Visual Studio Code (or the
-`hlsl.activeVariant` setting) or **Tools > HLSL Select Shader Variant** in Visual
-Studio. Changing the active variant reanalyzes open documents, restarting only
+`hlsl.activeVariant` setting) or **HLSL > Select Shader Variant** in Visual
+Studio's editor context menu. Changing the active variant reanalyzes open documents, restarting only
 when the variant selects a different DXC runtime. See
 [Named compilation variants](docs/shadertoolsconfig.md#named-compilation-variants)
 for the schema, inheritance, and reporting of invalid or conflicting variants.

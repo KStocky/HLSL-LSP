@@ -158,7 +158,7 @@ session-only:
   settings can schedule cache-hit reanalysis, but identical diagnostics are
   not republished.
 - **Visual Studio** updates the language client's cached active variant (the
-  same field the manual **Tools > HLSL Select Shader Variant** picker
+  same field the manual **HLSL > Select Shader Variant** context-menu picker
   writes, reapplied through `InitializationOptions` after a controlled
   runtime restart) and refreshes the Shader Compilation / Resource Bindings
   windows if open, again without re-notifying the server.

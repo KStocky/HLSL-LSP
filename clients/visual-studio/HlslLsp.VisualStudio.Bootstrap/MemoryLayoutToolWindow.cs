@@ -58,8 +58,8 @@ internal sealed class MemoryLayoutControl : UserControl
         {
             content.Children.Add(new TextBlock
             {
-                Text = "Place the caret on an HLSL type, cbuffer, or member, then run " +
-                       "Tools > HLSL Memory Layout.",
+                Text = "Right-click an HLSL type, cbuffer, or member, then choose " +
+                       "HLSL > Memory Layout.",
                 TextWrapping = TextWrapping.Wrap,
             });
             return;

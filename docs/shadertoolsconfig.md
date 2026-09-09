@@ -254,7 +254,8 @@ runtime, in which case the same controlled restart used by
 
 - **Visual Studio Code:** run **HLSL: Select Shader Variant** (also available in
   the status bar) or set `hlsl.activeVariant`.
-- **Visual Studio:** run **Tools > HLSL Select Shader Variant**.
+- **Visual Studio:** right-click the shader and choose
+  **HLSL > Select Shader Variant**.
 
 Both clients read the available variants from the server, so the picker only
 lists variants declared for the current document.
@@ -325,6 +326,15 @@ missing, incompatible, or conflicting selections are reported without restarting
 so a bad value cannot cause a restart loop. The active runtime path and version
 are available through the `hlsl/dxcRuntime` request and each client's diagnostics
 command.
+
+## Live configuration updates
+
+Creating, changing, deleting, or moving a `shadertoolsconfig.json` file
+reanalyzes affected open shaders without requiring the editor or document to be
+restarted. Visual Studio refreshes open configuration-dependent HLSL tool windows
+only after that reanalysis completes, so compilation, reflection, preprocessing,
+data-flow, compute-visualization, call-hierarchy, and navigation results do not
+race against stale settings.
 
 ## Editor-setting precedence
 

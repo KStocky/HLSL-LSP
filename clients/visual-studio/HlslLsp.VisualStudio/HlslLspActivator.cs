@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -159,7 +160,8 @@ public sealed class HlslLspActivator :
             workspaceActiveVariant,
             initialOptions.InlayHints,
             OnServerRuntimeRestartRequestedAsync,
-            OnActiveVariantChangedFromServerAsync);
+            OnActiveVariantChangedFromServerAsync,
+            OnConfigurationChangedFromServerAsync);
         MemoryLayoutBridge.Register(languageClient.GetMemoryLayoutAsync);
         CompilationInfoBridge.Register(languageClient.GetCompilationInfoAsync);
         PreprocessorExplorerBridge.Register(languageClient.GetPreprocessorExplorerAsync);
@@ -354,6 +356,8 @@ public sealed class HlslLspActivator :
                 await languageClient.RestartWithRuntimeAsync(
                     options.LanguageVersion,
                     requested);
+                RefreshVariantDependentWindows(CancellationToken.None);
+                navigationBars?.Refresh();
             })
             .FileAndForget("HlslLsp/RuntimeRestart");
         return Task.CompletedTask;
@@ -398,12 +402,27 @@ public sealed class HlslLspActivator :
         return Task.CompletedTask;
     }
 
+    private Task OnConfigurationChangedFromServerAsync()
+    {
+        ActivityLog.LogInformation(
+            nameof(HlslLspActivator),
+            "Refreshing HLSL views after server configuration processing.");
+        RefreshVariantDependentWindows(CancellationToken.None);
+        joinableTaskFactory.RunAsync(async () =>
+            {
+                await joinableTaskFactory.SwitchToMainThreadAsync();
+                navigationBars?.Refresh();
+            })
+            .FileAndForget("HlslLsp/RefreshNavigationBarAfterConfigurationChange");
+        return Task.CompletedTask;
+    }
+
     private void RefreshVariantDependentWindows(CancellationToken cancellationToken)
     {
         // A previously opened Shader Compilation window can only become stale
         // through this variant change (the server itself is not restarted),
         // so refresh it here rather than waiting for the next manual
-        // invocation of the Tools command.
+        // invocation of the context command.
         joinableTaskFactory.RunAsync(
                 () => host.RefreshCompilationInfoIfOpenAsync(null, cancellationToken))
             .FileAndForget("HlslLsp/RefreshCompilationInfo");
@@ -466,6 +485,26 @@ public sealed class HlslLspActivator :
         {
             if (string.IsNullOrEmpty(moniker))
             {
+                return VSConstants.S_OK;
+            }
+            if (string.Equals(
+                    Path.GetFileName(moniker),
+                    "shadertoolsconfig.json",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                ActivityLog.LogInformation(
+                    nameof(HlslLspActivator),
+                    "Notifying the HLSL language server about a saved configuration file.");
+                var client = languageClient;
+                if (client != null &&
+                    Uri.TryCreate(moniker, UriKind.Absolute, out var configurationUri) &&
+                    configurationUri.IsFile)
+                {
+                    joinableTaskFactory.RunAsync(
+                            () => client.NotifyConfigurationFileChangedAsync(
+                                configurationUri))
+                        .FileAndForget("HlslLsp/NotifyConfigurationFileSave");
+                }
                 return VSConstants.S_OK;
             }
             joinableTaskFactory.RunAsync(

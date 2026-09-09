@@ -490,7 +490,7 @@ internal static class DisassemblyFileContent
 // The bridge decouples the WPF tool window (Bootstrap assembly) from the
 // language client (Client assembly), mirroring MemoryLayoutBridge. There is no
 // hover trigger for this feature, so only a request handler is registered;
-// presentation is driven entirely by the Tools command and its refresh hooks.
+// presentation is driven entirely by the context command and its refresh hooks.
 public static class CompilationInfoBridge
 {
     private static Func<Uri, CancellationToken, Task<CompilationInfoModel>> request;

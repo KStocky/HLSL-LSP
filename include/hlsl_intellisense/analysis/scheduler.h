@@ -36,7 +36,7 @@ struct SchedulerMetrics {
     std::size_t active{};
 };
 
-enum class WorkPriority : std::uint8_t { background, interactive };
+enum class WorkPriority : std::uint8_t { background, interactive, barrier };
 
 class Scheduler final {
   public:

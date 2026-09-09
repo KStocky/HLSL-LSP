@@ -337,6 +337,7 @@ class Server final {
     ServerOptions options_;
     analysis::Manager analysis_;
     mutable std::mutex state_mutex_;
+    std::unordered_map<std::string, std::string> configuration_watch_states_;
     std::unordered_map<std::string, std::uint64_t> analysis_generations_;
     // The diagnostics last published for each document (keyed by document
     // identity), used exclusively to derive textDocument/codeAction results.

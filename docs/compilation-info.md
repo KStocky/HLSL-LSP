@@ -6,8 +6,9 @@ Compilation** view and its cross-editor `hlsl/compilationInfo` protocol.
 For a runnable walkthrough, see the
 [Shader Compilation tutorial](tutorials/shader-compilation.md).
 
-In Visual Studio, run **Tools > HLSL Shader Compilation**. In Visual Studio
-Code, run **HLSL: Show Shader Compilation** from the Command Palette. Both
+In Visual Studio, right-click the shader and choose
+**HLSL > Shader Compilation**. In Visual Studio Code, run
+**HLSL: Show Shader Compilation** from the Command Palette. Both
 commands operate on the active open HLSL document; there is no separate
 compilation view and a separate reflection view, and neither command accepts
 a variant argument.
@@ -170,7 +171,7 @@ clients also refresh it automatically:
   keystroke) shortly after the document is edited.
 - **Visual Studio** refreshes the open tool window when the active variant
   changes and when the shown document is saved. Visual Studio does not
-  currently refresh on every keystroke; run the Tools command again, or save
+  currently refresh on every keystroke; run the context command again, or save
   the document, to see an in-progress edit reflected sooner.
 
 Every refresh path is guarded by a monotonically increasing request

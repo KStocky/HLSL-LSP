@@ -89,11 +89,13 @@ the active shader matches one of its patterns.
 2. Select a variant:
    - **Visual Studio Code:** run **HLSL: Select Shader Variant** from the
      Command Palette, or select the variant from the HLSL status-bar item.
-   - **Visual Studio:** run **Tools > HLSL Select Shader Variant**.
+   - **Visual Studio:** right-click the shader and choose
+     **HLSL > Select Shader Variant**.
 3. Choose **Vertex**.
 4. Open Shader Compilation:
    - **Visual Studio Code:** run **HLSL: Show Shader Compilation**.
-   - **Visual Studio:** run **Tools > HLSL Shader Compilation**.
+   - **Visual Studio:** right-click the shader and choose
+     **HLSL > Shader Compilation**.
 5. Confirm that the view reports:
    - active variant `Vertex`;
    - entry point `MainVS`;

@@ -160,4 +160,10 @@ internal sealed class HlslNavigationBarManager
         client = null;
         activeClient?.Dispose();
     }
+
+    internal void Refresh()
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        client?.Refresh();
+    }
 }

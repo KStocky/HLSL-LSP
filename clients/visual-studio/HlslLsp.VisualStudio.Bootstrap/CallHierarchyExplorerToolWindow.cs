@@ -36,8 +36,8 @@ public sealed class CallHierarchyExplorerToolWindow : ToolWindowPane
     private bool wired;
     private string banner;
     private string placeholderMessage =
-        "Open an HLSL document, place the caret on a function, then run " +
-        "Tools > HLSL Call Hierarchy.";
+        "Right-click a function in an HLSL document, then choose " +
+        "HLSL > Call Hierarchy.";
 
     public CallHierarchyExplorerToolWindow()
         : base(null)
@@ -108,7 +108,7 @@ public sealed class CallHierarchyExplorerToolWindow : ToolWindowPane
     // Wires the control's Back/drill-in interactions to package-owned
     // callbacks exactly once per window instance: ShowToolWindowAsync/
     // FindToolWindowAsync return the same singleton pane across every
-    // invocation of the Tools command, so re-wiring on each call would
+    // invocation of the context command, so re-wiring on each call would
     // double- (then triple-, ...) subscribe the same event without this
     // guard. onDrillIn is invoked with the clicked caller/callee item and
     // which section (incoming callers vs. outgoing callees) it was found
@@ -304,7 +304,7 @@ internal sealed class CallHierarchyExplorerControl : UserControl
             HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
             Content = content,
         };
-        Render(null, false, null, "Open an HLSL document, place the caret on a function, then run Tools > HLSL Call Hierarchy.");
+        Render(null, false, null, "Right-click a function in an HLSL document, then choose HLSL > Call Hierarchy.");
     }
 
     internal void Render(CallHierarchyFrame frame, bool canGoBack, string banner, string placeholderMessage)
