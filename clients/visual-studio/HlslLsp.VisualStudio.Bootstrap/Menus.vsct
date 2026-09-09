@@ -7,24 +7,42 @@
       <Group guid="guidHlslLspCommands" id="HlslLspGroup" priority="0x0600">
         <Parent guid="guidSHLMainMenu" id="IDM_VS_MENU_TOOLS"/>
       </Group>
+      <Group guid="guidHlslLspCommands" id="HlslContextPlacementGroup" priority="0x0800">
+        <Parent guid="guidSHLMainMenu" id="IDM_VS_CTXT_CODEWIN"/>
+      </Group>
+      <Group guid="guidHlslLspCommands" id="HlslContextGroup" priority="0x0100">
+        <Parent guid="guidHlslLspCommands" id="HlslContextMenu"/>
+      </Group>
     </Groups>
+    <Menus>
+      <Menu guid="guidHlslLspCommands" id="HlslContextMenu" priority="0x0800" type="Menu">
+        <Parent guid="guidHlslLspCommands" id="HlslContextPlacementGroup"/>
+        <Strings>
+          <ButtonText>HLSL</ButtonText>
+          <CommandName>HLSL</CommandName>
+        </Strings>
+      </Menu>
+    </Menus>
     <Buttons>
       <Button guid="guidHlslLspCommands" id="ShowMemoryLayout" priority="0x0100" type="Button">
-        <Parent guid="guidHlslLspCommands" id="HlslLspGroup"/>
+        <Parent guid="guidHlslLspCommands" id="HlslContextGroup"/>
+        <CommandFlag>DynamicVisibility</CommandFlag>
         <Strings>
-          <ButtonText>HLSL Memory Layout</ButtonText>
+          <ButtonText>Memory Layout</ButtonText>
         </Strings>
       </Button>
       <Button guid="guidHlslLspCommands" id="SelectVariant" priority="0x0101" type="Button">
-        <Parent guid="guidHlslLspCommands" id="HlslLspGroup"/>
+        <Parent guid="guidHlslLspCommands" id="HlslContextGroup"/>
+        <CommandFlag>DynamicVisibility</CommandFlag>
         <Strings>
-          <ButtonText>HLSL Select Shader Variant</ButtonText>
+          <ButtonText>Select Shader Variant</ButtonText>
         </Strings>
       </Button>
       <Button guid="guidHlslLspCommands" id="ShowCompilationInfo" priority="0x0102" type="Button">
-        <Parent guid="guidHlslLspCommands" id="HlslLspGroup"/>
+        <Parent guid="guidHlslLspCommands" id="HlslContextGroup"/>
+        <CommandFlag>DynamicVisibility</CommandFlag>
         <Strings>
-          <ButtonText>HLSL Shader Compilation</ButtonText>
+          <ButtonText>Shader Compilation</ButtonText>
         </Strings>
       </Button>
       <Button guid="guidHlslLspCommands" id="ShowResourceBindings" priority="0x0103" type="Button">
@@ -40,15 +58,17 @@
         </Strings>
       </Button>
       <Button guid="guidHlslLspCommands" id="ShowEntryPointDataFlow" priority="0x0105" type="Button">
-        <Parent guid="guidHlslLspCommands" id="HlslLspGroup"/>
+        <Parent guid="guidHlslLspCommands" id="HlslContextGroup"/>
+        <CommandFlag>DynamicVisibility</CommandFlag>
         <Strings>
-          <ButtonText>HLSL Entry-Point Data Flow</ButtonText>
+          <ButtonText>Entry-Point Data Flow</ButtonText>
         </Strings>
       </Button>
       <Button guid="guidHlslLspCommands" id="ShowCallHierarchy" priority="0x0106" type="Button">
-        <Parent guid="guidHlslLspCommands" id="HlslLspGroup"/>
+        <Parent guid="guidHlslLspCommands" id="HlslContextGroup"/>
+        <CommandFlag>DynamicVisibility</CommandFlag>
         <Strings>
-          <ButtonText>HLSL Call Hierarchy</ButtonText>
+          <ButtonText>Call Hierarchy</ButtonText>
         </Strings>
       </Button>
       <Button guid="guidHlslLspCommands" id="ShowComputeVisualization" priority="0x0107" type="Button">
@@ -63,6 +83,9 @@
     <GuidSymbol name="guidHlslLspPackage" value="{5ac7fbe7-1b9f-45eb-bca6-ffb9ae1ab67f}"/>
     <GuidSymbol name="guidHlslLspCommands" value="{cedfa85a-cd51-4825-af1f-0e05bd475426}">
       <IDSymbol name="HlslLspGroup" value="0x1020"/>
+      <IDSymbol name="HlslContextMenu" value="0x1021"/>
+      <IDSymbol name="HlslContextGroup" value="0x1022"/>
+      <IDSymbol name="HlslContextPlacementGroup" value="0x1023"/>
       <IDSymbol name="ShowMemoryLayout" value="0x0100"/>
       <IDSymbol name="SelectVariant" value="0x0101"/>
       <IDSymbol name="ShowCompilationInfo" value="0x0102"/>

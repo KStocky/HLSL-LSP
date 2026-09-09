@@ -323,7 +323,7 @@ internal static class EntryPointDataFlowNavigation
 // language client (Client assembly), mirroring CompilationInfoBridge and
 // PreprocessorExplorerBridge. There is no hover trigger for this feature, so
 // only a request handler is registered; presentation is driven entirely by
-// the Tools command and its refresh hooks.
+// the context command and its refresh hooks.
 public static class EntryPointDataFlowBridge
 {
     private static Func<Uri, CancellationToken, Task<EntryPointDataFlowModel>> request;
@@ -358,7 +358,7 @@ internal static class EntryPointDataFlowRefreshLogic
     // already showed that exact same document -- never merely because the
     // caller happened to already hold a window reference. Relying on the
     // latter (existingWindow != null) previously erased good content on a
-    // failed manual retry through the explicit Tools command, which always
+    // failed manual retry through the explicit command, which always
     // constructs its own request without an existing-window reference even
     // when the window is already open and showing the requested document.
     internal static bool ShouldPreserveContentOnFailure(Uri priorDocumentUri, Uri requestedUri)

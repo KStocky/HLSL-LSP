@@ -29,7 +29,7 @@ internal sealed class VariantSelectionDialog : DialogWindow
 
         listBox = new ListBox { Margin = new Thickness(12) };
         listBox.Items.Add(new ListBoxItem { Content = "(No variant)", Tag = null });
-        var selectedIndex = 0;
+        var selectedIndex = string.IsNullOrEmpty(active) ? 0 : -1;
         if (variants?.Variants != null)
         {
             var index = 1;
@@ -38,12 +38,9 @@ internal sealed class VariantSelectionDialog : DialogWindow
                 var description = string.IsNullOrEmpty(variant.Description)
                     ? string.Empty
                     : " \u2014 " + variant.Description;
-                var note = variant.Applicable
-                    ? string.Empty
-                    : "  (not applicable to this file)";
                 listBox.Items.Add(new ListBoxItem
                 {
-                    Content = variant.Name + description + note,
+                    Content = variant.Name + description,
                     Tag = variant.Name,
                 });
                 if (string.Equals(variant.Name, active, StringComparison.Ordinal))
@@ -62,7 +59,9 @@ internal sealed class VariantSelectionDialog : DialogWindow
             Width = 84,
             Margin = new Thickness(0, 0, 8, 0),
             IsDefault = true,
+            IsEnabled = selectedIndex >= 0,
         };
+        listBox.SelectionChanged += (_, _) => ok.IsEnabled = listBox.SelectedItem != null;
         ok.Click += (_, _) => Accept();
         var cancel = new Button { Content = "Cancel", Width = 84, IsCancel = true };
 

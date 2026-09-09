@@ -969,6 +969,57 @@ void Manager::analyze(AnalysisInput input) {
     }
 }
 
+void Manager::after_roots_idle(std::vector<std::string> roots, std::function<void()> callback) {
+    if (!callback) {
+        throw std::invalid_argument{"Analysis completion callback is required"};
+    }
+    std::ranges::sort(roots);
+    const auto unique_end = std::ranges::unique(roots).begin();
+    roots.erase(unique_end, roots.end());
+    if (roots.empty()) {
+        callback();
+        return;
+    }
+
+    struct CompletionState {
+        std::atomic_size_t remaining;
+        std::function<void()> callback;
+    };
+    auto completion = std::make_shared<CompletionState>(roots.size(), std::move(callback));
+    const auto complete_one = [completion] {
+        if (completion->remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+            completion->callback();
+        }
+    };
+    struct CompletionTicket {
+        std::function<void()> complete;
+        ErrorHandler report_error;
+        ~CompletionTicket() {
+            try {
+                complete();
+            } catch (const std::exception& error) {
+                if (report_error) {
+                    report_error(error.what());
+                }
+            } catch (...) {
+                if (report_error) {
+                    report_error("Analysis completion callback failed");
+                }
+            }
+        }
+    };
+    for (auto& root : roots) {
+        json_rpc::CancellationToken cancellation;
+        auto ticket = std::make_shared<CompletionTicket>(complete_one, implementation_->errors);
+        static_cast<void>(implementation_->scheduler.submit(
+            std::move(root), std::numeric_limits<std::int64_t>::max(), WorkPriority::barrier,
+            cancellation,
+            [ticket = std::move(ticket)](std::size_t, const json_rpc::CancellationToken&) mutable {
+                ticket.reset();
+            }));
+    }
+}
+
 void Manager::erase(std::string_view root_identity) {
     implementation_->erase(std::string{root_identity});
 }

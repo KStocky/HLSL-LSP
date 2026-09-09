@@ -92,7 +92,7 @@ bool Scheduler::submit(std::string root, std::int64_t version, WorkPriority prio
     const auto per_worker_capacity =
         options_.queue_capacity / options_.worker_count +
         (owner_for(root) < options_.queue_capacity % options_.worker_count ? 1U : 0U);
-    if (worker.queue.size() >= per_worker_capacity) {
+    if (priority != WorkPriority::barrier && worker.queue.size() >= per_worker_capacity) {
         auto removable = std::ranges::find_if(worker.queue, [](const auto& task) {
             return task.priority == WorkPriority::background;
         });
@@ -118,7 +118,11 @@ bool Scheduler::submit(std::string root, std::int64_t version, WorkPriority prio
     }
 
     auto insert_at = worker.queue.end();
-    if (priority == WorkPriority::interactive) {
+    if (priority == WorkPriority::background) {
+        insert_at = std::ranges::find_if(worker.queue, [&root](const auto& task) {
+            return task.priority == WorkPriority::barrier && task.root == root;
+        });
+    } else if (priority == WorkPriority::interactive) {
         const auto same_root = std::ranges::find_if(worker.queue, [&root](const auto& task) {
             return task.priority == WorkPriority::background && task.root == root;
         });
@@ -128,6 +132,15 @@ bool Scheduler::submit(std::string root, std::int64_t version, WorkPriority prio
                                                    return task.priority == WorkPriority::background;
                                                })
                         : std::next(same_root);
+    } else if (priority == WorkPriority::barrier) {
+        const auto same_root = std::ranges::find_last_if(
+            worker.queue, [&root](const auto& task) { return task.root == root; });
+        insert_at = same_root.empty()
+                        ? std::ranges::find_if(worker.queue,
+                                               [](const auto& task) {
+                                                   return task.priority == WorkPriority::background;
+                                               })
+                        : std::next(same_root.begin());
     }
     worker.queue.insert(insert_at, Task{.root = std::move(root),
                                         .version = version,

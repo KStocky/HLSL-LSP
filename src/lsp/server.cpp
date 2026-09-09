@@ -2127,6 +2127,10 @@ Server::Server(NotificationSender sender, Logger logger, ServerOptions options,
 
 Server::~Server() {
     cancel_all_requests();
+    {
+        std::scoped_lock state_lock{state_mutex_};
+        state_ = State::shutdown;
+    }
     analysis_.shutdown();
 }
 
@@ -4911,6 +4915,8 @@ void Server::did_change_workspace_folders(const std::optional<Json>& params) {
 
 void Server::did_change_watched_files(const std::optional<Json>& params) {
     bool refresh_inlay_hints{};
+    Json changed_configuration_uris = Json::array();
+    std::unordered_set<std::string> configuration_root_identities;
     try {
         require_running();
         const auto& changes = member(object_params(params), "changes");
@@ -4923,7 +4929,6 @@ void Server::did_change_watched_files(const std::optional<Json>& params) {
         for (const auto& change : changes) {
             try {
                 const auto changed = workspace::DocumentUri::from_uri(string_member(change, "uri"));
-                changed_identities.insert(changed.identity());
                 auto filename = std::filesystem::path{changed.path()}.filename().string();
 #ifdef _WIN32
                 std::ranges::transform(filename, filename.begin(), [](char value) {
@@ -4931,16 +4936,40 @@ void Server::did_change_watched_files(const std::optional<Json>& params) {
                 });
 #endif
                 if (filename == workspace::configuration_file_name) {
+                    std::ifstream configuration_stream{changed.path(), std::ios::binary};
+                    std::string watch_state;
+                    if (configuration_stream) {
+                        watch_state.assign(std::istreambuf_iterator<char>{configuration_stream},
+                                           std::istreambuf_iterator<char>{});
+                        watch_state.insert(0, "present:");
+                    } else {
+                        std::error_code existence_error;
+                        watch_state = std::filesystem::exists(changed.path(), existence_error)
+                                          ? "unreadable"
+                                          : "missing";
+                    }
+                    {
+                        std::scoped_lock state_lock{state_mutex_};
+                        const auto previous = configuration_watch_states_.find(changed.identity());
+                        if (previous != configuration_watch_states_.end() &&
+                            previous->second == watch_state) {
+                            continue;
+                        }
+                        configuration_watch_states_.insert_or_assign(changed.identity(),
+                                                                     std::move(watch_state));
+                    }
+                    changed_configuration_uris.push_back(changed.uri());
                     changed_configuration_directories.push_back(
                         workspace::DocumentUri::from_path(
                             std::filesystem::path{changed.path()}.parent_path().string())
                             .identity());
                 }
+                changed_identities.insert(changed.identity());
             } catch (const workspace::DocumentError& error) {
                 invalid_params(error.what());
             }
         }
-        const bool hints_changed = !changes.empty();
+        const bool hints_changed = !changed_identities.empty();
         if (hints_changed) {
             invalidate_inlay_hints(false);
             refresh_inlay_hints = true;
@@ -4948,10 +4977,9 @@ void Server::did_change_watched_files(const std::optional<Json>& params) {
 
         analysis_.invalidate_include_metadata(changed_identities);
         std::vector<std::string> affected_roots = analysis_.dependent_root_uris(changed_identities);
-        std::unordered_set<std::string> affected_root_identities;
         for (const auto& root : analysis_.roots()) {
             if (std::ranges::find(affected_roots, root.root_uri) != affected_roots.end()) {
-                affected_root_identities.insert(root.root_identity);
+                configuration_root_identities.insert(root.root_identity);
             }
         }
 
@@ -4982,7 +5010,7 @@ void Server::did_change_watched_files(const std::optional<Json>& params) {
         for (const auto& document : open_documents) {
             const auto& identity = document.document_uri().identity();
             if (in_changed_configuration_scope(identity)) {
-                if (affected_root_identities.emplace(identity).second) {
+                if (configuration_root_identities.emplace(identity).second) {
                     affected_roots.push_back(document.uri());
                 }
             }
@@ -4990,10 +5018,29 @@ void Server::did_change_watched_files(const std::optional<Json>& params) {
         for (const auto& root_uri : affected_roots) {
             analyze_and_publish(root_uri);
         }
-        reevaluate_runtime_selection();
-        reevaluate_variant_selection();
     } catch (const std::exception& error) {
         log(error.what());
+    }
+    if (!changed_configuration_uris.empty()) {
+        try {
+            reevaluate_runtime_selection();
+            reevaluate_variant_selection();
+        } catch (const std::exception& error) {
+            log(error.what());
+        }
+        std::vector<std::string> roots{configuration_root_identities.begin(),
+                                       configuration_root_identities.end()};
+        analysis_.after_roots_idle(
+            std::move(roots), [this, uris = std::move(changed_configuration_uris)]() mutable {
+                {
+                    std::scoped_lock state_lock{state_mutex_};
+                    if (state_ != State::running) {
+                        return;
+                    }
+                }
+                sender_(json_rpc::Notification{.method = "hlsl/configurationChanged",
+                                               .params = Json{{"uris", std::move(uris)}}});
+            });
     }
     if (refresh_inlay_hints) {
         finalize_inlay_hint_refresh();
@@ -5397,6 +5444,7 @@ Json Server::variants(const std::optional<Json>& params) {
     struct Aggregate {
         std::string name;
         std::string description;
+        std::string entry_point;
         bool is_default{};
         bool applicable{};
     };
@@ -5422,19 +5470,28 @@ Json Server::variants(const std::optional<Json>& params) {
                 continue;
             }
             for (const auto& variant : configuration.variants) {
+                if (target_uri && !variant.applicable) {
+                    continue;
+                }
                 const auto found = index.find(variant.name);
                 if (found == index.end()) {
                     index.emplace(variant.name, aggregates.size());
-                    aggregates.push_back(Aggregate{.name = variant.name,
-                                                   .description = variant.description,
-                                                   .is_default = variant.is_default,
-                                                   .applicable = variant.applicable});
+                    aggregates.push_back(
+                        Aggregate{.name = variant.name,
+                                  .description = variant.description,
+                                  .entry_point = variant.settings.entry_point.value_or(""),
+                                  .is_default = variant.is_default,
+                                  .applicable = variant.applicable});
                 } else {
                     auto& aggregate = aggregates[found->second];
                     aggregate.applicable = aggregate.applicable || variant.applicable;
                     aggregate.is_default = aggregate.is_default || variant.is_default;
                     if (aggregate.description.empty()) {
                         aggregate.description = variant.description;
+                    }
+                    const auto entry_point = variant.settings.entry_point.value_or("");
+                    if (aggregate.entry_point.empty() && !entry_point.empty()) {
+                        aggregate.entry_point = entry_point;
                     }
                 }
             }
@@ -5445,6 +5502,7 @@ Json Server::variants(const std::optional<Json>& params) {
     for (const auto& aggregate : aggregates) {
         variant_list.push_back(Json{{"name", aggregate.name},
                                     {"description", aggregate.description},
+                                    {"entryPoint", aggregate.entry_point},
                                     {"default", aggregate.is_default},
                                     {"applicable", aggregate.applicable}});
     }

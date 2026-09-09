@@ -1403,11 +1403,18 @@ TEST_CASE("Inlay invalidation and refresh survive failed dependent reanalysis",
                   hlsl_intellisense::workspace::DocumentUri::from_path(config_path.string()).uri()},
                  {"type", 2}}})}}}));
     REQUIRE(outbound_requests.size() == 1);
+    CHECK(std::ranges::none_of(notifications, [](const auto& notification) {
+        return notification.method == "hlsl/configurationChanged";
+    }));
     release.set_value();
     const auto superseded = response.get();
     const auto* error = std::get_if<hlsl_intellisense::json_rpc::ErrorResponse>(&superseded);
     REQUIRE(error != nullptr);
     CHECK(error->error.code == hlsl_intellisense::json_rpc::content_modified_code);
+    server.wait_for_analysis();
+    CHECK(std::ranges::any_of(notifications, [](const auto& notification) {
+        return notification.method == "hlsl/configurationChanged";
+    }));
 
     static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
         .method = "textDocument/didChange",
@@ -2305,10 +2312,139 @@ TEST_CASE("Watched file-group changes reanalyze matching open shaders",
     static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
         .method = "workspace/didChangeWatchedFiles",
         .params = Json{{"changes", Json::array({Json{{"uri", config.uri()}, {"type", 2}}})}}}));
+    server.wait_for_analysis();
 
-    REQUIRE(notifications.size() == 2);
-    CHECK((*notifications.back().params)["uri"] == document.uri());
-    CHECK((*notifications.back().params)["diagnostics"].empty());
+    REQUIRE(notifications.size() == 3);
+    CHECK(notifications[1].method == "textDocument/publishDiagnostics");
+    CHECK((*notifications[1].params)["uri"] == document.uri());
+    CHECK((*notifications[1].params)["diagnostics"].empty());
+    CHECK(notifications.back().method == "hlsl/configurationChanged");
+    CHECK((*notifications.back().params)["uris"] == Json::array({config.uri()}));
+
+    const auto parse_count = server.analysis_metrics().parse_count;
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "workspace/didChangeWatchedFiles",
+        .params = Json{{"changes", Json::array({Json{{"uri", config.uri()}, {"type", 2}}})}}}));
+    server.wait_for_analysis();
+    CHECK(server.analysis_metrics().parse_count == parse_count);
+    CHECK(notifications.size() == 3);
+}
+
+TEST_CASE("Creating and deleting watched configuration updates open shaders",
+          "[lsp][configuration][watch][integration]") {
+    TestDirectory directory;
+    const auto config_path = directory.path() / "shadertoolsconfig.json";
+    const auto config = hlsl_intellisense::workspace::DocumentUri::from_path(config_path.string());
+    const auto document = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "configured.hlsl").string());
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    hlsl_intellisense::lsp::Server server{
+        [&notifications](const auto& value) { notifications.push_back(value); }};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params = Json{{"textDocument",
+                        {{"uri", document.uri()},
+                         {"languageId", "hlsl"},
+                         {"version", 1},
+                         {"text", "#ifndef CONFIGURED\n#error missing configuration\n#endif\n"
+                                  "float4 main() : SV_Target { return 1.0.xxxx; }\n"}}}}}));
+    REQUIRE(notifications.size() == 1);
+    CHECK_FALSE((*notifications.back().params)["diagnostics"].empty());
+
+    {
+        std::ofstream created{config_path};
+        REQUIRE(created);
+        created << R"({"root":true,"hlsl.preprocessorDefinitions":{"CONFIGURED":1}})";
+    }
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "workspace/didChangeWatchedFiles",
+        .params = Json{{"changes", Json::array({Json{{"uri", config.uri()}, {"type", 1}}})}}}));
+    server.wait_for_analysis();
+
+    REQUIRE(notifications.size() == 3);
+    CHECK(notifications[1].method == "textDocument/publishDiagnostics");
+    CHECK((*notifications[1].params)["diagnostics"].empty());
+    CHECK(notifications[2].method == "hlsl/configurationChanged");
+
+    REQUIRE(std::filesystem::remove(config_path));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "workspace/didChangeWatchedFiles",
+        .params = Json{{"changes", Json::array({Json{{"uri", config.uri()}, {"type", 3}}})}}}));
+    server.wait_for_analysis();
+
+    REQUIRE(notifications.size() == 5);
+    CHECK(notifications[3].method == "textDocument/publishDiagnostics");
+    CHECK_FALSE((*notifications[3].params)["diagnostics"].empty());
+    CHECK(notifications[4].method == "hlsl/configurationChanged");
+}
+
+TEST_CASE("Closing an affected shader does not lose configuration completion",
+          "[lsp][configuration][watch][cancellation]") {
+    TestDirectory directory;
+    const auto config_path = directory.path() / "shadertoolsconfig.json";
+    {
+        std::ofstream config{config_path};
+        REQUIRE(config);
+        config << R"({"root":true})";
+    }
+    const auto config = hlsl_intellisense::workspace::DocumentUri::from_path(config_path.string());
+    const auto document = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "closing.hlsl").string());
+
+    std::atomic_bool block_next_analysis{};
+    std::promise<void> entered;
+    std::promise<void> release;
+    const auto released = release.get_future().share();
+    auto hooks = std::make_shared<hlsl_intellisense::analysis::AnalysisHooks>();
+    hooks->before_analysis = [&](std::string_view, std::int64_t) {
+        if (block_next_analysis.exchange(false)) {
+            entered.set_value();
+            released.wait();
+        }
+    };
+    hlsl_intellisense::lsp::ServerOptions options;
+    options.background_analysis = true;
+    options.analysis_hooks = hooks;
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    hlsl_intellisense::lsp::Server server{
+        [&notifications](const auto& value) { notifications.push_back(value); }, {}, options};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(
+        hlsl_intellisense::json_rpc::Notification{.method = "textDocument/didOpen",
+                                                  .params = Json{{"textDocument",
+                                                                  {{"uri", document.uri()},
+                                                                   {"languageId", "hlsl"},
+                                                                   {"version", 1},
+                                                                   {"text", valid_hlsl()}}}}}));
+    server.wait_for_analysis();
+
+    {
+        std::ofstream changed{config_path, std::ios::trunc};
+        REQUIRE(changed);
+        changed << R"({"root":true,"hlsl.preprocessorDefinitions":{"CHANGED":1}})";
+    }
+    block_next_analysis.store(true);
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "workspace/didChangeWatchedFiles",
+        .params = Json{{"changes", Json::array({Json{{"uri", config.uri()}, {"type", 2}}})}}}));
+    entered.get_future().wait();
+
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didClose",
+        .params = Json{{"textDocument", {{"uri", document.uri()}}}}}));
+    CHECK(std::ranges::any_of(notifications, [](const auto& notification) {
+        return notification.method == "hlsl/configurationChanged";
+    }));
+
+    release.set_value();
+    server.wait_for_analysis();
 }
 
 TEST_CASE("Typed editor settings override files and resolve from the workspace",
@@ -2796,10 +2932,14 @@ TEST_CASE("Configuration file invalidation reparses only roots in its hierarchy"
         .method = "workspace/didChangeWatchedFiles",
         .params =
             Json{{"changes", Json::array({Json{{"uri", configuration.uri()}, {"type", 2}}})}}}));
+    server.wait_for_analysis();
 
     CHECK(server.analysis_metrics().parse_count == 3);
-    REQUIRE(notifications.size() == 3);
-    CHECK((*notifications.back().params)["uri"] == first.uri());
+    REQUIRE(notifications.size() == 4);
+    CHECK(notifications[2].method == "textDocument/publishDiagnostics");
+    CHECK((*notifications[2].params)["uri"] == first.uri());
+    CHECK(notifications.back().method == "hlsl/configurationChanged");
+    CHECK((*notifications.back().params)["uris"] == Json::array({configuration.uri()}));
 }
 
 namespace {
@@ -3424,6 +3564,7 @@ TEST_CASE("Server lists shader variants through hlsl/variants", "[lsp][variants]
             found_alpha = true;
             CHECK(variant["applicable"] == true);
             CHECK(variant["description"] == "Alpha permutation");
+            CHECK(variant["entryPoint"] == "");
         }
         if (variant["name"] == "Beta") {
             found_beta = true;
@@ -3431,6 +3572,57 @@ TEST_CASE("Server lists shader variants through hlsl/variants", "[lsp][variants]
     }
     CHECK(found_alpha);
     CHECK(found_beta);
+}
+
+TEST_CASE("Server omits variants that do not apply to the requested document",
+          "[lsp][variants][integration]") {
+    TestDirectory directory;
+    {
+        std::ofstream config{directory.path() / "shadertoolsconfig.json"};
+        REQUIRE(config);
+        config << R"({
+            "root": true,
+            "hlsl.variantsVersion": 1,
+            "hlsl.variants": [
+                {
+                    "name": "Current",
+                    "files": ["current.hlsl"],
+                    "hlsl.entryPoint": "currentMain"
+                },
+                {
+                    "name": "Other",
+                    "files": ["other.hlsl"],
+                    "hlsl.entryPoint": "otherMain"
+                }
+            ]
+        })";
+    }
+    const auto document = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "current.hlsl").string());
+    hlsl_intellisense::lsp::Server server{[](const auto&) {}};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(
+        hlsl_intellisense::json_rpc::Notification{.method = "textDocument/didOpen",
+                                                  .params = Json{{"textDocument",
+                                                                  {{"uri", document.uri()},
+                                                                   {"languageId", "hlsl"},
+                                                                   {"version", 1},
+                                                                   {"text", variant_shader()}}}}}));
+
+    const auto response = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{2},
+        .method = "hlsl/variants",
+        .params = Json{{"textDocument", {{"uri", document.uri()}}}}});
+    REQUIRE(response.has_value());
+    const auto* result = std::get_if<hlsl_intellisense::json_rpc::Response>(&*response);
+    REQUIRE(result != nullptr);
+    const auto& variants = result->result["variants"];
+    REQUIRE(variants.size() == 1);
+    CHECK(variants[0]["name"] == "Current");
+    CHECK(variants[0]["entryPoint"] == "currentMain");
 }
 
 TEST_CASE("A variant DXC runtime selection triggers a controlled restart",

@@ -123,6 +123,37 @@ TEST_CASE("Queued and running scheduler work observes cancellation deterministic
     CHECK(saw_cancellation.load());
 }
 
+TEST_CASE("Analysis barriers remain ordered behind newer root analysis",
+          "[analysis][scheduler][ordering]") {
+    analysis::Scheduler scheduler{{.worker_count = 1, .queue_capacity = 1}};
+    Gate blocker;
+    json_rpc::CancellationToken blocker_cancellation;
+    REQUIRE(scheduler.submit("blocker", 0, analysis::WorkPriority::interactive,
+                             blocker_cancellation, [&blocker](std::size_t, const auto&) {
+                                 blocker.enter();
+                                 blocker.wait_until_released();
+                             }));
+    blocker.wait_until_entered();
+
+    std::vector<std::string> observed;
+    const auto submit = [&](std::int64_t version, analysis::WorkPriority priority,
+                            std::string label) {
+        json_rpc::CancellationToken cancellation;
+        return scheduler.submit("root", version, priority, cancellation,
+                                [&observed, label = std::move(label)](std::size_t, const auto&) {
+                                    observed.push_back(label);
+                                });
+    };
+    REQUIRE(submit(1, analysis::WorkPriority::background, "analysis-1"));
+    REQUIRE(submit(1, analysis::WorkPriority::barrier, "barrier-1"));
+    REQUIRE(submit(2, analysis::WorkPriority::background, "analysis-2"));
+    REQUIRE(submit(2, analysis::WorkPriority::barrier, "barrier-2"));
+
+    blocker.release();
+    scheduler.wait_idle();
+    CHECK(observed == std::vector<std::string>{"analysis-2", "barrier-1", "barrier-2"});
+}
+
 TEST_CASE("Rejected background work does not cancel the running analysis",
           "[analysis][scheduler][capacity]") {
     analysis::Scheduler scheduler{{.worker_count = 1, .queue_capacity = 1}};

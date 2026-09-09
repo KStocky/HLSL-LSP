@@ -31,14 +31,16 @@ internal sealed class HlslLanguageClient :
         string dxcRuntimeDirectory,
         string activeVariant,
         Func<string, string, Task> onRuntimeRestartRequested,
-        Func<string, Task> onActiveVariantChangedFromServer)
+        Func<string, Task> onActiveVariantChangedFromServer,
+        Func<Task> onConfigurationChangedFromServer = null)
         : this(
             languageVersion,
             dxcRuntimeDirectory,
             activeVariant,
             new InlayHintOptionsSnapshot(true, true, false, false, false, false, true),
             onRuntimeRestartRequested,
-            onActiveVariantChangedFromServer)
+            onActiveVariantChangedFromServer,
+            onConfigurationChangedFromServer)
     {
     }
 
@@ -48,7 +50,8 @@ internal sealed class HlslLanguageClient :
         string activeVariant,
         InlayHintOptionsSnapshot inlayHints,
         Func<string, string, Task> onRuntimeRestartRequested,
-        Func<string, Task> onActiveVariantChangedFromServer)
+        Func<string, Task> onActiveVariantChangedFromServer,
+        Func<Task> onConfigurationChangedFromServer = null)
     {
         this.languageVersion = languageVersion;
         this.dxcRuntimeDirectory = dxcRuntimeDirectory ?? string.Empty;
@@ -66,7 +69,8 @@ internal sealed class HlslLanguageClient :
                 {
                     await onActiveVariantChangedFromServer(variant).ConfigureAwait(false);
                 }
-            });
+            },
+            onConfigurationChangedFromServer);
     }
 
     public string Name => "HLSL-LSP";
@@ -178,11 +182,31 @@ internal sealed class HlslLanguageClient :
         var currentRpc = Volatile.Read(ref rpc);
         return currentRpc == null
             ? Task.CompletedTask
-            : currentRpc.NotifyAsync(
+            : currentRpc.NotifyWithParameterObjectAsync(
                 "hlsl/didChangeActiveVariant",
                 new
                 {
                     variant = value.Length == 0 ? null : value,
+                });
+    }
+
+    internal Task NotifyConfigurationFileChangedAsync(Uri uri)
+    {
+        if (uri == null)
+        {
+            throw new ArgumentNullException(nameof(uri));
+        }
+        var currentRpc = Volatile.Read(ref rpc);
+        return currentRpc == null
+            ? Task.CompletedTask
+            : currentRpc.NotifyWithParameterObjectAsync(
+                "workspace/didChangeWatchedFiles",
+                new
+                {
+                    changes = new[]
+                    {
+                        new { uri = uri.AbsoluteUri, type = 2 },
+                    },
                 });
     }
 
@@ -787,17 +811,25 @@ internal sealed class HlslLanguageClient :
         public string Variant { get; set; }
     }
 
+    public sealed class ConfigurationChangedParams
+    {
+        public string[] Uris { get; set; }
+    }
+
     private sealed class HlslCustomMessageTarget
     {
         private readonly Func<string, string, Task> onRuntimeRestartRequested;
         private readonly Func<string, Task> onActiveVariantChanged;
+        private readonly Func<Task> onConfigurationChanged;
 
         public HlslCustomMessageTarget(
             Func<string, string, Task> runtimeRestartHandler,
-            Func<string, Task> activeVariantChangedHandler)
+            Func<string, Task> activeVariantChangedHandler,
+            Func<Task> configurationChangedHandler)
         {
             onRuntimeRestartRequested = runtimeRestartHandler;
             onActiveVariantChanged = activeVariantChangedHandler;
+            onConfigurationChanged = configurationChangedHandler;
         }
 
         [JsonRpcMethod(
@@ -828,6 +860,17 @@ internal sealed class HlslLanguageClient :
                 return Task.CompletedTask;
             }
             return onActiveVariantChanged(parameters?.Variant ?? string.Empty);
+        }
+
+        [JsonRpcMethod(
+            "hlsl/configurationChanged",
+            UseSingleObjectParameterDeserialization = true)]
+        public Task ConfigurationChangedAsync(ConfigurationChangedParams parameters)
+        {
+            _ = parameters;
+            return onConfigurationChanged != null
+                ? onConfigurationChanged()
+                : Task.CompletedTask;
         }
     }
 }

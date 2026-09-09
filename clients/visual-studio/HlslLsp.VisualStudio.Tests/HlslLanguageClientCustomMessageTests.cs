@@ -156,6 +156,31 @@ public sealed class HlslLanguageClientCustomMessageTests : IDisposable
     }
 
     [Fact]
+    public async Task ClientConfigurationFileSave_SendsWatchedFileNotificationToServer()
+    {
+        var client = new HlslLanguageClient(
+            "2021",
+            string.Empty,
+            string.Empty,
+            (_, _) => Task.CompletedTask,
+            _ => Task.CompletedTask);
+
+        var received = new TaskCompletionSource<string>();
+        var captureTarget = new WatchedFileCaptureTarget(received);
+        using var serverRpc = new JsonRpc(serverStream, serverStream, captureTarget);
+        using var clientRpc = new JsonRpc(clientStream);
+        serverRpc.StartListening();
+        clientRpc.StartListening();
+        await client.AttachForCustomMessageAsync(clientRpc);
+
+        var uri = new Uri("file:///workspace/shadertoolsconfig.json");
+        await client.NotifyConfigurationFileChangedAsync(uri);
+
+        Assert.True(await WaitOrTimeoutAsync(received.Task));
+        Assert.Equal(uri.AbsoluteUri, await received.Task);
+    }
+
+    [Fact]
     public async Task ServerDxcRuntimeRestartRequiredNotification_InvokesCallback()
     {
         // Regression coverage for the pre-existing notification that
@@ -191,6 +216,35 @@ public sealed class HlslLanguageClientCustomMessageTests : IDisposable
         Assert.Equal("configuration changed", observedReason);
     }
 
+    [Fact]
+    public async Task ServerConfigurationChangedNotification_InvokesCallback()
+    {
+        var callbackInvoked = new TaskCompletionSource<bool>();
+        var client = new HlslLanguageClient(
+            "2021",
+            string.Empty,
+            string.Empty,
+            (_, _) => Task.CompletedTask,
+            _ => Task.CompletedTask,
+            () =>
+            {
+                callbackInvoked.TrySetResult(true);
+                return Task.CompletedTask;
+            });
+
+        using var serverRpc = new JsonRpc(serverStream);
+        using var clientRpc = new JsonRpc(clientStream, clientStream, client.CustomMessageTarget);
+        serverRpc.StartListening();
+        clientRpc.StartListening();
+        await client.AttachForCustomMessageAsync(clientRpc);
+
+        await serverRpc.NotifyWithParameterObjectAsync(
+            "hlsl/configurationChanged",
+            new { uris = new[] { "file:///workspace/shadertoolsconfig.json" } });
+
+        Assert.True(await WaitOrTimeoutAsync(callbackInvoked.Task));
+    }
+
     private sealed class DidChangeActiveVariantCaptureTarget
     {
         private readonly TaskCompletionSource<string> received;
@@ -209,8 +263,38 @@ public sealed class HlslLanguageClientCustomMessageTests : IDisposable
         }
     }
 
+    private sealed class WatchedFileCaptureTarget
+    {
+        private readonly TaskCompletionSource<string> received;
+
+        public WatchedFileCaptureTarget(TaskCompletionSource<string> received)
+        {
+            this.received = received;
+        }
+
+        [JsonRpcMethod(
+            "workspace/didChangeWatchedFiles",
+            UseSingleObjectParameterDeserialization = true)]
+        public void DidChangeWatchedFiles(DidChangeWatchedFilesParams parameters)
+        {
+            received.TrySetResult(parameters?.Changes?[0]?.Uri);
+        }
+    }
+
     private sealed class DidChangeActiveVariantParams
     {
         public string Variant { get; set; }
+    }
+
+    private sealed class DidChangeWatchedFilesParams
+    {
+        public FileEvent[] Changes { get; set; }
+    }
+
+    private sealed class FileEvent
+    {
+        public string Uri { get; set; }
+
+        public int Type { get; set; }
     }
 }

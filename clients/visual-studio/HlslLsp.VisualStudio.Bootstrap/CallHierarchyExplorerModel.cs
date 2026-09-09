@@ -563,8 +563,8 @@ internal static class CallHierarchyRootPositionResolver
 internal static class CallHierarchyExplorerDisplay
 {
     internal static string NoCallableMessage()
-        => "No callable symbol was found at the caret position. Place the " +
-           "caret on a function name, then run Tools > HLSL Call Hierarchy.";
+        => "No callable symbol was found at the selected position. Right-click " +
+           "a function name, then choose HLSL > Call Hierarchy.";
 
     // "fromRanges" is always non-empty for a genuine call edge, but the
     // count itself (multiple call sites for one caller/callee pair) is
@@ -580,8 +580,8 @@ internal static class CallHierarchyExplorerDisplay
 
     internal static string StaleItemMessage()
         => "This call hierarchy is stale \u2013 the containing code or " +
-           "active variant changed since it was resolved. Re-run " +
-           "Tools > HLSL Call Hierarchy at the caret to refresh it.";
+           "active variant changed since it was resolved. Right-click the " +
+           "function and choose HLSL > Call Hierarchy to refresh it.";
 
     internal static string RequestFailedMessage(string detail)
         => string.IsNullOrEmpty(detail)
@@ -609,5 +609,5 @@ internal static class CallHierarchyExplorerDisplay
     internal static string RootIdentityChangedMessage()
         => "The call hierarchy root could not be confirmed to still be the " +
            "same function after this change; showing the last known result. " +
-           "Re-run Tools > HLSL Call Hierarchy at the caret to re-anchor it.";
+           "Right-click the function and choose HLSL > Call Hierarchy to re-anchor it.";
 }

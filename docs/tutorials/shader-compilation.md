@@ -57,7 +57,8 @@ Create `shadertoolsconfig.json` in the workspace root:
 2. Open Shader Compilation:
    - **Visual Studio Code:** run **HLSL: Show Shader Compilation** from the
      Command Palette.
-   - **Visual Studio:** run **Tools > HLSL Shader Compilation**.
+   - **Visual Studio:** right-click the shader and choose
+     **HLSL > Shader Compilation**.
 3. Verify the effective configuration:
    - entry point `CSMain`;
    - stage `compute`;
@@ -82,7 +83,7 @@ Refresh behavior differs slightly by editor:
 
 - **Visual Studio Code** refreshes an open compilation webview shortly after
   an edit.
-- **Visual Studio** refreshes after save; run the Tools command again to inspect
+- **Visual Studio** refreshes after save; run the context command again to inspect
   an earlier unsaved edit immediately.
 
 The view should report compilation failure with the DXC diagnostic. Output,

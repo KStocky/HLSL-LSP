@@ -75,8 +75,8 @@ internal sealed class CompilationInfoControl : UserControl
         {
             content.Children.Add(new TextBlock
             {
-                Text = "Open an HLSL document, then run " +
-                       "Tools > HLSL Shader Compilation.",
+                Text = "Right-click an HLSL document, then choose " +
+                       "HLSL > Shader Compilation.",
                 TextWrapping = TextWrapping.Wrap,
             });
             return;

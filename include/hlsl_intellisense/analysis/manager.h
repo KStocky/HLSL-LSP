@@ -170,6 +170,7 @@ class Manager final {
     ~Manager();
 
     void analyze(AnalysisInput input);
+    void after_roots_idle(std::vector<std::string> roots, std::function<void()> callback);
     void erase(std::string_view root_identity);
     void invalidate_include_metadata(const std::unordered_set<std::string>& identities);
     void wait_idle();

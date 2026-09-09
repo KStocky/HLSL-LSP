@@ -135,8 +135,8 @@ public sealed class CallHierarchyExplorerModelTests
     // --- CallHierarchyExplorerDisplay -----------------------------------
 
     [Fact]
-    public void Display_NoCallableMessage_MentionsToolsCommand()
-        => Assert.Contains("HLSL Call Hierarchy", CallHierarchyExplorerDisplay.NoCallableMessage());
+    public void Display_NoCallableMessage_MentionsContextCommand()
+        => Assert.Contains("HLSL > Call Hierarchy", CallHierarchyExplorerDisplay.NoCallableMessage());
 
     [Theory]
     [InlineData(0, "")]
@@ -149,7 +149,7 @@ public sealed class CallHierarchyExplorerModelTests
 
     [Fact]
     public void Display_StaleItemMessage_AdvisesRerunningTheCommand()
-        => Assert.Contains("HLSL Call Hierarchy", CallHierarchyExplorerDisplay.StaleItemMessage());
+        => Assert.Contains("HLSL > Call Hierarchy", CallHierarchyExplorerDisplay.StaleItemMessage());
 
     [Fact]
     public void Display_RequestFailedMessage_IncludesDetailWhenPresent()

@@ -104,7 +104,7 @@ public sealed class EntryPointDataFlowRefreshTests
     }
 
     // Two concurrent explicit requests (e.g. a rapid double-invocation of
-    // the Tools command) must not lose a background refresh trigger that
+    // the context command) must not lose a background refresh trigger that
     // arrives while both are in flight, even though the gate's pending flag
     // is not itself nesting-aware: the first (inner) request to finish may
     // be told a refresh is pending and attempt to replay it, but that replay
@@ -132,7 +132,7 @@ public sealed class EntryPointDataFlowRefreshTests
         Assert.True(gate.TryBeginBackgroundRefresh());
     }
 
-    // Defect: a failed manual retry through the explicit Tools command
+    // Defect: a failed manual retry through the explicit command
     // erased the window's last successful content for the same document,
     // because the preserve decision was based on whether the caller already
     // held a window-instance reference (existingWindow != null) rather than

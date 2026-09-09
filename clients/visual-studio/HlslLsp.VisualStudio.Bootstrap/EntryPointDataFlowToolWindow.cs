@@ -87,8 +87,8 @@ internal sealed class EntryPointDataFlowControl : UserControl
         {
             content.Children.Add(new TextBlock
             {
-                Text = "Open an HLSL document, then run " +
-                       "Tools > HLSL Entry-Point Data Flow.",
+                Text = "Right-click an HLSL entry point, then choose " +
+                       "HLSL > Entry-Point Data Flow.",
                 TextWrapping = TextWrapping.Wrap,
             });
             return;
