@@ -47,9 +47,10 @@ heap types.
 
 Visual Studio keeps document-specific HLSL actions next to the code that they
 inspect. Right-click an HLSL editor to open the **HLSL** submenu for memory
-layout, shader variants, compilation, entry-point data flow, and call
-hierarchy. The submenu also recognizes configured custom shader extensions,
-while remaining hidden in non-HLSL editors.
+layout, shader variants, compilation, resource bindings, preprocessor
+exploration, compute visualization, entry-point data flow, and call hierarchy.
+The submenu also recognizes configured custom shader extensions, while
+remaining hidden in non-HLSL editors.
 
 ![Context-sensitive HLSL commands in the Visual Studio editor](art/contextual-commands.png)
 
@@ -167,8 +168,9 @@ never guessed) — see
 protocol, grouping/collision semantics, root-signature states, compatibility
 meanings, and navigation behavior.
 
-In Visual Studio, run **Tools > HLSL Resource Bindings**. In Visual Studio
-Code, run **HLSL: Show Resource Bindings** from the Command Palette.
+In Visual Studio, right-click the shader and choose
+**HLSL > Resource Bindings**. In Visual Studio Code, run
+**HLSL: Show Resource Bindings** from the Command Palette.
 
 ### Tutorials
 
@@ -189,8 +191,9 @@ navigation to source and file-backed configuration locations. See
 [`docs/preprocessor-explorer.md`](docs/preprocessor-explorer.md) for the
 protocol and conservative handling of macro-based includes.
 
-In Visual Studio, run **Tools > HLSL Preprocessor Explorer**. In Visual Studio
-Code, run **HLSL: Show Preprocessor Explorer** from the Command Palette.
+In Visual Studio, right-click the shader and choose
+**HLSL > Preprocessor Explorer**. In Visual Studio Code, run
+**HLSL: Show Preprocessor Explorer** from the Command Palette.
 
 ### Semantic colouring
 

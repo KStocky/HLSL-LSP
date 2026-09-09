@@ -56,7 +56,8 @@ Create `shadertoolsconfig.json` in the workspace root:
 2. Open the view:
    - **Visual Studio Code:** run **HLSL: Show Resource Bindings** from the
      Command Palette.
-   - **Visual Studio:** run **Tools > HLSL Resource Bindings**.
+   - **Visual Studio:** right-click the shader and choose
+     **HLSL > Resource Bindings**.
 3. Confirm that the resource groups contain:
 
 | Class | Space | Register | Resource |

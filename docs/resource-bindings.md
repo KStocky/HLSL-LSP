@@ -12,9 +12,10 @@ make the Shader Compilation view unreadable if merged into it.
 For a runnable shader and guided interpretation, see the
 [Resource Bindings tutorial](tutorials/resource-bindings.md).
 
-In Visual Studio, run **Tools > HLSL Resource Bindings**. In Visual Studio
-Code, run **HLSL: Show Resource Bindings** from the Command Palette. Both
-commands operate on the active open HLSL document; there is no separate
+In Visual Studio, right-click the shader and choose
+**HLSL > Resource Bindings**. In Visual Studio Code, run
+**HLSL: Show Resource Bindings** from the Command Palette. Both commands
+operate on the active open HLSL document; there is no separate
 variant argument, matching Shader Compilation.
 
 ## Compiler authority and optimization-dependent resource lists

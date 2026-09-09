@@ -4,13 +4,16 @@
   <Extern href="vsshlids.h"/>
   <Commands package="guidHlslLspPackage">
     <Groups>
-      <Group guid="guidHlslLspCommands" id="HlslLspGroup" priority="0x0600">
-        <Parent guid="guidSHLMainMenu" id="IDM_VS_MENU_TOOLS"/>
-      </Group>
       <Group guid="guidHlslLspCommands" id="HlslContextPlacementGroup" priority="0x0800">
         <Parent guid="guidSHLMainMenu" id="IDM_VS_CTXT_CODEWIN"/>
       </Group>
       <Group guid="guidHlslLspCommands" id="HlslContextGroup" priority="0x0100">
+        <Parent guid="guidHlslLspCommands" id="HlslContextMenu"/>
+      </Group>
+      <Group guid="guidHlslLspCommands" id="HlslContextInspectionGroup" priority="0x0200">
+        <Parent guid="guidHlslLspCommands" id="HlslContextMenu"/>
+      </Group>
+      <Group guid="guidHlslLspCommands" id="HlslContextAnalysisGroup" priority="0x0300">
         <Parent guid="guidHlslLspCommands" id="HlslContextMenu"/>
       </Group>
     </Groups>
@@ -25,7 +28,7 @@
     </Menus>
     <Buttons>
       <Button guid="guidHlslLspCommands" id="ShowMemoryLayout" priority="0x0100" type="Button">
-        <Parent guid="guidHlslLspCommands" id="HlslContextGroup"/>
+        <Parent guid="guidHlslLspCommands" id="HlslContextInspectionGroup"/>
         <CommandFlag>DynamicVisibility</CommandFlag>
         <Strings>
           <ButtonText>Memory Layout</ButtonText>
@@ -38,43 +41,46 @@
           <ButtonText>Select Shader Variant</ButtonText>
         </Strings>
       </Button>
-      <Button guid="guidHlslLspCommands" id="ShowCompilationInfo" priority="0x0102" type="Button">
+      <Button guid="guidHlslLspCommands" id="ShowCompilationInfo" priority="0x0101" type="Button">
         <Parent guid="guidHlslLspCommands" id="HlslContextGroup"/>
         <CommandFlag>DynamicVisibility</CommandFlag>
         <Strings>
           <ButtonText>Shader Compilation</ButtonText>
         </Strings>
       </Button>
-      <Button guid="guidHlslLspCommands" id="ShowResourceBindings" priority="0x0103" type="Button">
-        <Parent guid="guidHlslLspCommands" id="HlslLspGroup"/>
+      <Button guid="guidHlslLspCommands" id="ShowResourceBindings" priority="0x0101" type="Button">
+        <Parent guid="guidHlslLspCommands" id="HlslContextInspectionGroup"/>
+        <CommandFlag>DynamicVisibility</CommandFlag>
         <Strings>
-          <ButtonText>HLSL Resource Bindings</ButtonText>
+          <ButtonText>Resource Bindings</ButtonText>
         </Strings>
       </Button>
-      <Button guid="guidHlslLspCommands" id="ShowPreprocessorExplorer" priority="0x0104" type="Button">
-        <Parent guid="guidHlslLspCommands" id="HlslLspGroup"/>
-        <Strings>
-          <ButtonText>HLSL Preprocessor Explorer</ButtonText>
-        </Strings>
-      </Button>
-      <Button guid="guidHlslLspCommands" id="ShowEntryPointDataFlow" priority="0x0105" type="Button">
+      <Button guid="guidHlslLspCommands" id="ShowPreprocessorExplorer" priority="0x0102" type="Button">
         <Parent guid="guidHlslLspCommands" id="HlslContextGroup"/>
+        <CommandFlag>DynamicVisibility</CommandFlag>
+        <Strings>
+          <ButtonText>Preprocessor Explorer</ButtonText>
+        </Strings>
+      </Button>
+      <Button guid="guidHlslLspCommands" id="ShowEntryPointDataFlow" priority="0x0100" type="Button">
+        <Parent guid="guidHlslLspCommands" id="HlslContextAnalysisGroup"/>
         <CommandFlag>DynamicVisibility</CommandFlag>
         <Strings>
           <ButtonText>Entry-Point Data Flow</ButtonText>
         </Strings>
       </Button>
-      <Button guid="guidHlslLspCommands" id="ShowCallHierarchy" priority="0x0106" type="Button">
-        <Parent guid="guidHlslLspCommands" id="HlslContextGroup"/>
+      <Button guid="guidHlslLspCommands" id="ShowCallHierarchy" priority="0x0101" type="Button">
+        <Parent guid="guidHlslLspCommands" id="HlslContextAnalysisGroup"/>
         <CommandFlag>DynamicVisibility</CommandFlag>
         <Strings>
           <ButtonText>Call Hierarchy</ButtonText>
         </Strings>
       </Button>
-      <Button guid="guidHlslLspCommands" id="ShowComputeVisualization" priority="0x0107" type="Button">
-        <Parent guid="guidHlslLspCommands" id="HlslLspGroup"/>
+      <Button guid="guidHlslLspCommands" id="ShowComputeVisualization" priority="0x0102" type="Button">
+        <Parent guid="guidHlslLspCommands" id="HlslContextInspectionGroup"/>
+        <CommandFlag>DynamicVisibility</CommandFlag>
         <Strings>
-          <ButtonText>HLSL Compute Visualization</ButtonText>
+          <ButtonText>Compute Visualization</ButtonText>
         </Strings>
       </Button>
     </Buttons>
@@ -82,10 +88,11 @@
   <Symbols>
     <GuidSymbol name="guidHlslLspPackage" value="{5ac7fbe7-1b9f-45eb-bca6-ffb9ae1ab67f}"/>
     <GuidSymbol name="guidHlslLspCommands" value="{cedfa85a-cd51-4825-af1f-0e05bd475426}">
-      <IDSymbol name="HlslLspGroup" value="0x1020"/>
       <IDSymbol name="HlslContextMenu" value="0x1021"/>
       <IDSymbol name="HlslContextGroup" value="0x1022"/>
       <IDSymbol name="HlslContextPlacementGroup" value="0x1023"/>
+      <IDSymbol name="HlslContextInspectionGroup" value="0x1024"/>
+      <IDSymbol name="HlslContextAnalysisGroup" value="0x1025"/>
       <IDSymbol name="ShowMemoryLayout" value="0x0100"/>
       <IDSymbol name="SelectVariant" value="0x0101"/>
       <IDSymbol name="ShowCompilationInfo" value="0x0102"/>

@@ -88,8 +88,8 @@ internal sealed class PreprocessorExplorerControl : UserControl
         {
             content.Children.Add(new TextBlock
             {
-                Text = "Open an HLSL document, then run " +
-                       "Tools > HLSL Preprocessor Explorer.",
+                Text = "Open an HLSL document, then choose " +
+                       "HLSL > Preprocessor Explorer.",
                 TextWrapping = TextWrapping.Wrap,
             });
             return;
