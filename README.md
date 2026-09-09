@@ -43,6 +43,25 @@ heap types.
 
 ## Features
 
+### Contextual Visual Studio workflows
+
+Visual Studio keeps document-specific HLSL actions next to the code that they
+inspect. Right-click an HLSL editor to open the **HLSL** submenu for memory
+layout, shader variants, compilation, entry-point data flow, and call
+hierarchy. The submenu also recognizes configured custom shader extensions,
+while remaining hidden in non-HLSL editors.
+
+![Context-sensitive HLSL commands in the Visual Studio editor](art/contextual-commands.png)
+
+### Shader variants
+
+Named variants switch defines, include paths, compiler arguments, entry points,
+and target profiles as one configuration. Visual Studio's picker removes
+variants for unrelated files and, when opened on an entry point, narrows the
+list to variants that compile that function.
+
+![Shader variants filtered to the current HLSL file in Visual Studio](art/shader-variants.png)
+
 ### Code completion
 
 HLSL-LSP provides context-aware completion for language constructs, user
@@ -65,6 +84,8 @@ In Visual Studio, select **Memory Layout** in Quick Info or right-click the
 declaration and choose **HLSL > Memory Layout**. In Visual Studio Code, select
 the hover action or run **HLSL: Show Memory Layout** from the Command Palette.
 
+![Compiler-backed memory layout for an HLSL structure in Visual Studio](art/memory-layout.png)
+
 ### Shader compilation
 
 A combined Shader Compilation view/command reports the effective compiler
@@ -83,6 +104,16 @@ behavior, and DXIL/SPIR-V differences are documented in
 In Visual Studio, right-click the shader and choose
 **HLSL > Shader Compilation**. In Visual Studio Code, run
 **HLSL: Show Shader Compilation** from the Command Palette.
+
+| Visual Studio | Visual Studio Code |
+| --- | --- |
+| ![Shader compilation, reflection, and disassembly in Visual Studio](art/shader-compilation.png) | ![Effective shader configuration and compilation result in Visual Studio Code](art/vscode-shader-compilation.png) |
+
+Saving `shadertoolsconfig.json` reanalyzes affected roots and refreshes already
+open views after the new configuration has taken effect - no document reopen or
+IDE restart is required.
+
+![An open Visual Studio shader-compilation view refreshing after the target profile changes](art/live-configuration-refresh.gif)
 
 ### Compute visualization
 
@@ -233,6 +264,10 @@ In Visual Studio, right-click the entry point and choose
 **HLSL > Entry-Point Data Flow**. In Visual Studio Code, run
 **HLSL: Show Entry-Point Data Flow** from the Command Palette.
 
+| Call hierarchy | Entry-point data flow |
+| --- | --- |
+| ![Compiler-resolved outgoing HLSL calls in Visual Studio](art/call-hierarchy.png) | ![Reachable functions, resource accesses, and unused declarations in Visual Studio Code](art/entry-point-data-flow.png) |
+
 ### Navigation bar
 
 The native Visual Studio navigation bar tracks namespaces, types, functions,
@@ -246,6 +281,19 @@ Press `Ctrl+T` to find HLSL types and members across the workspace through
 Visual Studio's All-In-One Search.
 
 ![HLSL symbols in Visual Studio All-In-One Search](art/all-in-one-search.png)
+
+### Gallery scope
+
+The gallery primarily uses static captures so the README remains fast and
+readable, with one short animation for live configuration refresh - the
+interaction that cannot be communicated accurately in a still image. It
+intentionally avoids repetitive captures for Resource Bindings, Preprocessor
+Explorer, and Compute Visualization because they use the same split
+source-and-results presentation shown above; their linked feature documents
+contain complete result examples and field-by-field explanations. Diagnostics,
+quick fixes, references, and rename use each editor's standard native UI, while
+hover, semantic colouring, navigation, completion, search, variants, and the
+HLSL-specific analysis views are represented here.
 
 ## Install the Visual Studio extension
 
