@@ -5,8 +5,9 @@ regions, macro definitions, and effective compiler settings through the
 `hlsl/preprocessorExplorer` request. The report uses the current unsaved
 document snapshot and active shader variant.
 
-In Visual Studio, run **Tools > HLSL Preprocessor Explorer**. In Visual Studio
-Code, run **HLSL: Show Preprocessor Explorer** from the Command Palette.
+In Visual Studio, right-click the shader and choose
+**HLSL > Preprocessor Explorer**. In Visual Studio Code, run
+**HLSL: Show Preprocessor Explorer** from the Command Palette.
 
 ## Compiler authority
 

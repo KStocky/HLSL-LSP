@@ -375,7 +375,7 @@ internal static class EntryPointDataFlowRefreshLogic
     // to read DocumentUri for the preserve decision) silently stand in for
     // the caller's own reference and skip ShowToolWindowAsync entirely --
     // leaving an already-open-but-hidden pane hidden after an explicit
-    // Tools-command invocation. The rule is simply: reveal whenever the
+    // context-command invocation. The rule is simply: reveal whenever the
     // caller did not supply its own already-resolved window (every explicit
     // command invocation passes none); a background refresh always supplies
     // its own and must never force a reveal/steal focus.
@@ -429,7 +429,7 @@ internal static class EntryPointDataFlowRefreshLogic
     }
 }
 
-// Coordinates the race between an explicit Tools-command request and a
+// Coordinates the race between an explicit context-command request and a
 // concurrent background refresh trigger (save, active-variant change, or a
 // debounced unsaved edit): an explicit request must never be superseded by
 // a background refresh, but a background refresh that arrives while the

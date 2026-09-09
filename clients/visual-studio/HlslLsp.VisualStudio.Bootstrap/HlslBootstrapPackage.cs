@@ -172,18 +172,20 @@ public sealed class HlslBootstrapPackage : AsyncPackage
                 new CommandID(commandSet, 0x0102));
         compilationInfo.BeforeQueryStatus += OnHlslContextCommandBeforeQueryStatus;
         commands.AddCommand(compilationInfo);
-        commands.AddCommand(
-            new OleMenuCommand(
+        var resourceBindings = new OleMenuCommand(
                 (_, _) => JoinableTaskFactory.RunAsync(
                         () => ShowResourceBindingsAsync(DisposalToken))
                     .FileAndForget("HlslLsp/ShowResourceBindings"),
-                new CommandID(commandSet, 0x0103)));
-        commands.AddCommand(
-            new OleMenuCommand(
+                new CommandID(commandSet, 0x0103));
+        resourceBindings.BeforeQueryStatus += OnHlslContextCommandBeforeQueryStatus;
+        commands.AddCommand(resourceBindings);
+        var preprocessorExplorer = new OleMenuCommand(
                 (_, _) => JoinableTaskFactory.RunAsync(
                         () => ShowPreprocessorExplorerAsync(DisposalToken))
                     .FileAndForget("HlslLsp/ShowPreprocessorExplorer"),
-                new CommandID(commandSet, 0x0104)));
+                new CommandID(commandSet, 0x0104));
+        preprocessorExplorer.BeforeQueryStatus += OnHlslContextCommandBeforeQueryStatus;
+        commands.AddCommand(preprocessorExplorer);
         var entryPointDataFlow = new OleMenuCommand(
                 (_, _) => JoinableTaskFactory.RunAsync(
                         () => ShowEntryPointDataFlowAsync(DisposalToken))
@@ -198,12 +200,13 @@ public sealed class HlslBootstrapPackage : AsyncPackage
                 new CommandID(commandSet, 0x0106));
         callHierarchy.BeforeQueryStatus += OnHlslContextCommandBeforeQueryStatus;
         commands.AddCommand(callHierarchy);
-        commands.AddCommand(
-            new OleMenuCommand(
+        var computeVisualization = new OleMenuCommand(
                 (_, _) => JoinableTaskFactory.RunAsync(
                         () => ShowComputeVisualizationAsync(DisposalToken))
                     .FileAndForget("HlslLsp/ShowComputeVisualization"),
-                new CommandID(commandSet, 0x0107)));
+                new CommandID(commandSet, 0x0107));
+        computeVisualization.BeforeQueryStatus += OnHlslContextCommandBeforeQueryStatus;
+        commands.AddCommand(computeVisualization);
     }
 
     private async Task ShowMemoryLayoutAsync(CancellationToken cancellationToken)
@@ -400,7 +403,7 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         if (uri == null)
         {
             await ShowInformationAsync(
-                "Open an HLSL document, then run Tools > HLSL Resource Bindings.",
+                "Open an HLSL document, then choose HLSL > Resource Bindings.",
                 cancellationToken);
             return;
         }
@@ -505,7 +508,7 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         CancellationToken cancellationToken)
     {
         // A background save/variant refresh must never supersede an explicit
-        // Tools command that the user is waiting for.
+        // context command that the user is waiting for.
         if (Volatile.Read(ref explicitResourceBindingsRequests) != 0)
         {
             return;
@@ -547,7 +550,7 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         if (uri == null)
         {
             await ShowInformationAsync(
-                "Open an HLSL document, then run Tools > HLSL Preprocessor Explorer.",
+                "Open an HLSL document, then choose HLSL > Preprocessor Explorer.",
                 cancellationToken);
             return;
         }
@@ -653,7 +656,7 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         CancellationToken cancellationToken)
     {
         // A background save/variant refresh must never supersede an explicit
-        // Tools command that the user is waiting for.
+        // context command that the user is waiting for.
         if (Volatile.Read(ref explicitPreprocessorExplorerRequests) != 0)
         {
             return;
@@ -695,7 +698,7 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         if (uri == null)
         {
             await ShowInformationAsync(
-                "Open an HLSL document, then run Tools > HLSL Compute Visualization.",
+                "Open an HLSL document, then choose HLSL > Compute Visualization.",
                 cancellationToken);
             return;
         }
@@ -972,7 +975,7 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         await JoinableTaskFactory.SwitchToMainThreadAsync(ambientCancellationToken);
         // priorWindow above is used only for the preserve-on-failure
         // decision, never substituted in here: when existingWindow is null
-        // (the explicit Tools-command path), ShowToolWindowAsync must
+        // (the explicit context-command path), ShowToolWindowAsync must
         // always run so an existing-but-hidden pane is revealed. Using
         // priorWindow as a stand-in for window would let ShowToolWindowAsync
         // be skipped whenever FindToolWindowAsync above happened to find an
@@ -1027,7 +1030,7 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         CancellationToken cancellationToken)
     {
         // A background save/variant/edit refresh must never supersede an
-        // explicit Tools command the user is waiting for, but it must also
+        // explicit context command the user is waiting for, but it must also
         // never be silently discarded: record it so ShowEntryPointDataFlowAsync's
         // explicit-command overload can replay a single bounded refresh once
         // that command completes, ensuring the window can never be left
@@ -1035,7 +1038,7 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         if (!entryPointDataFlowRefreshGate.TryBeginBackgroundRefresh())
         {
             // A background save/variant/edit refresh must never supersede
-            // an explicit Tools command the user is waiting for; the gate
+            // an explicit context command the user is waiting for; the gate
             // above records this refresh as pending rather than dropping it
             // (see ShowEntryPointDataFlowAsync's explicit-command overload,
             // which replays it once the explicit request finishes).
@@ -1285,7 +1288,7 @@ public sealed class HlslBootstrapPackage : AsyncPackage
     // Resolves the callable at (uri, line, character) via
     // textDocument/prepareCallHierarchy, then fetches its incoming and
     // outgoing calls, and always shows/reveals the tool window (an explicit
-    // Tools-command invocation must never leave an existing-but-hidden pane
+    // context-command invocation must never leave an existing-but-hidden pane
     // hidden -- there is no "existing window" preservation concern here the
     // way ShowEntryPointDataFlowAsync has, since establishing a *new* root
     // always intentionally replaces whatever was shown before).

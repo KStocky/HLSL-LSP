@@ -71,8 +71,8 @@ when the active variant changes and when the shown document is saved. See the
 repository's [shader compilation](../../docs/compilation-info.md) reference
 for the full protocol, including DXIL vs SPIR-V reflection availability.
 
-Run **Tools > HLSL Resource Bindings** to open a dedicated tool window with
-the active HLSL document's resource bindings grouped by register space then
+Right-click the active shader and choose **HLSL > Resource Bindings** to open a
+dedicated tool window with its resource bindings grouped by register space then
 CBV/SRV/UAV/sampler class, provable register-range collisions, the embedded
 root signature's state and full details when available, and whether the
 reflected resources are compatible with that root signature. It reuses the
@@ -145,8 +145,9 @@ empty list whenever either the function-visit or definition-collection
 budget was hit, since the server leaves that list empty in both cases
 (an unvisited or uncollected function can't be proven dead code).
 
-Run **Tools > HLSL Compute Visualization** on a configured compute shader to
-inspect its reflected `numthreads` size, logical workload, derived D3D
+Right-click a configured compute shader and choose
+**HLSL > Compute Visualization** to inspect its reflected `numthreads` size,
+logical workload, derived D3D
 `Dispatch()` group count, launched and inactive edge threads, system-value
 mappings, group-shared memory, barriers, wave-size requirements, and optional
 hardware-dependent occupancy estimate. The X/Y/Z inputs are the desired total

@@ -56,7 +56,7 @@ public sealed class EntryPointDataFlowRefreshTests
     }
 
     // Defect: a refresh trigger (save/variant/debounced edit) that arrived
-    // while an explicit Tools-command request was in flight was silently
+    // while an explicit context-command request was in flight was silently
     // discarded, so the window could remain stale forever immediately after
     // the explicit request completed. TryBeginBackgroundRefresh must defer
     // (not drop) such a trigger, and ExitExplicitRequest must report exactly
@@ -297,7 +297,7 @@ public sealed class EntryPointDataFlowRefreshTests
         Assert.True(replayCount >= 0);
     }
 
-    // Defect: an explicit Tools-command invocation could leave an
+    // Defect: an explicit context-command invocation could leave an
     // already-open-but-hidden tool window pane hidden, because a prior fix
     // for a different defect (preserving last-good content) substituted a
     // non-showing FindToolWindowAsync lookup result in for the window used

@@ -189,7 +189,7 @@ public sealed class PreprocessorSettingModel
 // language client (Client assembly), mirroring CompilationInfoBridge and
 // MemoryLayoutBridge. There is no hover trigger for this feature, so only a
 // request handler is registered; presentation is driven entirely by the
-// Tools command and its refresh hooks.
+// context command and its refresh hooks.
 public static class PreprocessorExplorerBridge
 {
     private static Func<Uri, CancellationToken, Task<PreprocessorExplorerModel>> request;

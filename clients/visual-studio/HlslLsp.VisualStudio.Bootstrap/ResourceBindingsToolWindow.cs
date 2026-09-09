@@ -101,8 +101,8 @@ internal sealed class ResourceBindingsControl : UserControl
         {
             content.Children.Add(new TextBlock
             {
-                Text = "Open an HLSL document, then run " +
-                       "Tools > HLSL Resource Bindings.",
+                Text = "Open an HLSL document, then choose " +
+                       "HLSL > Resource Bindings.",
                 TextWrapping = TextWrapping.Wrap,
             });
             return;

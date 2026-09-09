@@ -35,7 +35,7 @@ public sealed class ComputeVisualizationToolWindow : ToolWindowPane
             else
             {
                 control.SetInputError(
-                    "Open an HLSL document, then run Tools > HLSL Compute Visualization.");
+                    "Open an HLSL document, then choose HLSL > Compute Visualization.");
             }
         };
         Content = control;
@@ -161,7 +161,7 @@ internal sealed class ComputeVisualizationControl : UserControl
         if (report == null)
         {
             AddText(
-                "Open an HLSL document, then run Tools > HLSL Compute Visualization.",
+                "Open an HLSL document, then choose HLSL > Compute Visualization.",
                 Brushes.Gray);
             return;
         }

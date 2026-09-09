@@ -164,7 +164,7 @@ public sealed class CallHierarchyExplorerToolWindow : ToolWindowPane
         Render();
     }
 
-    // A brand-new root was resolved (an explicit Tools-command invocation,
+    // A brand-new root was resolved (an explicit context-command invocation,
     // or a background refresh that had to fall back to a fresh root):
     // resets any prior drill-in stack and records the position it was
     // resolved from so a future background refresh can re-run
