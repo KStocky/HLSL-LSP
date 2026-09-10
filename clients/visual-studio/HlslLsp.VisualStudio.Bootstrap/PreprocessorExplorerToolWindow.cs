@@ -69,12 +69,13 @@ internal sealed class PreprocessorExplorerControl : UserControl
     internal PreprocessorExplorerControl()
     {
         ThreadHelper.ThrowIfNotOnUIThread();
-        Content = new ScrollViewer
+        VisualStudioTheme.ApplyToolWindowTheme(this);
+        Content = VisualStudioTheme.ApplyScrollViewerStyle(new ScrollViewer
         {
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
             Content = content,
-        };
+        });
         SetReport(null);
     }
 

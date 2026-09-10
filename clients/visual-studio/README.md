@@ -46,6 +46,11 @@ to set:
 Changes apply to open and future documents. Shutdown never waits for a failed
 LSP broker operation and bounds child-process cleanup.
 
+Custom HLSL tool windows use Visual Studio's dynamic theme resources for their
+text, backgrounds, hyperlinks, controls, scrollbars, and environment font.
+Open windows update with the IDE theme and remain readable in both dark and
+light themes.
+
 When a `shadertoolsconfig.json` declares named compilation variants under
 `hlsl.variants`, right-click the shader and choose
 **HLSL > Select Shader Variant**. The picker contains only variants applicable

@@ -57,12 +57,13 @@ internal sealed class CompilationInfoControl : UserControl
 
     internal CompilationInfoControl()
     {
-        Content = new ScrollViewer
+        VisualStudioTheme.ApplyToolWindowTheme(this);
+        Content = VisualStudioTheme.ApplyScrollViewerStyle(new ScrollViewer
         {
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
             Content = content,
-        };
+        });
         SetInfo(null, null);
     }
 
@@ -258,25 +259,25 @@ internal sealed class CompilationInfoControl : UserControl
                 Orientation = Orientation.Horizontal,
                 Margin = new Thickness(0, 0, 0, 6),
             };
-            var copyButton = new Button
+            var copyButton = VisualStudioTheme.ApplyButtonStyle(new Button
             {
                 Content = "Copy Disassembly",
                 Padding = new Thickness(8, 2, 8, 2),
                 Margin = new Thickness(0, 0, 8, 0),
-            };
+            });
             copyButton.Click += (_, _) => CopyDisassembly(disassembly.Text);
-            var saveButton = new Button
+            var saveButton = VisualStudioTheme.ApplyButtonStyle(new Button
             {
                 Content = "Save Disassembly\u2026",
                 Padding = new Thickness(8, 2, 8, 2),
-            };
+            });
             saveButton.Click += (_, _) => SaveDisassembly(documentUri, disassembly);
             buttons.Children.Add(copyButton);
             buttons.Children.Add(saveButton);
             content.Children.Add(buttons);
         }
 
-        content.Children.Add(new TextBox
+        content.Children.Add(VisualStudioTheme.ApplyTextBoxStyle(new TextBox
         {
             Text = disassembly.Text,
             IsReadOnly = true,
@@ -288,7 +289,7 @@ internal sealed class CompilationInfoControl : UserControl
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
             Margin = new Thickness(0, 0, 0, 4),
-        });
+        }));
     }
 
     // Clipboard access can throw (for example, another process transiently

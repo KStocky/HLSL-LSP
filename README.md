@@ -51,6 +51,8 @@ layout, shader variants, compilation, resource bindings, preprocessor
 exploration, compute visualization, entry-point data flow, and call hierarchy.
 The submenu also recognizes configured custom shader extensions, while
 remaining hidden in non-HLSL editors.
+Every HLSL tool window follows Visual Studio's active foreground, background,
+hyperlink, control, scrollbar, and environment-font theme resources.
 
 ![Context-sensitive HLSL commands in the Visual Studio editor](art/contextual-commands.png)
 

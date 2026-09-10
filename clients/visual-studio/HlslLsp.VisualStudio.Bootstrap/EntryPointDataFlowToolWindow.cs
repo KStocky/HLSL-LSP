@@ -68,12 +68,13 @@ internal sealed class EntryPointDataFlowControl : UserControl
     internal EntryPointDataFlowControl()
     {
         ThreadHelper.ThrowIfNotOnUIThread();
-        Content = new ScrollViewer
+        VisualStudioTheme.ApplyToolWindowTheme(this);
+        Content = VisualStudioTheme.ApplyScrollViewerStyle(new ScrollViewer
         {
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
             Content = content,
-        };
+        });
         SetReport(null);
     }
 

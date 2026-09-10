@@ -112,12 +112,13 @@ internal sealed class ComputeVisualizationControl : UserControl
     internal ComputeVisualizationControl()
     {
         ThreadHelper.ThrowIfNotOnUIThread();
-        Content = new ScrollViewer
+        VisualStudioTheme.ApplyToolWindowTheme(this);
+        Content = VisualStudioTheme.ApplyScrollViewerStyle(new ScrollViewer
         {
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
             Content = content,
-        };
+        });
         BuildConfiguration();
         SetReport(null, null);
     }
@@ -242,13 +243,13 @@ internal sealed class ComputeVisualizationControl : UserControl
         AddProfileRow("Max threads / compute unit", maxThreadsPerComputeUnit);
         AddProfileRow("Max groups / compute unit", maxGroupsPerComputeUnit);
         AddProfileRow("Shared memory bytes / compute unit", sharedMemoryBytesPerComputeUnit);
-        var button = new Button
+        var button = VisualStudioTheme.ApplyButtonStyle(new Button
         {
             Content = "Apply / Refresh",
             HorizontalAlignment = HorizontalAlignment.Left,
             Padding = new Thickness(10, 4, 10, 4),
             Margin = new Thickness(0, 8, 0, 4),
-        };
+        });
         button.Click += (_, _) =>
         {
             if (!TryReadOptions(out var options, out var error))
@@ -594,13 +595,19 @@ internal sealed class ComputeVisualizationControl : UserControl
     }
 
     private void AddText(string value, Brush foreground = null)
-        => content.Children.Add(new TextBlock
+    {
+        var text = new TextBlock
         {
             Text = value ?? string.Empty,
-            Foreground = foreground,
             TextWrapping = TextWrapping.Wrap,
             Margin = new Thickness(0, 2, 0, 2),
-        });
+        };
+        if (foreground != null)
+        {
+            text.Foreground = foreground;
+        }
+        content.Children.Add(text);
+    }
 
     private void AddProfileRow(string label, TextBox input)
     {
@@ -633,10 +640,10 @@ internal sealed class ComputeVisualizationControl : UserControl
         };
 
     private static TextBox Input(string value, double width = 72)
-        => new()
+        => VisualStudioTheme.ApplyTextBoxStyle(new TextBox
         {
             Text = value,
             Width = width,
             Margin = new Thickness(0, 2, 4, 2),
-        };
+        });
 }
