@@ -3872,20 +3872,21 @@ Json Server::compilation_info(const std::optional<Json>& params,
             invalid_params(error.what());
         }
     }();
-
-    analyze_and_publish(snapshot.uri());
+    const auto submission = analyze_and_publish(snapshot.uri());
     const auto info =
         analysis_.compilation_info(snapshot.document_uri().identity(), snapshot.version(),
                                    snapshot.path(), context.cancellation);
-    std::optional<std::string> active_variant;
-    {
+    const auto require_current = [&] {
         std::scoped_lock state_lock{state_mutex_};
+        const auto generation = analysis_generations_.find(snapshot.document_uri().identity());
         if (!documents_.contains(snapshot.uri()) ||
-            documents_.snapshot(snapshot.uri()).version() != snapshot.version()) {
+            documents_.snapshot(snapshot.uri()).version() != snapshot.version() ||
+            generation == analysis_generations_.end() ||
+            generation->second != submission.generation) {
             throw HandlerError{json_rpc::content_modified_code, "Compilation info was superseded"};
         }
-        active_variant = active_variant_;
-    }
+    };
+    require_current();
 
     // Resolves the source text for every distinct path a reflected
     // resource's `source_location` points into, so `sourceLocation` in the
@@ -3918,7 +3919,9 @@ Json Server::compilation_info(const std::optional<Json>& params,
             resource_location_texts.emplace(path, std::move(text));
         }
     }
-    return compilation_info_json(info, active_variant, resource_location_texts);
+    auto result = compilation_info_json(info, submission.active_variant, resource_location_texts);
+    require_current();
+    return result;
 }
 
 Json Server::compute_visualization(const std::optional<Json>& params,
@@ -4706,15 +4709,18 @@ void Server::did_close(const std::optional<Json>& params) {
         auto affected_roots =
             analysis_.dependent_root_uris(changed, snapshot.document_uri().identity());
         {
-            std::scoped_lock state_lock{state_mutex_};
-            documents_.did_close(uri);
-            ++analysis_generations_[snapshot.document_uri().identity()];
-            diagnostics_by_identity_.erase(snapshot.document_uri().identity());
-            unavailable_by_identity_.erase(snapshot.document_uri().identity());
+            std::scoped_lock submission_lock{analysis_submission_mutex_};
+            {
+                std::scoped_lock state_lock{state_mutex_};
+                documents_.did_close(uri);
+                ++analysis_generations_[snapshot.document_uri().identity()];
+                diagnostics_by_identity_.erase(snapshot.document_uri().identity());
+                unavailable_by_identity_.erase(snapshot.document_uri().identity());
+            }
+            analysis_.erase(snapshot.document_uri().identity());
         }
         invalidate_inlay_hints(false);
         refresh_inlay_hints = true;
-        analysis_.erase(snapshot.document_uri().identity());
         for (const auto& root_uri : affected_roots) {
             analyze_and_publish(root_uri);
         }
@@ -5070,7 +5076,9 @@ void Server::analyze_affected(std::string_view uri) {
     }
 }
 
-void Server::analyze_and_publish(std::string_view uri) {
+Server::AnalysisSubmission Server::analyze_and_publish(std::string_view uri) {
+    std::scoped_lock submission_lock{analysis_submission_mutex_};
+    AnalysisSubmission submission;
     analysis::AnalysisInput input = [&] {
         std::scoped_lock state_lock{state_mutex_};
         const auto& state = documents_.document(uri);
@@ -5080,16 +5088,20 @@ void Server::analyze_and_publish(std::string_view uri) {
         }
         auto snapshot = documents_.snapshot(uri);
         const auto generation = ++analysis_generations_[snapshot.document_uri().identity()];
+        submission = {.generation = generation, .active_variant = active_variant_};
         return analysis::AnalysisInput{.root = snapshot,
                                        .open_documents = documents_.open_snapshots(),
                                        .configuration =
                                            configuration_for(snapshot, editor_settings_),
                                        .generation = generation};
     }();
-    analysis_.analyze(std::move(input));
+    if (!analysis_.analyze(std::move(input))) {
+        throw HandlerError{json_rpc::content_modified_code, "Analysis request was not queued"};
+    }
     if (!options_.background_analysis) {
         analysis_.wait_idle();
     }
+    return submission;
 }
 
 workspace::WorkspaceConfiguration
@@ -5470,9 +5482,6 @@ Json Server::variants(const std::optional<Json>& params) {
                 continue;
             }
             for (const auto& variant : configuration.variants) {
-                if (target_uri && !variant.applicable) {
-                    continue;
-                }
                 const auto found = index.find(variant.name);
                 if (found == index.end()) {
                     index.emplace(variant.name, aggregates.size());

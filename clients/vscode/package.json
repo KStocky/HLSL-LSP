@@ -90,39 +90,98 @@
       {
         "command": "hlsl.showMemoryLayout",
         "title": "HLSL: Show Memory Layout",
+        "shortTitle": "Memory Layout",
         "category": "HLSL"
       },
       {
         "command": "hlsl.showCompilationInfo",
         "title": "HLSL: Show Shader Compilation",
+        "shortTitle": "Shader Compilation",
         "category": "HLSL"
       },
       {
         "command": "hlsl.showResourceBindings",
         "title": "HLSL: Show Resource Bindings",
+        "shortTitle": "Resource Bindings",
         "category": "HLSL"
       },
       {
         "command": "hlsl.showPreprocessorExplorer",
         "title": "HLSL: Show Preprocessor Explorer",
+        "shortTitle": "Preprocessor Explorer",
         "category": "HLSL"
       },
       {
         "command": "hlsl.showEntryPointDataFlow",
         "title": "HLSL: Show Entry-Point Data Flow",
+        "shortTitle": "Entry-Point Data Flow",
         "category": "HLSL"
       },
       {
         "command": "hlsl.showComputeVisualization",
         "title": "HLSL: Show Compute Visualization",
+        "shortTitle": "Compute Visualization",
         "category": "HLSL"
       },
       {
         "command": "hlsl.selectVariant",
         "title": "HLSL: Select Shader Variant",
+        "shortTitle": "Select Shader Variant",
         "category": "HLSL"
       }
     ],
+    "submenus": [
+      {
+        "id": "hlsl.editorContext",
+        "label": "HLSL"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "submenu": "hlsl.editorContext",
+          "when": "editorLangId == hlsl",
+          "group": "navigation@50"
+        }
+      ],
+      "hlsl.editorContext": [
+        {
+          "command": "hlsl.selectVariant",
+          "when": "editorLangId == hlsl",
+          "group": "1_configuration@1"
+        },
+        {
+          "command": "hlsl.showCompilationInfo",
+          "when": "editorLangId == hlsl",
+          "group": "1_configuration@2"
+        },
+        {
+          "command": "hlsl.showPreprocessorExplorer",
+          "when": "editorLangId == hlsl",
+          "group": "1_configuration@3"
+        },
+        {
+          "command": "hlsl.showMemoryLayout",
+          "when": "editorLangId == hlsl",
+          "group": "2_inspection@1"
+        },
+        {
+          "command": "hlsl.showResourceBindings",
+          "when": "editorLangId == hlsl",
+          "group": "2_inspection@2"
+        },
+        {
+          "command": "hlsl.showComputeVisualization",
+          "when": "editorLangId == hlsl",
+          "group": "2_inspection@3"
+        },
+        {
+          "command": "hlsl.showEntryPointDataFlow",
+          "when": "editorLangId == hlsl",
+          "group": "3_analysis@1"
+        }
+      ]
+    },
     "configuration": {
       "title": "HLSL-LSP",
       "properties": {

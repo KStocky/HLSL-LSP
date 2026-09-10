@@ -70,6 +70,7 @@ import {
   externalWatchDirectories,
   shaderFileGlob,
 } from "./watchers";
+import { applicableVariants, VariantList } from "./variants";
 
 const outputName = "HLSL-LSP";
 
@@ -107,18 +108,6 @@ interface DxcRuntimeInfo {
   readonly version: string;
   readonly requiresRestart: boolean;
   readonly error?: string;
-}
-
-interface VariantInfo {
-  readonly name: string;
-  readonly description: string;
-  readonly default: boolean;
-  readonly applicable: boolean;
-}
-
-interface VariantList {
-  readonly activeVariant: string | null;
-  readonly variants: readonly VariantInfo[];
 }
 
 interface RuntimeRestartRequest {
@@ -1011,7 +1000,9 @@ export async function activate(
     void refreshAllOpenAnalysisPanels(lifecycle);
   });
 
+  let variantStatusGeneration = 0;
   const updateVariantStatus = async (): Promise<void> => {
+    const generation = ++variantStatusGeneration;
     const editor = vscode.window.activeTextEditor;
     if (editor?.document.languageId !== "hlsl") {
       variantStatus.hide();
@@ -1026,7 +1017,18 @@ export async function activate(
     } catch {
       list = undefined;
     }
-    if (list === undefined || list === null || list.variants.length === 0) {
+    if (
+      generation !== variantStatusGeneration ||
+      vscode.window.activeTextEditor?.document.uri.toString() !==
+        documentUri.toString()
+    ) {
+      return;
+    }
+    if (
+      list === undefined ||
+      list === null ||
+      applicableVariants(list.variants).length === 0
+    ) {
       variantStatus.hide();
       return;
     }
@@ -1757,10 +1759,13 @@ export async function activate(
     ),
     vscode.commands.registerCommand("hlsl.selectVariant", async () => {
       const editor = vscode.window.activeTextEditor;
-      const documentUri =
-        editor?.document.languageId === "hlsl"
-          ? editor.document.uri
-          : undefined;
+      if (editor?.document.languageId !== "hlsl") {
+        await vscode.window.showInformationMessage(
+          "Open an HLSL document to select an applicable shader variant.",
+        );
+        return;
+      }
+      const documentUri = editor.document.uri;
       let list: VariantList | null | undefined;
       try {
         list = await lifecycle.withClient((client) =>
@@ -1786,6 +1791,13 @@ export async function activate(
         );
         return;
       }
+      const applicable = applicableVariants(list.variants);
+      if (applicable.length === 0) {
+        await vscode.window.showInformationMessage(
+          "No declared shader variants apply to the active HLSL document.",
+        );
+        return;
+      }
       const active = list.activeVariant ?? "";
       const items: (vscode.QuickPickItem & { value: string | null })[] = [
         {
@@ -1794,13 +1806,10 @@ export async function activate(
           value: null,
         },
       ];
-      for (const variant of list.variants) {
+      for (const variant of applicable) {
         const notes: string[] = [];
         if (variant.name === active) {
           notes.push("current");
-        }
-        if (!variant.applicable) {
-          notes.push("not applicable to this file");
         }
         const item: vscode.QuickPickItem & { value: string | null } = {
           label: variant.name,
