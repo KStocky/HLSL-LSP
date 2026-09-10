@@ -939,7 +939,7 @@ Manager::Manager(DiagnosticsHandler diagnostics, AnalysisOptions options,
 
 Manager::~Manager() = default;
 
-void Manager::analyze(AnalysisInput input) {
+bool Manager::analyze(AnalysisInput input) {
     const auto root = input.root.document_uri().identity();
     const auto version = input.root.version();
     const auto root_uri = input.root.uri();
@@ -967,6 +967,7 @@ void Manager::analyze(AnalysisInput input) {
         !implementation_->stopped.load(std::memory_order_acquire)) {
         implementation_->errors("Analysis queue full; current document analysis was not queued");
     }
+    return submitted;
 }
 
 void Manager::after_roots_idle(std::vector<std::string> roots, std::function<void()> callback) {

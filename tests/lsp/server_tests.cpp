@@ -3574,7 +3574,7 @@ TEST_CASE("Server lists shader variants through hlsl/variants", "[lsp][variants]
     CHECK(found_beta);
 }
 
-TEST_CASE("Server omits variants that do not apply to the requested document",
+TEST_CASE("Server reports variant applicability for the requested document",
           "[lsp][variants][integration]") {
     TestDirectory directory;
     {
@@ -3620,9 +3620,13 @@ TEST_CASE("Server omits variants that do not apply to the requested document",
     const auto* result = std::get_if<hlsl_intellisense::json_rpc::Response>(&*response);
     REQUIRE(result != nullptr);
     const auto& variants = result->result["variants"];
-    REQUIRE(variants.size() == 1);
+    REQUIRE(variants.size() == 2);
     CHECK(variants[0]["name"] == "Current");
     CHECK(variants[0]["entryPoint"] == "currentMain");
+    CHECK(variants[0]["applicable"] == true);
+    CHECK(variants[1]["name"] == "Other");
+    CHECK(variants[1]["entryPoint"] == "otherMain");
+    CHECK(variants[1]["applicable"] == false);
 }
 
 TEST_CASE("A variant DXC runtime selection triggers a controlled restart",

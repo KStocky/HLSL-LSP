@@ -217,7 +217,12 @@ class Server final {
     void did_change_watched_files(const std::optional<json_rpc::Json>& params);
     void exit(const std::optional<json_rpc::Json>& params);
     void analyze_affected(std::string_view uri);
-    void analyze_and_publish(std::string_view uri);
+    struct AnalysisSubmission {
+        std::uint64_t generation{};
+        std::optional<std::string> active_variant;
+    };
+
+    AnalysisSubmission analyze_and_publish(std::string_view uri);
     void reanalyze_all();
     // Compares the DXC runtime selected by editor settings and shadertoolsconfig
     // against the runtime this process loaded. A valid, different selection
@@ -336,6 +341,7 @@ class Server final {
     Logger logger_;
     ServerOptions options_;
     analysis::Manager analysis_;
+    std::mutex analysis_submission_mutex_;
     mutable std::mutex state_mutex_;
     std::unordered_map<std::string, std::string> configuration_watch_states_;
     std::unordered_map<std::string, std::uint64_t> analysis_generations_;

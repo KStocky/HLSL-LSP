@@ -169,7 +169,7 @@ class Manager final {
     Manager& operator=(const Manager&) = delete;
     ~Manager();
 
-    void analyze(AnalysisInput input);
+    bool analyze(AnalysisInput input);
     void after_roots_idle(std::vector<std::string> roots, std::function<void()> callback);
     void erase(std::string_view root_identity);
     void invalidate_include_metadata(const std::unordered_set<std::string>& identities);

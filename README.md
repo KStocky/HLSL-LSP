@@ -43,14 +43,20 @@ heap types.
 
 ## Features
 
-### Contextual Visual Studio workflows
+### Contextual editor workflows
 
-Visual Studio keeps document-specific HLSL actions next to the code that they
-inspect. Right-click an HLSL editor to open the **HLSL** submenu for memory
-layout, shader variants, compilation, resource bindings, preprocessor
-exploration, compute visualization, entry-point data flow, and call hierarchy.
-The submenu also recognizes configured custom shader extensions, while
-remaining hidden in non-HLSL editors.
+Visual Studio and Visual Studio Code keep document-specific HLSL actions next
+to the code that they inspect. Right-click an HLSL editor to open the **HLSL**
+submenu for memory layout, shader variants, compilation, resource bindings,
+preprocessor exploration, compute visualization, and entry-point data flow.
+Visual Studio also exposes its custom call-hierarchy window there; Visual
+Studio Code keeps its native **Show Call Hierarchy** command. The submenu
+remains hidden in non-HLSL editors.
+
+The Visual Studio variant picker additionally recognizes configured custom
+shader extensions. Both clients remove variants that do not apply to the
+active document.
+
 Every HLSL tool window follows Visual Studio's active foreground, background,
 hyperlink, control, scrollbar, and environment-font theme resources.
 
