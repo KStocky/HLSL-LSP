@@ -194,8 +194,8 @@ TEST_CASE("LSP handler enforces lifecycle and invalid parameters", "[lsp][handle
     REQUIRE(params_error != nullptr);
     CHECK(params_error->error.code == hlsl_intellisense::json_rpc::invalid_params_code);
 
-    for (const auto method :
-         {"textDocument/hover", "textDocument/signatureHelp", "hlsl/memoryLayout"}) {
+    for (const auto method : {"textDocument/hover", "textDocument/signatureHelp",
+                              "hlsl/memoryLayout", "hlsl/commandContext"}) {
         const auto invalid = server.handle(hlsl_intellisense::json_rpc::Request{
             .id = std::int64_t{4},
             .method = method,
@@ -353,6 +353,90 @@ TEST_CASE("Server exposes memory layouts through hover and the custom protocol",
     REQUIRE(edited_response != nullptr);
     CHECK(edited_response->result["size"] == 8);
     CHECK(edited_response->result["members"][0]["type"] == "double");
+}
+
+TEST_CASE("Server reports caret-specific HLSL command applicability",
+          "[lsp][command-context][integration]") {
+    TestDirectory directory;
+    {
+        std::ofstream config{directory.path() / "shadertoolsconfig.json"};
+        REQUIRE(config);
+        config << R"({
+            "root": true,
+            "hlsl.targetProfile": "ps_6_6",
+            "hlsl.entryPoint": "WrongMain",
+            "hlsl.additionalArguments": ["-ECSMain", "-T", "cs_6_6"]
+        })";
+    }
+    const auto document = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "commands.hlsl").string());
+    const std::string source = "struct Payload { float value; };\n"
+                               "float helper(float value) { return value; }\n"
+                               "[numthreads(1, 1, 1)]\n"
+                               "void CSMain(uint3 id : SV_DispatchThreadID) {\n"
+                               "    Payload payload;\n"
+                               "    payload.value = helper(id.x);\n"
+                               "}\n";
+    hlsl_intellisense::lsp::Server server{[](const auto&) {}};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    const auto other_document = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "other.hlsl").string());
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params = Json{{"textDocument",
+                        {{"uri", other_document.uri()},
+                         {"languageId", "hlsl"},
+                         {"version", 1},
+                         {"text", "float4 OtherMain() : SV_Target { return 1; }\n"}}}}}));
+    static_cast<void>(server.handle(
+        hlsl_intellisense::json_rpc::Notification{.method = "textDocument/didOpen",
+                                                  .params = Json{{"textDocument",
+                                                                  {{"uri", document.uri()},
+                                                                   {"languageId", "hlsl"},
+                                                                   {"version", 1},
+                                                                   {"text", source}}}}}));
+
+    const auto context_at = [&](std::string_view text) {
+        const auto offset = source.find(text);
+        REQUIRE(offset != std::string::npos);
+        const auto response = server.handle(hlsl_intellisense::json_rpc::Request{
+            .id = std::int64_t{2},
+            .method = "hlsl/commandContext",
+            .params = Json{{"textDocument", {{"uri", document.uri()}}},
+                           {"position", position_at(source, offset + 1)}}});
+        REQUIRE(response.has_value());
+        const auto* result = std::get_if<hlsl_intellisense::json_rpc::Response>(&*response);
+        REQUIRE(result != nullptr);
+        return result->result;
+    };
+
+    const auto structure = context_at("Payload");
+    CHECK(structure["memoryLayoutAvailable"] == true);
+    CHECK(structure["memoryLayoutTarget"] == "Payload");
+    CHECK(structure["callHierarchyAvailable"] == false);
+    CHECK(structure["entryPointDataFlowAvailable"] == false);
+    CHECK(structure["computeVisualizationAvailable"] == false);
+    CHECK(structure["entryPoint"] == "CSMain");
+
+    const auto helper = context_at("helper");
+    CHECK(helper["memoryLayoutAvailable"] == false);
+    CHECK(helper["callHierarchyAvailable"] == true);
+    CHECK(helper["callableName"] == "helper");
+    CHECK(helper["entryPointDataFlowAvailable"] == false);
+
+    const auto entry_point = context_at("CSMain");
+    CHECK(entry_point["callHierarchyAvailable"] == true);
+    CHECK(entry_point["callableName"] == "CSMain");
+    CHECK(entry_point["entryPointDataFlowAvailable"] == true);
+    CHECK(entry_point["computeVisualizationAvailable"] == true);
+
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didSave",
+        .params = Json{{"textDocument", {{"uri", document.uri()}}}}}));
+    CHECK(context_at("CSMain")["entryPointDataFlowAvailable"] == true);
 }
 
 TEST_CASE("Server exposes compiler-backed preprocessor exploration",

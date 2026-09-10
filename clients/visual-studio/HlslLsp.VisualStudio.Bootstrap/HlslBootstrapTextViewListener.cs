@@ -37,6 +37,7 @@ internal sealed class HlslBootstrapTextViewListener : IWpfTextViewCreationListen
         {
             return;
         }
+        HlslCommandContextTracker.Attach(textView, document.FilePath);
         HlslBootstrapPackage.RequestActivation(document.FilePath);
         if (Interlocked.Exchange(ref activationStarted, 1) != 0)
         {

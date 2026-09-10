@@ -95,6 +95,23 @@ public sealed class HlslBootstrapPackage : AsyncPackage
             .FileAndForget("HlslLsp/TryActivate");
     }
 
+    internal static void RunOnMainThread(Action action)
+    {
+        HlslBootstrapPackage package;
+        lock (Gate)
+        {
+            package = instance;
+        }
+        package?.JoinableTaskFactory.RunAsync(
+                async () =>
+                {
+                    await package.JoinableTaskFactory.SwitchToMainThreadAsync(
+                        package.DisposalToken);
+                    action();
+                })
+            .FileAndForget("HlslLsp/CommandContextMainThread");
+    }
+
     public HlslOptionsSnapshot GetOptions()
     {
         ThreadHelper.ThrowIfNotOnUIThread();
@@ -1930,10 +1947,54 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         _ = eventArgs;
         if (sender is OleMenuCommand command)
         {
-            var available =
-                TryGetActiveHlslEditorContext(out _, out _, out _, out _);
-            command.Visible = available;
-            command.Enabled = available;
+            var hlslEditor = TryGetActiveHlslEditorContext(
+                out var uri,
+                out var line,
+                out var character,
+                out _);
+            HlslCommandContextModel context = null;
+            var contextKnown = hlslEditor &&
+                HlslCommandContextCache.TryGet(
+                    uri,
+                    line,
+                    character,
+                    out context);
+            var presentation = HlslCommandPresentation.Evaluate(
+                CommandKind(command.CommandID.ID),
+                hlslEditor,
+                contextKnown,
+                context);
+            command.Visible = presentation.Visible;
+            command.Enabled = presentation.Enabled;
+            command.Text = presentation.Text;
+        }
+    }
+
+    private static HlslCommandKind CommandKind(int commandId)
+    {
+        switch (commandId)
+        {
+            case 0x0100:
+                return HlslCommandKind.MemoryLayout;
+            case 0x0101:
+                return HlslCommandKind.SelectVariant;
+            case 0x0102:
+                return HlslCommandKind.Compilation;
+            case 0x0103:
+                return HlslCommandKind.ResourceBindings;
+            case 0x0104:
+                return HlslCommandKind.PreprocessorExplorer;
+            case 0x0105:
+                return HlslCommandKind.EntryPointDataFlow;
+            case 0x0106:
+                return HlslCommandKind.CallHierarchy;
+            case 0x0107:
+                return HlslCommandKind.ComputeVisualization;
+            default:
+                throw new ArgumentOutOfRangeException(
+                    nameof(commandId),
+                    commandId,
+                    "Unknown HLSL command identifier.");
         }
     }
 
@@ -2070,6 +2131,7 @@ public sealed class HlslBootstrapPackage : AsyncPackage
 
     internal static void NotifyOptionsChanged()
     {
+        HlslCommandContextBridge.Invalidate();
         OptionsChanged?.Invoke();
         HlslBootstrapPackage package;
         lock (Gate)

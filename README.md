@@ -92,6 +92,10 @@ documented in [`docs/memory-layout.md`](docs/memory-layout.md).
 In Visual Studio, select **Memory Layout** in Quick Info or right-click the
 declaration and choose **HLSL > Memory Layout**. In Visual Studio Code, select
 the hover action or run **HLSL: Show Memory Layout** from the Command Palette.
+Visual Studio's HLSL submenu follows the caret: symbol-specific commands are
+shown only where they apply, and labels identify the resolved structure,
+function, or entry point. File-wide commands such as shader compilation and
+variant selection remain available throughout an HLSL document.
 
 ![Compiler-backed memory layout for an HLSL structure in Visual Studio](art/memory-layout.png)
 
