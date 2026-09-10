@@ -181,6 +181,39 @@ public sealed class HlslLanguageClientCustomMessageTests : IDisposable
     }
 
     [Fact]
+    public async Task ClientCommandContextRequest_SendsDocumentAndCaretPosition()
+    {
+        var client = new HlslLanguageClient(
+            "2021",
+            string.Empty,
+            string.Empty,
+            (_, _) => Task.CompletedTask,
+            _ => Task.CompletedTask);
+        var received = new TaskCompletionSource<CommandContextParams>();
+        var captureTarget = new CommandContextCaptureTarget(received);
+        using var serverRpc = new JsonRpc(serverStream, serverStream, captureTarget);
+        using var clientRpc = new JsonRpc(clientStream);
+        serverRpc.StartListening();
+        clientRpc.StartListening();
+        await client.AttachForCustomMessageAsync(clientRpc);
+
+        var uri = new Uri("file:///workspace/shader.hlsl");
+        var result = await client.GetCommandContextAsync(
+            uri,
+            7,
+            11,
+            CancellationToken.None);
+
+        Assert.True(await WaitOrTimeoutAsync(received.Task));
+        var parameters = await received.Task;
+        Assert.Equal(uri.AbsoluteUri, parameters.TextDocument.Uri);
+        Assert.Equal(7, parameters.Position.Line);
+        Assert.Equal(11, parameters.Position.Character);
+        Assert.True(result.CallHierarchyAvailable);
+        Assert.Equal("helper", result.CallableName);
+    }
+
+    [Fact]
     public async Task ServerDxcRuntimeRestartRequiredNotification_InvokesCallback()
     {
         // Regression coverage for the pre-existing notification that
@@ -281,6 +314,31 @@ public sealed class HlslLanguageClientCustomMessageTests : IDisposable
         }
     }
 
+    private sealed class CommandContextCaptureTarget
+    {
+        private readonly TaskCompletionSource<CommandContextParams> received;
+
+        public CommandContextCaptureTarget(
+            TaskCompletionSource<CommandContextParams> received)
+        {
+            this.received = received;
+        }
+
+        [JsonRpcMethod(
+            "hlsl/commandContext",
+            UseSingleObjectParameterDeserialization = true)]
+        public HlslLsp.VisualStudio.Bootstrap.HlslCommandContextModel CommandContext(
+            CommandContextParams parameters)
+        {
+            received.TrySetResult(parameters);
+            return new HlslLsp.VisualStudio.Bootstrap.HlslCommandContextModel
+            {
+                CallHierarchyAvailable = true,
+                CallableName = "helper",
+            };
+        }
+    }
+
     private sealed class DidChangeActiveVariantParams
     {
         public string Variant { get; set; }
@@ -296,5 +354,24 @@ public sealed class HlslLanguageClientCustomMessageTests : IDisposable
         public string Uri { get; set; }
 
         public int Type { get; set; }
+    }
+
+    private sealed class CommandContextParams
+    {
+        public TextDocumentParams TextDocument { get; set; }
+
+        public PositionParams Position { get; set; }
+    }
+
+    private sealed class TextDocumentParams
+    {
+        public string Uri { get; set; }
+    }
+
+    private sealed class PositionParams
+    {
+        public int Line { get; set; }
+
+        public int Character { get; set; }
     }
 }

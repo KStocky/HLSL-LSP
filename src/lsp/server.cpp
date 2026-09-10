@@ -30,6 +30,30 @@ namespace {
 using json_rpc::HandlerError;
 using json_rpc::Json;
 
+struct EffectiveShaderTarget {
+    std::string entry_point;
+    std::string target_profile;
+};
+
+[[nodiscard]] EffectiveShaderTarget
+effective_shader_target(const workspace::WorkspaceConfiguration& configuration) {
+    EffectiveShaderTarget result;
+    const auto arguments = configuration.compiler_options().arguments();
+    for (std::size_t index = 0; index < arguments.size(); ++index) {
+        const auto& argument = arguments[index];
+        if (argument == "-E" && index + 1 < arguments.size()) {
+            result.entry_point = arguments[++index];
+        } else if (argument.starts_with("-E") && argument.size() > 2) {
+            result.entry_point = argument.substr(2);
+        } else if (argument == "-T" && index + 1 < arguments.size()) {
+            result.target_profile = arguments[++index];
+        } else if (argument.starts_with("-T") && argument.size() > 2) {
+            result.target_profile = argument.substr(2);
+        }
+    }
+    return result;
+}
+
 [[noreturn]] void invalid_params(std::string_view message) {
     throw HandlerError{json_rpc::invalid_params_code, message};
 }
@@ -2177,6 +2201,10 @@ void Server::register_handlers() {
     dispatcher_.register_request_handler(
         "hlsl/memoryLayout",
         [this](const auto& params, const auto& context) { return memory_layout(params, context); });
+    dispatcher_.register_request_handler("hlsl/commandContext",
+                                         [this](const auto& params, const auto& context) {
+                                             return command_context(params, context);
+                                         });
     dispatcher_.register_request_handler("hlsl/preprocessorExplorer",
                                          [this](const auto& params, const auto& context) {
                                              return preprocessor_explorer(params, context);
@@ -3609,6 +3637,73 @@ Json Server::memory_layout(const std::optional<Json>& params,
         }
     }
     return layout.has_value() ? memory_layout_json(*layout) : Json(nullptr);
+}
+
+Json Server::command_context(const std::optional<Json>& params,
+                             const json_rpc::RequestContext& context) {
+    require_running();
+    const auto& value = object_params(params);
+    const auto uri = string_member(object_member(value, "textDocument"), "uri");
+    const auto request_position = position(object_member(value, "position"));
+
+    const auto snapshot = [&] {
+        std::scoped_lock state_lock{state_mutex_};
+        try {
+            const auto& state = documents_.document(uri);
+            if (!state.open) {
+                invalid_params("hlsl/commandContext document is not open");
+            }
+            return documents_.snapshot(uri);
+        } catch (const workspace::DocumentError& error) {
+            invalid_params(error.what());
+        }
+    }();
+
+    const auto submission = [&] {
+        std::scoped_lock state_lock{state_mutex_};
+        const auto found = analysis_submissions_.find(snapshot.document_uri().identity());
+        if (found == analysis_submissions_.end()) {
+            throw HandlerError{json_rpc::content_modified_code,
+                               "HLSL command context is waiting for analysis"};
+        }
+        return found->second;
+    }();
+    const auto [line, column] = dxc_position(snapshot.text(), request_position);
+    const auto layout =
+        analysis_.memory_layout(snapshot.document_uri().identity(), snapshot.version(),
+                                snapshot.path(), line, column, context.cancellation);
+    const auto callable =
+        analysis_.callable_at(snapshot.document_uri().identity(), snapshot.version(),
+                              snapshot.path(), line, column, context.cancellation);
+    const auto content_generation = analysis_.content_generation(
+        snapshot.document_uri().identity(), snapshot.version(), context.cancellation);
+
+    {
+        std::scoped_lock state_lock{state_mutex_};
+        const auto generation = analysis_generations_.find(snapshot.document_uri().identity());
+        if (!documents_.contains(snapshot.uri()) ||
+            documents_.snapshot(snapshot.uri()).version() != snapshot.version() ||
+            generation == analysis_generations_.end() ||
+            generation->second != submission.generation ||
+            content_generation != callable.generation) {
+            throw HandlerError{json_rpc::content_modified_code,
+                               "HLSL command context was superseded"};
+        }
+    }
+
+    const auto callable_name = callable.value.has_value() ? callable.value->name : std::string{};
+    const auto memory_layout_target =
+        layout.has_value() ? (!layout->name.empty() ? layout->name : layout->type) : std::string{};
+    const bool is_entry_point =
+        !submission.entry_point.empty() && callable_name == submission.entry_point;
+    const bool is_compute = is_entry_point && submission.target_profile.starts_with("cs_");
+    return Json{{"memoryLayoutAvailable", layout.has_value()},
+                {"memoryLayoutTarget", memory_layout_target},
+                {"callHierarchyAvailable", callable.value.has_value()},
+                {"callableName", callable_name},
+                {"entryPointDataFlowAvailable", is_entry_point},
+                {"computeVisualizationAvailable", is_compute},
+                {"entryPoint", submission.entry_point}};
 }
 
 Json Server::preprocessor_explorer(const std::optional<Json>& params,
@@ -5079,6 +5174,7 @@ void Server::analyze_affected(std::string_view uri) {
 Server::AnalysisSubmission Server::analyze_and_publish(std::string_view uri) {
     std::scoped_lock submission_lock{analysis_submission_mutex_};
     AnalysisSubmission submission;
+    std::string root_identity;
     analysis::AnalysisInput input = [&] {
         std::scoped_lock state_lock{state_mutex_};
         const auto& state = documents_.document(uri);
@@ -5087,16 +5183,32 @@ Server::AnalysisSubmission Server::analyze_and_publish(std::string_view uri) {
                                "Document was closed before analysis"};
         }
         auto snapshot = documents_.snapshot(uri);
-        const auto generation = ++analysis_generations_[snapshot.document_uri().identity()];
-        submission = {.generation = generation, .active_variant = active_variant_};
+        root_identity = snapshot.document_uri().identity();
+        const auto generation = ++analysis_generations_[root_identity];
+        auto configuration = configuration_for(snapshot, editor_settings_);
+        const auto effective_target = effective_shader_target(configuration);
+        submission = {
+            .generation = generation,
+            .active_variant = active_variant_,
+            .entry_point = effective_target.entry_point,
+            .target_profile = effective_target.target_profile,
+        };
         return analysis::AnalysisInput{.root = snapshot,
                                        .open_documents = documents_.open_snapshots(),
-                                       .configuration =
-                                           configuration_for(snapshot, editor_settings_),
+                                       .configuration = std::move(configuration),
                                        .generation = generation};
     }();
     if (!analysis_.analyze(std::move(input))) {
         throw HandlerError{json_rpc::content_modified_code, "Analysis request was not queued"};
+    }
+    {
+        std::scoped_lock state_lock{state_mutex_};
+        const auto generation = analysis_generations_.find(root_identity);
+        if (generation == analysis_generations_.end() ||
+            generation->second != submission.generation) {
+            throw HandlerError{json_rpc::content_modified_code, "Analysis request was superseded"};
+        }
+        analysis_submissions_[root_identity] = submission;
     }
     if (!options_.background_analysis) {
         analysis_.wait_idle();

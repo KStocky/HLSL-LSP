@@ -163,6 +163,7 @@ public sealed class HlslLspActivator :
             OnActiveVariantChangedFromServerAsync,
             OnConfigurationChangedFromServerAsync);
         MemoryLayoutBridge.Register(languageClient.GetMemoryLayoutAsync);
+        HlslCommandContextBridge.Register(languageClient.GetCommandContextAsync);
         CompilationInfoBridge.Register(languageClient.GetCompilationInfoAsync);
         PreprocessorExplorerBridge.Register(languageClient.GetPreprocessorExplorerAsync);
         EntryPointDataFlowBridge.Register(languageClient.GetEntryPointDataFlowAsync);
@@ -419,6 +420,7 @@ public sealed class HlslLspActivator :
 
     private void RefreshVariantDependentWindows(CancellationToken cancellationToken)
     {
+        HlslCommandContextBridge.Invalidate();
         // A previously opened Shader Compilation window can only become stale
         // through this variant change (the server itself is not restarted),
         // so refresh it here rather than waiting for the next manual
@@ -464,6 +466,7 @@ public sealed class HlslLspActivator :
     // RefreshCompilationInfoIfOpenAsync to avoid unnecessary requests.
     public int OnAfterSave(uint docCookie)
     {
+        HlslCommandContextBridge.Invalidate();
         if (runningDocuments == null)
         {
             return VSConstants.S_OK;
@@ -735,6 +738,7 @@ public sealed class HlslLspActivator :
         {
             return;
         }
+        HlslCommandContextBridge.Invalidate();
         ScheduleUnsavedHlslBufferDebouncedRefresh();
     }
 

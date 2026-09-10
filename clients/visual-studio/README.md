@@ -51,6 +51,15 @@ text, backgrounds, hyperlinks, controls, scrollbars, and environment font.
 Open windows update with the IDE theme and remain readable in both dark and
 light themes.
 
+The editor's **HLSL** submenu is caret-aware. File-wide commands remain
+available throughout an HLSL document, while **Memory Layout**, **Call
+Hierarchy**, **Entry-Point Data Flow**, and **Compute Visualization** appear
+only on symbols where they apply. Applicable commands identify their resolved
+target in the label, such as **Call Hierarchy for helper**. Context is resolved
+asynchronously, so opening the menu never blocks the Visual Studio UI; while a
+new caret position is being resolved, contextual commands are temporarily
+disabled rather than acting on stale data.
+
 When a `shadertoolsconfig.json` declares named compilation variants under
 `hlsl.variants`, right-click the shader and choose
 **HLSL > Select Shader Variant**. The picker contains only variants applicable

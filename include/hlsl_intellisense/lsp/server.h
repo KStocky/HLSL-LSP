@@ -184,6 +184,8 @@ class Server final {
                                        const json_rpc::RequestContext& context);
     [[nodiscard]] json_rpc::Json memory_layout(const std::optional<json_rpc::Json>& params,
                                                const json_rpc::RequestContext& context);
+    [[nodiscard]] json_rpc::Json command_context(const std::optional<json_rpc::Json>& params,
+                                                 const json_rpc::RequestContext& context);
     [[nodiscard]] json_rpc::Json compilation_info(const std::optional<json_rpc::Json>& params,
                                                   const json_rpc::RequestContext& context);
     [[nodiscard]] json_rpc::Json compute_visualization(const std::optional<json_rpc::Json>& params,
@@ -220,6 +222,8 @@ class Server final {
     struct AnalysisSubmission {
         std::uint64_t generation{};
         std::optional<std::string> active_variant;
+        std::string entry_point;
+        std::string target_profile;
     };
 
     AnalysisSubmission analyze_and_publish(std::string_view uri);
@@ -345,6 +349,7 @@ class Server final {
     mutable std::mutex state_mutex_;
     std::unordered_map<std::string, std::string> configuration_watch_states_;
     std::unordered_map<std::string, std::uint64_t> analysis_generations_;
+    std::unordered_map<std::string, AnalysisSubmission> analysis_submissions_;
     // The diagnostics last published for each document (keyed by document
     // identity), used exclusively to derive textDocument/codeAction results.
     // Never populated from, or trusted against, a client-supplied payload.

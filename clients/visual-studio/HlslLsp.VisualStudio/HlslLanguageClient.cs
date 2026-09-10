@@ -350,6 +350,41 @@ internal sealed class HlslLanguageClient :
             .ConfigureAwait(false);
     }
 
+    internal async Task<HlslCommandContextModel> GetCommandContextAsync(
+        Uri documentUri,
+        int line,
+        int character,
+        CancellationToken cancellationToken)
+    {
+        var currentRpc = Volatile.Read(ref rpc);
+        if (currentRpc == null)
+        {
+            await rpcAttached.WaitAsync(cancellationToken).ConfigureAwait(false);
+            currentRpc = Volatile.Read(ref rpc);
+            if (currentRpc == null)
+            {
+                throw new InvalidOperationException(
+                    "The HLSL language server connection is unavailable.");
+            }
+        }
+        return await currentRpc.InvokeWithParameterObjectAsync<HlslCommandContextModel>(
+                "hlsl/commandContext",
+                new
+                {
+                    textDocument = new
+                    {
+                        uri = documentUri.AbsoluteUri,
+                    },
+                    position = new
+                    {
+                        line,
+                        character,
+                    },
+                },
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
     // The server already analyzes the document's current (possibly unsaved)
     // snapshot and its active variant, so no position or variant parameter is
     // sent here; the response always reflects what would happen if the
