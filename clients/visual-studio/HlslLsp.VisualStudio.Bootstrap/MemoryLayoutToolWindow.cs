@@ -41,12 +41,13 @@ internal sealed class MemoryLayoutControl : UserControl
 
     internal MemoryLayoutControl()
     {
-        Content = new ScrollViewer
+        VisualStudioTheme.ApplyToolWindowTheme(this);
+        Content = VisualStudioTheme.ApplyScrollViewerStyle(new ScrollViewer
         {
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
             Content = content,
-        };
+        });
         SetLayout(null);
     }
 

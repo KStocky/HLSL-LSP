@@ -82,12 +82,13 @@ internal sealed class ResourceBindingsControl : UserControl
     internal ResourceBindingsControl()
     {
         ThreadHelper.ThrowIfNotOnUIThread();
-        Content = new ScrollViewer
+        VisualStudioTheme.ApplyToolWindowTheme(this);
+        Content = VisualStudioTheme.ApplyScrollViewerStyle(new ScrollViewer
         {
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
             Content = content,
-        };
+        });
         SetInfo(null);
     }
 
@@ -227,14 +228,18 @@ internal sealed class ResourceBindingsControl : UserControl
         foreach (var group in groups)
         {
             var reserved = group.SystemReservedSpace ? "  [system-reserved]" : string.Empty;
-            content.Children.Add(new TextBlock
+            var heading = new TextBlock
             {
                 Text = $"Space {group.Space} \u2014 " +
                        $"{Label(group.RegisterClass)}{reserved}",
                 FontWeight = FontWeights.SemiBold,
-                Foreground = group.SystemReservedSpace ? Brushes.Goldenrod : null,
                 Margin = new Thickness(0, 8, 0, 4),
-            });
+            };
+            if (group.SystemReservedSpace)
+            {
+                heading.Foreground = Brushes.Goldenrod;
+            }
+            content.Children.Add(heading);
             AddResourceRangeTable(group, lookup);
         }
     }

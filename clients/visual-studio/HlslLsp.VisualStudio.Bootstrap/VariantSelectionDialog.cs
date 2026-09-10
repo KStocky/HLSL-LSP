@@ -27,7 +27,8 @@ internal sealed class VariantSelectionDialog : DialogWindow
 
         var active = variants?.ActiveVariant ?? string.Empty;
 
-        listBox = new ListBox { Margin = new Thickness(12) };
+        listBox = VisualStudioTheme.ApplyDialogListBoxStyle(
+            new ListBox { Margin = new Thickness(12) });
         listBox.Items.Add(new ListBoxItem { Content = "(No variant)", Tag = null });
         var selectedIndex = string.IsNullOrEmpty(active) ? 0 : -1;
         if (variants?.Variants != null)
@@ -53,17 +54,18 @@ internal sealed class VariantSelectionDialog : DialogWindow
         listBox.SelectedIndex = selectedIndex;
         listBox.MouseDoubleClick += (_, _) => Accept();
 
-        var ok = new Button
+        var ok = VisualStudioTheme.ApplyDialogButtonStyle(new Button
         {
             Content = "OK",
             Width = 84,
             Margin = new Thickness(0, 0, 8, 0),
             IsDefault = true,
             IsEnabled = selectedIndex >= 0,
-        };
+        });
         listBox.SelectionChanged += (_, _) => ok.IsEnabled = listBox.SelectedItem != null;
         ok.Click += (_, _) => Accept();
-        var cancel = new Button { Content = "Cancel", Width = 84, IsCancel = true };
+        var cancel = VisualStudioTheme.ApplyDialogButtonStyle(
+            new Button { Content = "Cancel", Width = 84, IsCancel = true });
 
         var buttons = new StackPanel
         {

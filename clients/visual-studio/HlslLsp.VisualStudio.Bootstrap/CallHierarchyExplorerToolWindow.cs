@@ -298,12 +298,13 @@ internal sealed class CallHierarchyExplorerControl : UserControl
     internal CallHierarchyExplorerControl()
     {
         ThreadHelper.ThrowIfNotOnUIThread();
-        Content = new ScrollViewer
+        VisualStudioTheme.ApplyToolWindowTheme(this);
+        Content = VisualStudioTheme.ApplyScrollViewerStyle(new ScrollViewer
         {
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
             Content = content,
-        };
+        });
         Render(null, false, null, "Right-click a function in an HLSL document, then choose HLSL > Call Hierarchy.");
     }
 
