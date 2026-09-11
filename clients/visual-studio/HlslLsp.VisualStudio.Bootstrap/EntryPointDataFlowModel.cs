@@ -461,6 +461,7 @@ internal sealed class EntryPointDataFlowRefreshGate
     private readonly object gate = new();
     private int explicitRequestsInFlight;
     private bool refreshPending;
+    private AnalysisFreshnessCause pendingCause = AnalysisFreshnessCause.Unknown;
 
     internal void EnterExplicitRequest()
     {
@@ -474,7 +475,7 @@ internal sealed class EntryPointDataFlowRefreshGate
     // background refresh was deferred while any explicit request was in
     // flight (clearing the deferred flag as it does so). A caller that
     // receives true must issue exactly one bounded follow-up refresh.
-    internal bool ExitExplicitRequest()
+    internal bool ExitExplicitRequest(out AnalysisFreshnessCause cause)
     {
         lock (gate)
         {
@@ -482,28 +483,55 @@ internal sealed class EntryPointDataFlowRefreshGate
             {
                 --explicitRequestsInFlight;
             }
-            if (!refreshPending)
+            if (explicitRequestsInFlight != 0 || !refreshPending)
             {
+                cause = AnalysisFreshnessCause.Unknown;
                 return false;
             }
             refreshPending = false;
+            cause = pendingCause;
+            pendingCause = AnalysisFreshnessCause.Unknown;
             return true;
         }
     }
 
+    internal bool ExitExplicitRequest()
+        => ExitExplicitRequest(out _);
+
     // Returns true if a background refresh may proceed immediately. Returns
     // false, having recorded the refresh as pending, if an explicit request
     // is currently in flight.
-    internal bool TryBeginBackgroundRefresh()
+    internal bool TryBeginBackgroundRefresh(AnalysisFreshnessCause cause)
     {
         lock (gate)
         {
             if (explicitRequestsInFlight != 0)
             {
                 refreshPending = true;
+                pendingCause =
+                    AnalysisFreshnessCausePolicy.Coalesce(pendingCause, cause);
                 return false;
             }
             return true;
         }
     }
+
+    internal bool TryBeginBackgroundRefresh()
+        => TryBeginBackgroundRefresh(AnalysisFreshnessCause.Unknown);
+
+    internal void RecordRefreshNeeded(AnalysisFreshnessCause cause)
+    {
+        lock (gate)
+        {
+            if (explicitRequestsInFlight != 0)
+            {
+                refreshPending = true;
+                pendingCause =
+                    AnalysisFreshnessCausePolicy.Coalesce(pendingCause, cause);
+            }
+        }
+    }
+
+    internal void RecordRefreshNeeded()
+        => RecordRefreshNeeded(AnalysisFreshnessCause.Unknown);
 }

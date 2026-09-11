@@ -207,6 +207,31 @@ public sealed class CallHierarchyExplorerModelTests
     }
 
     [Fact]
+    public void FailedNewRootRequest_PreservesDisplayedRootAsRefreshAndDrillInTarget()
+    {
+        var displayed = (
+            DocumentUri: new Uri("file:///displayed.hlsl"),
+            Line: 3,
+            Character: 7);
+        var requested = (
+            DocumentUri: new Uri("file:///requested.hlsl"),
+            Line: 12,
+            Character: 4);
+
+        var tracked =
+            CallHierarchyRootRefreshPolicy.TrackedTargetAfterFailedReplacement(
+                displayed,
+                requested);
+        var state = new CallHierarchyExplorerState();
+        state.Reset(MakeFrame("displayedRoot"));
+        state.Push(MakeFrame("displayedChild"), MakeStep());
+
+        Assert.Equal(displayed, tracked);
+        Assert.Equal("displayedRoot", state.Root.Item.Name);
+        Assert.Equal("displayedChild", state.Current.Item.Name);
+    }
+
+    [Fact]
     public void State_Push_AddsAFrameOnTopAndEnablesGoBack()
     {
         var state = new CallHierarchyExplorerState();

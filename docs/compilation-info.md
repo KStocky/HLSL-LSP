@@ -1,5 +1,10 @@
 # HLSL shader compilation
 
+The editor views retain the last good result across refreshes and expose the
+shared tracked-document freshness/Refresh behavior described in
+[analysis result freshness](analysis-freshness.md). A compiler-reported
+compilation failure is still a **Current** successful analysis response.
+
 HLSL-LSP can report the effective compiler configuration, diagnostics, and
 DXC reflection for the active HLSL document through the combined **Shader
 Compilation** view and its cross-editor `hlsl/compilationInfo` protocol.

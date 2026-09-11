@@ -25,6 +25,7 @@ internal sealed class HlslLanguageClient :
     private JsonRpc rpc;
     private readonly AsyncManualResetEvent rpcAttached = new();
     private readonly HlslCustomMessageTarget customMessageTarget;
+    private readonly Action<bool> onConnectionStateChanged;
 
     internal HlslLanguageClient(
         string languageVersion,
@@ -32,7 +33,8 @@ internal sealed class HlslLanguageClient :
         string activeVariant,
         Func<string, string, Task> onRuntimeRestartRequested,
         Func<string, Task> onActiveVariantChangedFromServer,
-        Func<Task> onConfigurationChangedFromServer = null)
+        Func<Task> onConfigurationChangedFromServer = null,
+        Action<bool> onConnectionStateChanged = null)
         : this(
             languageVersion,
             dxcRuntimeDirectory,
@@ -40,7 +42,8 @@ internal sealed class HlslLanguageClient :
             new InlayHintOptionsSnapshot(true, true, false, false, false, false, true),
             onRuntimeRestartRequested,
             onActiveVariantChangedFromServer,
-            onConfigurationChangedFromServer)
+            onConfigurationChangedFromServer,
+            onConnectionStateChanged)
     {
     }
 
@@ -51,12 +54,14 @@ internal sealed class HlslLanguageClient :
         InlayHintOptionsSnapshot inlayHints,
         Func<string, string, Task> onRuntimeRestartRequested,
         Func<string, Task> onActiveVariantChangedFromServer,
-        Func<Task> onConfigurationChangedFromServer = null)
+        Func<Task> onConfigurationChangedFromServer = null,
+        Action<bool> onConnectionStateChanged = null)
     {
         this.languageVersion = languageVersion;
         this.dxcRuntimeDirectory = dxcRuntimeDirectory ?? string.Empty;
         this.activeVariant = activeVariant ?? string.Empty;
         this.inlayHints = inlayHints ?? throw new ArgumentNullException(nameof(inlayHints));
+        this.onConnectionStateChanged = onConnectionStateChanged;
         customMessageTarget = new HlslCustomMessageTarget(
             onRuntimeRestartRequested,
             async variant =>
@@ -772,6 +777,15 @@ internal sealed class HlslLanguageClient :
         };
 
         var process = new Process { StartInfo = startInfo };
+        process.EnableRaisingEvents = true;
+        process.Exited += (_, _) =>
+        {
+            var current = Volatile.Read(ref serverProcess);
+            if (IsCurrentServerProcess(current, process))
+            {
+                onConnectionStateChanged?.Invoke(false);
+            }
+        };
         process.ErrorDataReceived += (_, eventArgs) =>
         {
             if (!string.IsNullOrEmpty(eventArgs.Data))
@@ -785,18 +799,27 @@ internal sealed class HlslLanguageClient :
             throw new InvalidOperationException("Visual Studio could not start HLSL-LSP.");
         }
 
-        serverProcess = process;
+        Volatile.Write(ref serverProcess, process);
         process.BeginErrorReadLine();
         return Task.FromResult(
             new Connection(process.StandardOutput.BaseStream, process.StandardInput.BaseStream));
     }
 
+    internal static bool IsCurrentServerProcess(
+        Process current,
+        Process exited)
+        => ReferenceEquals(current, exited);
+
     public Task OnServerInitializedAsync()
-        => Task.CompletedTask;
+    {
+        onConnectionStateChanged?.Invoke(true);
+        return Task.CompletedTask;
+    }
 
     public Task<InitializationFailureContext> OnServerInitializeFailedAsync(
         ILanguageClientInitializationInfo initializationState)
     {
+        onConnectionStateChanged?.Invoke(false);
         var details = initializationState.InitializationException?.Message;
         var context = new InitializationFailureContext
         {
@@ -810,6 +833,7 @@ internal sealed class HlslLanguageClient :
     public async Task StopServerAsync()
     {
         var process = Interlocked.Exchange(ref serverProcess, null);
+        onConnectionStateChanged?.Invoke(false);
         if (process != null)
         {
             await Task.Run(() =>

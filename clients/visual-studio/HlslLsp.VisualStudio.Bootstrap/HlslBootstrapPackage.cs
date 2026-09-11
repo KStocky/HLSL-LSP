@@ -46,11 +46,11 @@ public sealed class HlslBootstrapPackage : AsyncPackage
     private readonly CoalescingBackgroundRefreshCancellation memoryLayoutBackgroundRefreshCancellation =
         new(TimeSpan.FromSeconds(30));
     private long compilationInfoRequestGeneration;
-    private int explicitCompilationInfoRequests;
+    private readonly AnalysisRefreshGate compilationInfoRefreshGate = new();
     private long resourceBindingsRequestGeneration;
-    private int explicitResourceBindingsRequests;
+    private readonly AnalysisRefreshGate resourceBindingsRefreshGate = new();
     private long preprocessorExplorerRequestGeneration;
-    private int explicitPreprocessorExplorerRequests;
+    private readonly AnalysisRefreshGate preprocessorExplorerRefreshGate = new();
     private long entryPointDataFlowRequestGeneration;
     private readonly EntryPointDataFlowRefreshGate entryPointDataFlowRefreshGate = new();
     private readonly CoalescingBackgroundRefreshCancellation entryPointDataFlowBackgroundRefreshCancellation =
@@ -161,8 +161,14 @@ public sealed class HlslBootstrapPackage : AsyncPackage
                         () => ShowComputeVisualizationExplicitAsync(
                             uri,
                             options,
-                            DisposalToken))
+                            DisposalToken,
+                            AnalysisFreshnessCause.ConfigurationChange))
                     .FileAndForget("HlslLsp/ShowComputeVisualization"));
+        AnalysisFreshnessBridge.Register(
+            kind =>
+                JoinableTaskFactory.RunAsync(
+                        () => RefreshTrackedAnalysisAsync(kind, DisposalToken))
+                    .FileAndForget("HlslLsp/RefreshTrackedAnalysis"));
         await RegisterCommandsAsync(cancellationToken);
         await TryActivateLanguageClientAsync(cancellationToken);
     }
@@ -242,6 +248,135 @@ public sealed class HlslBootstrapPackage : AsyncPackage
     public void ScheduleEffectiveContextIndicatorRefresh()
         => HlslEffectiveContextIndicator.InvalidateAll();
 
+    public void InvalidateAnalysisViews(
+        AnalysisFreshnessCause cause,
+        bool refreshPending = false)
+    {
+        memoryLayoutRefreshGate.InvalidateForRefresh(cause, refreshPending);
+        Interlocked.Increment(ref compilationInfoRequestGeneration);
+        Interlocked.Increment(ref resourceBindingsRequestGeneration);
+        Interlocked.Increment(ref preprocessorExplorerRequestGeneration);
+        Interlocked.Increment(ref entryPointDataFlowRequestGeneration);
+        Interlocked.Increment(ref computeVisualizationRequestGeneration);
+        Interlocked.Increment(ref callHierarchyRequestGeneration);
+        if (refreshPending)
+        {
+            entryPointDataFlowRefreshGate.RecordRefreshNeeded(cause);
+            computeVisualizationRefreshGate.RecordRefreshNeeded(cause);
+            callHierarchyRefreshGate.RecordRefreshNeeded(cause);
+            compilationInfoRefreshGate.RecordRefreshNeeded(cause);
+            resourceBindingsRefreshGate.RecordRefreshNeeded(cause);
+            preprocessorExplorerRefreshGate.RecordRefreshNeeded(cause);
+        }
+        JoinableTaskFactory.RunAsync(
+                () => MarkOpenAnalysisViewsStaleAsync(
+                    cause,
+                    refreshPending,
+                    DisposalToken))
+            .FileAndForget("HlslLsp/MarkAnalysisViewsStale");
+    }
+
+    private async Task MarkOpenAnalysisViewsStaleAsync(
+        AnalysisFreshnessCause cause,
+        bool refreshPending,
+        CancellationToken cancellationToken)
+    {
+        await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+        foreach (var windowType in AnalysisWindowTypes)
+        {
+            if (await FindToolWindowAsync(
+                        windowType,
+                        0,
+                        false,
+                        cancellationToken)
+                    is IAnalysisFreshnessView view)
+            {
+                view.MarkStale(cause, refreshPending);
+            }
+        }
+    }
+
+    private async Task BeginAnalysisRefreshIfOpenAsync(
+        Type windowType,
+        AnalysisFreshnessCause cause,
+        CancellationToken cancellationToken)
+    {
+        await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+        if (await FindToolWindowAsync(
+                    windowType,
+                    0,
+                    false,
+                    cancellationToken)
+                is IAnalysisFreshnessView view)
+        {
+            view.BeginRefresh(cause);
+        }
+    }
+
+    private async Task RefreshTrackedAnalysisAsync(
+        AnalysisViewKind kind,
+        CancellationToken cancellationToken)
+    {
+        switch (kind)
+        {
+            case AnalysisViewKind.MemoryLayout:
+                await RefreshMemoryLayoutIfOpenAsync(
+                    null,
+                    cancellationToken,
+                    AnalysisFreshnessCause.ManualRefresh);
+                break;
+            case AnalysisViewKind.CompilationInfo:
+                await RefreshCompilationInfoIfOpenAsync(
+                    null,
+                    cancellationToken,
+                    AnalysisFreshnessCause.ManualRefresh);
+                break;
+            case AnalysisViewKind.ResourceBindings:
+                await RefreshResourceBindingsIfOpenAsync(
+                    null,
+                    cancellationToken,
+                    AnalysisFreshnessCause.ManualRefresh);
+                break;
+            case AnalysisViewKind.PreprocessorExplorer:
+                await RefreshPreprocessorExplorerIfOpenAsync(
+                    null,
+                    cancellationToken,
+                    AnalysisFreshnessCause.ManualRefresh);
+                break;
+            case AnalysisViewKind.EntryPointDataFlow:
+                await RefreshEntryPointDataFlowIfOpenAsync(
+                    null,
+                    cancellationToken,
+                    AnalysisFreshnessCause.ManualRefresh);
+                break;
+            case AnalysisViewKind.ComputeVisualization:
+                await RefreshComputeVisualizationIfOpenAsync(
+                    null,
+                    cancellationToken,
+                    AnalysisFreshnessCause.ManualRefresh);
+                break;
+            case AnalysisViewKind.CallHierarchy:
+                await RefreshCallHierarchyIfOpenAsync(
+                    null,
+                    cancellationToken,
+                    AnalysisFreshnessCause.ManualRefresh);
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(kind));
+        }
+    }
+
+    private static readonly Type[] AnalysisWindowTypes =
+    {
+        typeof(MemoryLayoutToolWindow),
+        typeof(CompilationInfoToolWindow),
+        typeof(ResourceBindingsToolWindow),
+        typeof(PreprocessorExplorerToolWindow),
+        typeof(EntryPointDataFlowToolWindow),
+        typeof(ComputeVisualizationToolWindow),
+        typeof(CallHierarchyExplorerToolWindow),
+    };
+
     private async Task ShowMemoryLayoutAsync(CancellationToken cancellationToken)
     {
         await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
@@ -290,6 +425,10 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         ITrackingPoint trackingPoint,
         CancellationToken cancellationToken)
     {
+        await BeginAnalysisRefreshIfOpenAsync(
+            typeof(MemoryLayoutToolWindow),
+            AnalysisFreshnessCause.ManualRefresh,
+            cancellationToken);
         var generation = memoryLayoutRefreshGate.EnterExplicitRequest();
         try
         {
@@ -309,9 +448,13 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         }
         finally
         {
-            if (memoryLayoutRefreshGate.ExitExplicitRequest())
+            if (memoryLayoutRefreshGate.ExitExplicitRequest(
+                    out var pendingCause))
             {
-                await RefreshMemoryLayoutIfOpenAsync(null, cancellationToken);
+                await RefreshMemoryLayoutIfOpenAsync(
+                    null,
+                    cancellationToken,
+                    pendingCause);
             }
         }
     }
@@ -416,12 +559,9 @@ public sealed class HlslBootstrapPackage : AsyncPackage
 
     public async Task RefreshMemoryLayoutIfOpenAsync(
         string savedFilePath,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        AnalysisFreshnessCause cause = AnalysisFreshnessCause.Unknown)
     {
-        if (!memoryLayoutRefreshGate.TryBeginBackgroundRefresh(out var generation))
-        {
-            return;
-        }
         await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
         if (await FindToolWindowAsync(
                     typeof(MemoryLayoutToolWindow),
@@ -433,11 +573,20 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         {
             return;
         }
-        if (savedFilePath != null &&
-            (!Uri.TryCreate(savedFilePath, UriKind.Absolute, out var savedUri) ||
-             !savedUri.IsFile ||
-             !window.DocumentUri.Equals(savedUri)))
+        if (!AnalysisSaveRefreshPolicy.ShouldRefresh(
+                AnalysisViewKind.MemoryLayout,
+                window.DocumentUri,
+                savedFilePath,
+                ParseExtensions(GetOptions().FileExtensions)))
         {
+            return;
+        }
+        if (!memoryLayoutRefreshGate.TryBeginBackgroundRefresh(
+                cause,
+                out var generation))
+        {
+            memoryLayoutRefreshGate.InvalidateForRefresh(cause, true);
+            window.MarkStale(cause, true);
             return;
         }
         if (!memoryLayoutRefreshGate.IsCurrent(generation))
@@ -451,7 +600,7 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         }
         var liveBuffer = TryGetOpenCallHierarchyBuffer(window.DocumentUri);
         var trackingPoint = window.TrackingPoint;
-        if (trackingPoint == null ||
+        if (trackingPoint != null &&
             !MemoryLayoutTrackingBuffer.IsCurrent(liveBuffer, trackingPoint.TextBuffer))
         {
             window.SetError(
@@ -460,10 +609,12 @@ public sealed class HlslBootstrapPackage : AsyncPackage
                 window.Character,
                 null,
                 "The tracked document buffer is stale or no longer open. Select Memory Layout again at the desired position.",
-                false);
+                true);
             return;
         }
-        var trackedPosition = ResolveTrackedPosition(trackingPoint);
+        var trackedPosition = trackingPoint == null
+            ? ((int Line, int Character)?)(window.Line, window.Character)
+            : ResolveTrackedPosition(trackingPoint);
         if (!trackedPosition.HasValue)
         {
             window.SetError(
@@ -472,12 +623,13 @@ public sealed class HlslBootstrapPackage : AsyncPackage
                 window.Character,
                 null,
                 "The tracked declaration is no longer available. Select Memory Layout again at the desired position.",
-                false);
+                true);
             return;
         }
         window.UpdateTrackedPosition(
             trackedPosition.Value.Line,
             trackedPosition.Value.Character);
+        window.BeginRefresh(cause);
         var refreshCancellation =
             memoryLayoutBackgroundRefreshCancellation.BeginNext(cancellationToken);
         await RequestMemoryLayoutAsync(
@@ -500,7 +652,11 @@ public sealed class HlslBootstrapPackage : AsyncPackage
                 cancellationToken);
             return;
         }
-        Interlocked.Increment(ref explicitCompilationInfoRequests);
+        await BeginAnalysisRefreshIfOpenAsync(
+            typeof(CompilationInfoToolWindow),
+            AnalysisFreshnessCause.ManualRefresh,
+            cancellationToken);
+        compilationInfoRefreshGate.EnterExplicitRequest();
         try
         {
             using (var requestCancellation =
@@ -516,7 +672,14 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         }
         finally
         {
-            Interlocked.Decrement(ref explicitCompilationInfoRequests);
+            if (compilationInfoRefreshGate.ExitExplicitRequest(
+                    out var pendingCause))
+            {
+                await RefreshCompilationInfoIfOpenAsync(
+                    null,
+                    cancellationToken,
+                    pendingCause);
+            }
         }
     }
 
@@ -596,14 +759,9 @@ public sealed class HlslBootstrapPackage : AsyncPackage
     // first time.
     public async Task RefreshCompilationInfoIfOpenAsync(
         string savedFilePath,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        AnalysisFreshnessCause cause = AnalysisFreshnessCause.Unknown)
     {
-        // A background save/variant refresh must never supersede an explicit
-        // command that the user is waiting for.
-        if (Volatile.Read(ref explicitCompilationInfoRequests) != 0)
-        {
-            return;
-        }
         await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
         if (await FindToolWindowAsync(
                     typeof(CompilationInfoToolWindow),
@@ -615,22 +773,26 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         {
             return;
         }
-        if (savedFilePath != null &&
-            (!Uri.TryCreate(savedFilePath, UriKind.Absolute, out var savedUri) ||
-             !savedUri.IsFile ||
-             !window.DocumentUri.Equals(savedUri)))
+        if (!AnalysisSaveRefreshPolicy.ShouldRefresh(
+                AnalysisViewKind.CompilationInfo,
+                window.DocumentUri,
+                savedFilePath,
+                ParseExtensions(GetOptions().FileExtensions)))
         {
             return;
         }
-        // Re-check after the asynchronous UI/tool-window lookup. An explicit
-        // command may have started while this background refresh was yielding.
-        if (Volatile.Read(ref explicitCompilationInfoRequests) != 0)
+        if (!compilationInfoRefreshGate.TryBeginBackgroundRefresh(cause))
         {
+            Interlocked.Increment(ref compilationInfoRequestGeneration);
+            window.MarkStale(cause, true);
             return;
         }
+        window.BeginRefresh(cause);
+        using var requestCancellation =
+            AnalysisRefreshCancellation.CreateLinked(cancellationToken);
         await ShowCompilationInfoAsync(
             window.DocumentUri,
-            cancellationToken,
+            requestCancellation.Token,
             window,
             cancellationToken);
     }
@@ -645,7 +807,11 @@ public sealed class HlslBootstrapPackage : AsyncPackage
                 cancellationToken);
             return;
         }
-        Interlocked.Increment(ref explicitResourceBindingsRequests);
+        await BeginAnalysisRefreshIfOpenAsync(
+            typeof(ResourceBindingsToolWindow),
+            AnalysisFreshnessCause.ManualRefresh,
+            cancellationToken);
+        resourceBindingsRefreshGate.EnterExplicitRequest();
         try
         {
             using (var requestCancellation =
@@ -661,7 +827,14 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         }
         finally
         {
-            Interlocked.Decrement(ref explicitResourceBindingsRequests);
+            if (resourceBindingsRefreshGate.ExitExplicitRequest(
+                    out var pendingCause))
+            {
+                await RefreshResourceBindingsIfOpenAsync(
+                    null,
+                    cancellationToken,
+                    pendingCause);
+            }
         }
     }
 
@@ -743,14 +916,9 @@ public sealed class HlslBootstrapPackage : AsyncPackage
     // first time.
     public async Task RefreshResourceBindingsIfOpenAsync(
         string savedFilePath,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        AnalysisFreshnessCause cause = AnalysisFreshnessCause.Unknown)
     {
-        // A background save/variant refresh must never supersede an explicit
-        // context command that the user is waiting for.
-        if (Volatile.Read(ref explicitResourceBindingsRequests) != 0)
-        {
-            return;
-        }
         await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
         if (await FindToolWindowAsync(
                     typeof(ResourceBindingsToolWindow),
@@ -762,22 +930,26 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         {
             return;
         }
-        if (savedFilePath != null &&
-            (!Uri.TryCreate(savedFilePath, UriKind.Absolute, out var savedUri) ||
-             !savedUri.IsFile ||
-             !window.DocumentUri.Equals(savedUri)))
+        if (!AnalysisSaveRefreshPolicy.ShouldRefresh(
+                AnalysisViewKind.ResourceBindings,
+                window.DocumentUri,
+                savedFilePath,
+                ParseExtensions(GetOptions().FileExtensions)))
         {
             return;
         }
-        // Re-check after the asynchronous UI/tool-window lookup. An explicit
-        // command may have started while this background refresh was yielding.
-        if (Volatile.Read(ref explicitResourceBindingsRequests) != 0)
+        if (!resourceBindingsRefreshGate.TryBeginBackgroundRefresh(cause))
         {
+            Interlocked.Increment(ref resourceBindingsRequestGeneration);
+            window.MarkStale(cause, true);
             return;
         }
+        window.BeginRefresh(cause);
+        using var requestCancellation =
+            AnalysisRefreshCancellation.CreateLinked(cancellationToken);
         await ShowResourceBindingsAsync(
             window.DocumentUri,
-            cancellationToken,
+            requestCancellation.Token,
             window,
             cancellationToken);
     }
@@ -792,7 +964,11 @@ public sealed class HlslBootstrapPackage : AsyncPackage
                 cancellationToken);
             return;
         }
-        Interlocked.Increment(ref explicitPreprocessorExplorerRequests);
+        await BeginAnalysisRefreshIfOpenAsync(
+            typeof(PreprocessorExplorerToolWindow),
+            AnalysisFreshnessCause.ManualRefresh,
+            cancellationToken);
+        preprocessorExplorerRefreshGate.EnterExplicitRequest();
         try
         {
             using (var requestCancellation =
@@ -808,7 +984,14 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         }
         finally
         {
-            Interlocked.Decrement(ref explicitPreprocessorExplorerRequests);
+            if (preprocessorExplorerRefreshGate.ExitExplicitRequest(
+                    out var pendingCause))
+            {
+                await RefreshPreprocessorExplorerIfOpenAsync(
+                    null,
+                    cancellationToken,
+                    pendingCause);
+            }
         }
     }
 
@@ -891,14 +1074,9 @@ public sealed class HlslBootstrapPackage : AsyncPackage
     // first time.
     public async Task RefreshPreprocessorExplorerIfOpenAsync(
         string savedFilePath,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        AnalysisFreshnessCause cause = AnalysisFreshnessCause.Unknown)
     {
-        // A background save/variant refresh must never supersede an explicit
-        // context command that the user is waiting for.
-        if (Volatile.Read(ref explicitPreprocessorExplorerRequests) != 0)
-        {
-            return;
-        }
         await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
         if (await FindToolWindowAsync(
                     typeof(PreprocessorExplorerToolWindow),
@@ -910,22 +1088,26 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         {
             return;
         }
-        if (savedFilePath != null &&
-            (!Uri.TryCreate(savedFilePath, UriKind.Absolute, out var savedUri) ||
-             !savedUri.IsFile ||
-             !window.DocumentUri.Equals(savedUri)))
+        if (!AnalysisSaveRefreshPolicy.ShouldRefresh(
+                AnalysisViewKind.PreprocessorExplorer,
+                window.DocumentUri,
+                savedFilePath,
+                ParseExtensions(GetOptions().FileExtensions)))
         {
             return;
         }
-        // Re-check after the asynchronous UI/tool-window lookup. An explicit
-        // command may have started while this background refresh was yielding.
-        if (Volatile.Read(ref explicitPreprocessorExplorerRequests) != 0)
+        if (!preprocessorExplorerRefreshGate.TryBeginBackgroundRefresh(cause))
         {
+            Interlocked.Increment(ref preprocessorExplorerRequestGeneration);
+            window.MarkStale(cause, true);
             return;
         }
+        window.BeginRefresh(cause);
+        using var requestCancellation =
+            AnalysisRefreshCancellation.CreateLinked(cancellationToken);
         await ShowPreprocessorExplorerAsync(
             window.DocumentUri,
-            cancellationToken,
+            requestCancellation.Token,
             window,
             cancellationToken);
     }
@@ -953,8 +1135,13 @@ public sealed class HlslBootstrapPackage : AsyncPackage
     private async Task ShowComputeVisualizationExplicitAsync(
         Uri uri,
         ComputeVisualizationOptions options,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        AnalysisFreshnessCause cause = AnalysisFreshnessCause.ManualRefresh)
     {
+        await BeginAnalysisRefreshIfOpenAsync(
+            typeof(ComputeVisualizationToolWindow),
+            cause,
+            cancellationToken);
         computeVisualizationRefreshGate.EnterExplicitRequest();
         try
         {
@@ -970,9 +1157,13 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         }
         finally
         {
-            if (computeVisualizationRefreshGate.ExitExplicitRequest())
+            if (computeVisualizationRefreshGate.ExitExplicitRequest(
+                    out var pendingCause))
             {
-                await RefreshComputeVisualizationIfOpenAsync(null, cancellationToken);
+                await RefreshComputeVisualizationIfOpenAsync(
+                    null,
+                    cancellationToken,
+                    pendingCause);
             }
         }
     }
@@ -1065,12 +1256,9 @@ public sealed class HlslBootstrapPackage : AsyncPackage
 
     public async Task RefreshComputeVisualizationIfOpenAsync(
         string savedFilePath,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        AnalysisFreshnessCause cause = AnalysisFreshnessCause.Unknown)
     {
-        if (!computeVisualizationRefreshGate.TryBeginBackgroundRefresh())
-        {
-            return;
-        }
         await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
         if (await FindToolWindowAsync(
                     typeof(ComputeVisualizationToolWindow),
@@ -1082,19 +1270,23 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         {
             return;
         }
-        if (savedFilePath != null &&
-            !ComputeVisualizationRefreshLogic.IsHlslOrConfigRelevantPath(
+        if (!AnalysisSaveRefreshPolicy.ShouldRefresh(
+                AnalysisViewKind.ComputeVisualization,
+                window.DocumentUri,
                 savedFilePath,
                 ParseExtensions(GetOptions().FileExtensions)))
         {
             return;
         }
-        if (!computeVisualizationRefreshGate.TryBeginBackgroundRefresh())
+        if (!computeVisualizationRefreshGate.TryBeginBackgroundRefresh(cause))
         {
+            Interlocked.Increment(ref computeVisualizationRequestGeneration);
+            window.MarkStale(cause, true);
             return;
         }
         var options = ComputeVisualizationRefreshLogic.OptionsForBackgroundRefresh(
             window.SubmittedOptions);
+        window.BeginRefresh(cause);
         var refreshCancellation =
             computeVisualizationBackgroundRefreshCancellation.BeginNext(cancellationToken);
         await ShowComputeVisualizationAsync(
@@ -1115,6 +1307,10 @@ public sealed class HlslBootstrapPackage : AsyncPackage
                 cancellationToken);
             return;
         }
+        await BeginAnalysisRefreshIfOpenAsync(
+            typeof(EntryPointDataFlowToolWindow),
+            AnalysisFreshnessCause.ManualRefresh,
+            cancellationToken);
         entryPointDataFlowRefreshGate.EnterExplicitRequest();
         try
         {
@@ -1131,7 +1327,8 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         }
         finally
         {
-            if (entryPointDataFlowRefreshGate.ExitExplicitRequest())
+            if (entryPointDataFlowRefreshGate.ExitExplicitRequest(
+                    out var pendingCause))
             {
                 // A save/variant/edit refresh arrived while the explicit
                 // request above was in flight and was deferred rather than
@@ -1140,7 +1337,10 @@ public sealed class HlslBootstrapPackage : AsyncPackage
                 // deferral protected has finished, so the window can never
                 // be left stale just because a refresh trigger happened to
                 // overlap with an explicit command.
-                await RefreshEntryPointDataFlowIfOpenAsync(null, cancellationToken);
+                await RefreshEntryPointDataFlowIfOpenAsync(
+                    null,
+                    cancellationToken,
+                    pendingCause);
             }
         }
     }
@@ -1265,23 +1465,9 @@ public sealed class HlslBootstrapPackage : AsyncPackage
     // as relevant once the window is open.
     public async Task RefreshEntryPointDataFlowIfOpenAsync(
         string savedFilePath,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        AnalysisFreshnessCause cause = AnalysisFreshnessCause.Unknown)
     {
-        // A background save/variant/edit refresh must never supersede an
-        // explicit context command the user is waiting for, but it must also
-        // never be silently discarded: record it so ShowEntryPointDataFlowAsync's
-        // explicit-command overload can replay a single bounded refresh once
-        // that command completes, ensuring the window can never be left
-        // stale immediately after an explicit request finishes.
-        if (!entryPointDataFlowRefreshGate.TryBeginBackgroundRefresh())
-        {
-            // A background save/variant/edit refresh must never supersede
-            // an explicit context command the user is waiting for; the gate
-            // above records this refresh as pending rather than dropping it
-            // (see ShowEntryPointDataFlowAsync's explicit-command overload,
-            // which replays it once the explicit request finishes).
-            return;
-        }
         await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
         if (await FindToolWindowAsync(
                     typeof(EntryPointDataFlowToolWindow),
@@ -1293,16 +1479,18 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         {
             return;
         }
-        if (savedFilePath != null && !IsHlslOrConfigRelevantPath(savedFilePath))
+        if (!AnalysisSaveRefreshPolicy.ShouldRefresh(
+                AnalysisViewKind.EntryPointDataFlow,
+                window.DocumentUri,
+                savedFilePath,
+                ParseExtensions(GetOptions().FileExtensions)))
         {
             return;
         }
-        // Re-check after the asynchronous UI/tool-window lookup. An explicit
-        // command may have started while this background refresh was
-        // yielding; defer to it exactly as above rather than dropping this
-        // refresh outright.
-        if (!entryPointDataFlowRefreshGate.TryBeginBackgroundRefresh())
+        if (!entryPointDataFlowRefreshGate.TryBeginBackgroundRefresh(cause))
         {
+            Interlocked.Increment(ref entryPointDataFlowRequestGeneration);
+            window.MarkStale(cause, true);
             return;
         }
         // Bounds this refresh to a fixed timeout and coalesces it with any
@@ -1315,27 +1503,12 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         // to run against the real package-lifetime token.
         var refreshCancellation =
             entryPointDataFlowBackgroundRefreshCancellation.BeginNext(cancellationToken);
+        window.BeginRefresh(cause);
         await ShowEntryPointDataFlowAsync(
             window.DocumentUri,
             refreshCancellation.Token,
             window,
             cancellationToken);
-    }
-
-    // Conservative relevance test for a saved file path used by
-    // RefreshEntryPointDataFlowIfOpenAsync above: a configured HLSL/header
-    // extension, or a file literally named shadertoolsconfig.json regardless
-    // of its folder, both of which can change the reported data flow for the
-    // currently shown document even though neither is that document itself.
-    // Delegates to EntryPointDataFlowRefreshLogic (a pure, unit-tested
-    // helper) for the actual decision; this wrapper only supplies the
-    // UI-thread-affine configured-extensions lookup.
-    private bool IsHlslOrConfigRelevantPath(string path)
-    {
-        ThreadHelper.ThrowIfNotOnUIThread();
-        return EntryPointDataFlowRefreshLogic.IsHlslOrConfigRelevantPath(
-            path,
-            ParseExtensions(GetOptions().FileExtensions));
     }
 
     // Lazily resolves the plain VS editor services needed to anchor/re-
@@ -1494,6 +1667,10 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         var rootTrackingPoint = buffer != null
             ? CreateRootTrackingPoint(buffer, line, character)
             : null;
+        await BeginAnalysisRefreshIfOpenAsync(
+            typeof(CallHierarchyExplorerToolWindow),
+            AnalysisFreshnessCause.ManualRefresh,
+            cancellationToken);
 
         callHierarchyRefreshGate.EnterExplicitRequest();
         try
@@ -1513,12 +1690,16 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         }
         finally
         {
-            if (callHierarchyRefreshGate.ExitExplicitRequest())
+            if (callHierarchyRefreshGate.ExitExplicitRequest(
+                    out var pendingCause))
             {
                 // Mirrors ShowEntryPointDataFlowAsync: a refresh trigger that
                 // arrived while this explicit request was in flight was
                 // deferred, not dropped -- replay it once now.
-                await RefreshCallHierarchyIfOpenAsync(null, cancellationToken);
+                await RefreshCallHierarchyIfOpenAsync(
+                    null,
+                    cancellationToken,
+                    pendingCause);
             }
         }
     }
@@ -1594,7 +1775,11 @@ public sealed class HlslBootstrapPackage : AsyncPackage
                         ambientCancellationToken)
                     is CallHierarchyExplorerToolWindow existingWindow)
             {
-                existingWindow.SetNotCallable();
+                existingWindow.SetNotCallable(
+                    uri,
+                    line,
+                    character,
+                    rootTrackingPoint);
             }
             await ShowInformationAsync(
                 "No callable symbol was found at the selected position.",
@@ -1617,11 +1802,20 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         {
             if (window?.CurrentItem != null)
             {
+                window.PreserveTrackedRootAfterFailedReplacement(
+                    uri,
+                    line,
+                    character);
                 window.SetBannerOnCurrent(failureMessage);
             }
             else
             {
-                window?.SetGlobalError(failureMessage);
+                window?.SetGlobalError(
+                    failureMessage,
+                    uri,
+                    line,
+                    character,
+                    rootTrackingPoint);
             }
             return;
         }
@@ -1728,9 +1922,13 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         }
         finally
         {
-            if (callHierarchyRefreshGate.ExitExplicitRequest())
+            if (callHierarchyRefreshGate.ExitExplicitRequest(
+                    out var pendingCause))
             {
-                await RefreshCallHierarchyIfOpenAsync(null, cancellationToken);
+                await RefreshCallHierarchyIfOpenAsync(
+                    null,
+                    cancellationToken,
+                    pendingCause);
             }
         }
     }
@@ -1771,12 +1969,9 @@ public sealed class HlslBootstrapPackage : AsyncPackage
     // currently displayed item's own document changing.
     public async Task RefreshCallHierarchyIfOpenAsync(
         string savedFilePath,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        AnalysisFreshnessCause cause = AnalysisFreshnessCause.Unknown)
     {
-        if (!callHierarchyRefreshGate.TryBeginBackgroundRefresh())
-        {
-            return;
-        }
         await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
         if (await FindToolWindowAsync(
                     typeof(CallHierarchyExplorerToolWindow),
@@ -1788,14 +1983,18 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         {
             return;
         }
-        if (savedFilePath != null && !IsHlslOrConfigRelevantPath(savedFilePath))
+        if (!AnalysisSaveRefreshPolicy.ShouldRefresh(
+                AnalysisViewKind.CallHierarchy,
+                window.RootDocumentUri,
+                savedFilePath,
+                ParseExtensions(GetOptions().FileExtensions)))
         {
             return;
         }
-        // Re-check after the asynchronous UI/tool-window lookup, matching
-        // RefreshEntryPointDataFlowIfOpenAsync's own double-check.
-        if (!callHierarchyRefreshGate.TryBeginBackgroundRefresh())
+        if (!callHierarchyRefreshGate.TryBeginBackgroundRefresh(cause))
         {
+            Interlocked.Increment(ref callHierarchyRequestGeneration);
+            window.MarkStale(cause, true);
             return;
         }
 
@@ -1850,6 +2049,7 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         // cannot accumulate unboundedly in-flight requests.
         var refreshCancellation =
             callHierarchyBackgroundRefreshCancellation.BeginNext(cancellationToken);
+        window.BeginRefresh(cause);
         var token = refreshCancellation.Token;
         var generation = Interlocked.Increment(ref callHierarchyRequestGeneration);
 
@@ -1904,6 +2104,7 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         // roots) is identical.
         if (failureMessage == null &&
             rootItem != null &&
+            window.RootItem != null &&
             !CallHierarchyItemIdentity.IsSameCallable(window.RootItem, rootItem))
         {
             failureMessage = CallHierarchyExplorerDisplay.RootIdentityChangedMessage();
@@ -1992,6 +2193,7 @@ public sealed class HlslBootstrapPackage : AsyncPackage
             // refresh trigger (or a manual context command) will re-capture
             // a correct revision and path from the user's actual current
             // position.
+            window.DiscardRefreshAfterNavigation(cause);
             return;
         }
         if (failureMessage == null && rootItem == null)
@@ -2000,7 +2202,11 @@ public sealed class HlslBootstrapPackage : AsyncPackage
             // callable (e.g. the function was deleted or renamed) -- an
             // authoritative result, not a transient failure, exactly like
             // EstablishCallHierarchyRootAsync's own not-callable handling.
-            window.SetNotCallable();
+            window.SetNotCallable(
+                rootUri,
+                resolvedLine,
+                resolvedCharacter,
+                freshTrackingPoint);
             return;
         }
         if (failureMessage != null)
@@ -2031,7 +2237,7 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         window.SetRoot(rootUri, anchorLine, anchorCharacter, rootFrame, freshTrackingPoint);
         if (rebuildFailureMessage != null)
         {
-            window.SetBannerOnCurrent(rebuildFailureMessage);
+            window.SetBannerOnCurrent(rebuildFailureMessage, false);
         }
     }
 

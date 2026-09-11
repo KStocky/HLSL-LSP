@@ -53,7 +53,14 @@ import {
   effectiveContextTooltip,
   variantLabel,
 } from "./effectiveContext";
-import { PanelController } from "./panelController";
+import { nodeScheduler, PanelController } from "./panelController";
+import {
+  AnalysisFreshness,
+  AnalysisFreshnessCause,
+  AnalysisFreshnessState,
+  analysisConfigurationChange,
+  withAnalysisFreshness,
+} from "./analysisFreshness";
 import {
   HlslServerSettings,
   readActiveVariant,
@@ -62,7 +69,14 @@ import {
   readTraceSetting,
   TraceSetting,
 } from "./configuration";
-import { ClientLifecycle, LifecycleClient, LifecycleState } from "./lifecycle";
+import {
+  ClientLifecycle,
+  ConnectionRecoveryTracker,
+  ConnectionTransition,
+  LifecycleClient,
+  LifecycleState,
+  runGuardedRecovery,
+} from "./lifecycle";
 import {
   MemoryLayout,
   memoryLayoutHtml,
@@ -146,6 +160,9 @@ let activeLifecycle: ClientLifecycle<ManagedClient> | undefined;
 
 interface MemoryLayoutViewState {
   readonly panel: vscode.WebviewPanel;
+  readonly freshness: AnalysisFreshness;
+  readonly refreshCommand: string;
+  html: string;
   uri: vscode.Uri;
   position: vscode.Position | undefined;
   hasContent: boolean;
@@ -157,6 +174,9 @@ let memoryLayoutDebounce: NodeJS.Timeout | undefined;
 
 interface CompilationInfoViewState {
   readonly panel: vscode.WebviewPanel;
+  readonly freshness: AnalysisFreshness;
+  readonly refreshCommand: string;
+  html: string;
   uri: vscode.Uri;
   // True once a successful hlsl/compilationInfo result has been rendered for
   // the current uri. A later failed or cancelled refresh must never regress
@@ -171,10 +191,10 @@ interface CompilationInfoViewState {
   // anything a `command:` URI could supply, so a stale or crafted link can
   // never exfiltrate or forge disassembly content for another document.
   lastInfo: CompilationInfo | undefined;
+  lastInfoUri: vscode.Uri | undefined;
 }
 
 let compilationInfoState: CompilationInfoViewState | undefined;
-let compilationInfoGeneration = 0;
 let compilationInfoDebounce: NodeJS.Timeout | undefined;
 
 // Independently tracked from CompilationInfoViewState: the two panels can be
@@ -182,12 +202,14 @@ let compilationInfoDebounce: NodeJS.Timeout | undefined;
 // may interfere with the other's generation counter or debounce timer.
 interface ResourceBindingsViewState {
   readonly panel: vscode.WebviewPanel;
+  readonly freshness: AnalysisFreshness;
+  readonly refreshCommand: string;
+  html: string;
   uri: vscode.Uri;
   hasContent: boolean;
 }
 
 let resourceBindingsState: ResourceBindingsViewState | undefined;
-let resourceBindingsGeneration = 0;
 let resourceBindingsDebounce: NodeJS.Timeout | undefined;
 
 // Independently tracked from the other two panels: all three can be open
@@ -195,12 +217,14 @@ let resourceBindingsDebounce: NodeJS.Timeout | undefined;
 // another's generation counter or debounce timer.
 interface PreprocessorExplorerViewState {
   readonly panel: vscode.WebviewPanel;
+  readonly freshness: AnalysisFreshness;
+  readonly refreshCommand: string;
+  html: string;
   uri: vscode.Uri;
   hasContent: boolean;
 }
 
 let preprocessorExplorerState: PreprocessorExplorerViewState | undefined;
-let preprocessorExplorerGeneration = 0;
 let preprocessorExplorerDebounce: NodeJS.Timeout | undefined;
 
 // Independently tracked from the other panels: all four can be open for
@@ -214,6 +238,9 @@ let preprocessorExplorerDebounce: NodeJS.Timeout | undefined;
 interface EntryPointDataFlowViewState {
   readonly panel: vscode.WebviewPanel;
   readonly controller: PanelController<EntryPointDataFlow>;
+  readonly freshness: AnalysisFreshness;
+  readonly refreshCommand: string;
+  html: string;
 }
 
 let entryPointDataFlowState: EntryPointDataFlowViewState | undefined;
@@ -221,6 +248,9 @@ let entryPointDataFlowState: EntryPointDataFlowViewState | undefined;
 interface ComputeVisualizationViewState {
   readonly panel: vscode.WebviewPanel;
   readonly controller: PanelController<ComputeVisualization>;
+  readonly freshness: AnalysisFreshness;
+  readonly refreshCommand: string;
+  html: string;
   options: ComputeVisualizationOptions;
 }
 
@@ -234,14 +264,95 @@ let computeVisualizationState: ComputeVisualizationViewState | undefined;
 // only when the extension itself activates/deactivates, independent of the
 // per-restart watchers whose events feed it.
 let watchedFileRefreshDebouncer: Debouncer | undefined;
+let watchedFileRefreshCause: AnalysisFreshnessCause = "Unknown";
 let effectiveContextStatusDebouncer: Debouncer | undefined;
+
+const refreshMemoryLayoutCommand = "hlsl.refreshMemoryLayout";
+const refreshCompilationInfoCommand = "hlsl.refreshCompilationInfo";
+const refreshResourceBindingsCommand = "hlsl.refreshResourceBindings";
+const refreshPreprocessorExplorerCommand = "hlsl.refreshPreprocessorExplorer";
+const refreshEntryPointDataFlowCommand = "hlsl.refreshEntryPointDataFlow";
+const refreshComputeVisualizationCommand = "hlsl.refreshComputeVisualization";
+
+interface AnalysisPanelViewState {
+  readonly panel: vscode.WebviewPanel;
+  readonly freshness: AnalysisFreshness;
+  readonly refreshCommand: string;
+  html: string;
+}
+
+function renderAnalysisPanel(state: AnalysisPanelViewState): void {
+  state.panel.webview.html = withAnalysisFreshness(
+    state.html,
+    state.freshness.state,
+    state.refreshCommand,
+  );
+}
+
+function setAnalysisPanelHtml(
+  state: AnalysisPanelViewState,
+  html: string,
+): void {
+  state.html = html;
+  renderAnalysisPanel(state);
+}
+
+function setAnalysisPanelFreshness(
+  state: AnalysisPanelViewState,
+  freshness: AnalysisFreshnessState,
+): void {
+  if (freshness !== state.freshness.state) {
+    return;
+  }
+  renderAnalysisPanel(state);
+}
+
+function invalidateOpenAnalysisPanels(
+  cause: AnalysisFreshnessCause,
+  refreshPending = false,
+): void {
+  ++memoryLayoutGeneration;
+  const states: AnalysisPanelViewState[] = [];
+  if (memoryLayoutState !== undefined) states.push(memoryLayoutState);
+  if (compilationInfoState !== undefined) states.push(compilationInfoState);
+  if (resourceBindingsState !== undefined) states.push(resourceBindingsState);
+  if (preprocessorExplorerState !== undefined)
+    states.push(preprocessorExplorerState);
+  if (entryPointDataFlowState !== undefined)
+    states.push(entryPointDataFlowState);
+  if (computeVisualizationState !== undefined)
+    states.push(computeVisualizationState);
+  for (const state of states) {
+    state.freshness.invalidate(cause, refreshPending);
+    renderAnalysisPanel(state);
+  }
+}
+
+function cancelPendingAnalysisRefreshes(): void {
+  if (memoryLayoutDebounce !== undefined) {
+    clearTimeout(memoryLayoutDebounce);
+    memoryLayoutDebounce = undefined;
+  }
+  if (compilationInfoDebounce !== undefined) {
+    clearTimeout(compilationInfoDebounce);
+    compilationInfoDebounce = undefined;
+  }
+  if (resourceBindingsDebounce !== undefined) {
+    clearTimeout(resourceBindingsDebounce);
+    resourceBindingsDebounce = undefined;
+  }
+  if (preprocessorExplorerDebounce !== undefined) {
+    clearTimeout(preprocessorExplorerDebounce);
+    preprocessorExplorerDebounce = undefined;
+  }
+  entryPointDataFlowState?.controller.cancelScheduledRefresh();
+  computeVisualizationState?.controller.cancelScheduledRefresh();
+  watchedFileRefreshDebouncer?.cancel();
+  watchedFileRefreshCause = "Unknown";
+}
 
 function compilationInfoLoadingHtml(): string {
   return `<!doctype html><html><body style="color:var(--vscode-foreground);background:var(--vscode-editor-background);font-family:var(--vscode-font-family);padding:1rem 1.5rem;"><p>Compiling…</p></body></html>`;
-}
-
-function memoryLayoutLoadingHtml(): string {
-  return `<!doctype html><html><body style="color:var(--vscode-foreground);background:var(--vscode-editor-background);font-family:var(--vscode-font-family);padding:1rem 1.5rem;"><p>Analyzing memory layout…</p></body></html>`;
 }
 
 function memoryLayoutErrorHtml(message: string): string {
@@ -252,8 +363,14 @@ async function refreshMemoryLayout(
   lifecycle: ClientLifecycle<ManagedClient>,
   uri: vscode.Uri,
   position: vscode.Position,
+  cause: AnalysisFreshnessCause = "Manual refresh",
 ): Promise<void> {
-  const generation = ++memoryLayoutGeneration;
+  const state = memoryLayoutState;
+  if (state === undefined) {
+    return;
+  }
+  const generation = state.freshness.beginRefresh(cause);
+  renderAnalysisPanel(state);
   let layout: MemoryLayout | null | undefined;
   let failureMessage: string | undefined;
   try {
@@ -265,22 +382,32 @@ async function refreshMemoryLayout(
       error instanceof Error ? error.message : "The request failed.";
   }
   if (
-    generation !== memoryLayoutGeneration ||
-    memoryLayoutState?.uri.toString() !== uri.toString() ||
-    memoryLayoutState.position?.line !== position.line ||
-    memoryLayoutState.position.character !== position.character
+    memoryLayoutState !== state ||
+    state.uri.toString() !== uri.toString() ||
+    state.position?.line !== position.line ||
+    state.position.character !== position.character
   ) {
     return;
   }
   if (layout !== null && layout !== undefined) {
-    memoryLayoutState.hasContent = true;
-    memoryLayoutState.panel.title = `Memory Layout: ${layout.name || layout.type}`;
-    memoryLayoutState.panel.webview.html = memoryLayoutHtml(layout);
-  } else if (!memoryLayoutState.hasContent) {
-    memoryLayoutState.panel.webview.html = memoryLayoutErrorHtml(
-      failureMessage ??
-        "No compiler-authoritative memory layout is available at this position.",
-    );
+    if (!state.freshness.succeed(generation)) {
+      return;
+    }
+    state.hasContent = true;
+    state.panel.title = `Memory Layout: ${layout.name || layout.type}`;
+    setAnalysisPanelHtml(state, memoryLayoutHtml(layout));
+  } else if (state.freshness.fail(generation)) {
+    if (!state.hasContent) {
+      setAnalysisPanelHtml(
+        state,
+        memoryLayoutErrorHtml(
+          failureMessage ??
+            "No compiler-authoritative memory layout is available at this position.",
+        ),
+      );
+    } else {
+      renderAnalysisPanel(state);
+    }
   }
 }
 
@@ -449,8 +576,12 @@ async function configureComputeVisualization(
 async function refreshCompilationInfo(
   lifecycle: ClientLifecycle<ManagedClient>,
   uri: vscode.Uri,
+  cause: AnalysisFreshnessCause = "Manual refresh",
 ): Promise<void> {
-  const generation = ++compilationInfoGeneration;
+  const state = compilationInfoState;
+  if (state === undefined) return;
+  const generation = state.freshness.beginRefresh(cause);
+  renderAnalysisPanel(state);
   let info: CompilationInfo | null | undefined;
   let failureMessage: string | undefined;
   try {
@@ -460,25 +591,33 @@ async function refreshCompilationInfo(
       error instanceof Error ? error.message : "The request failed.";
   }
   if (
-    generation !== compilationInfoGeneration ||
-    compilationInfoState?.uri.toString() !== uri.toString()
+    compilationInfoState !== state ||
+    state.uri.toString() !== uri.toString()
   ) {
     return;
   }
+  const accepted =
+    info !== null && info !== undefined
+      ? state.freshness.succeed(generation)
+      : state.freshness.fail(generation);
+  if (!accepted) return;
   const outcome = resolveCompilationInfoRefresh(
-    compilationInfoState.hasContent,
+    state.hasContent,
     info,
     failureMessage,
   );
-  compilationInfoState.hasContent = outcome.hasContent;
+  state.hasContent = outcome.hasContent;
   if (outcome.info !== undefined) {
-    compilationInfoState.lastInfo = outcome.info;
+    state.lastInfo = outcome.info;
+    state.lastInfoUri = uri;
   }
   if (outcome.title !== undefined) {
-    compilationInfoState.panel.title = outcome.title;
+    state.panel.title = outcome.title;
   }
   if (outcome.html !== undefined) {
-    compilationInfoState.panel.webview.html = outcome.html;
+    setAnalysisPanelHtml(state, outcome.html);
+  } else {
+    renderAnalysisPanel(state);
   }
 }
 
@@ -490,8 +629,12 @@ async function refreshCompilationInfo(
 async function refreshResourceBindings(
   lifecycle: ClientLifecycle<ManagedClient>,
   uri: vscode.Uri,
+  cause: AnalysisFreshnessCause = "Manual refresh",
 ): Promise<void> {
-  const generation = ++resourceBindingsGeneration;
+  const state = resourceBindingsState;
+  if (state === undefined) return;
+  const generation = state.freshness.beginRefresh(cause);
+  renderAnalysisPanel(state);
   let info: CompilationInfo | null | undefined;
   let failureMessage: string | undefined;
   try {
@@ -501,22 +644,29 @@ async function refreshResourceBindings(
       error instanceof Error ? error.message : "The request failed.";
   }
   if (
-    generation !== resourceBindingsGeneration ||
-    resourceBindingsState?.uri.toString() !== uri.toString()
+    resourceBindingsState !== state ||
+    state.uri.toString() !== uri.toString()
   ) {
     return;
   }
+  const accepted =
+    info !== null && info !== undefined
+      ? state.freshness.succeed(generation)
+      : state.freshness.fail(generation);
+  if (!accepted) return;
   const outcome = resolveResourceBindingsRefresh(
-    resourceBindingsState.hasContent,
+    state.hasContent,
     info,
     failureMessage,
   );
-  resourceBindingsState.hasContent = outcome.hasContent;
+  state.hasContent = outcome.hasContent;
   if (outcome.title !== undefined) {
-    resourceBindingsState.panel.title = outcome.title;
+    state.panel.title = outcome.title;
   }
   if (outcome.html !== undefined) {
-    resourceBindingsState.panel.webview.html = outcome.html;
+    setAnalysisPanelHtml(state, outcome.html);
+  } else {
+    renderAnalysisPanel(state);
   }
 }
 
@@ -527,8 +677,12 @@ async function refreshResourceBindings(
 async function refreshPreprocessorExplorer(
   lifecycle: ClientLifecycle<ManagedClient>,
   uri: vscode.Uri,
+  cause: AnalysisFreshnessCause = "Manual refresh",
 ): Promise<void> {
-  const generation = ++preprocessorExplorerGeneration;
+  const state = preprocessorExplorerState;
+  if (state === undefined) return;
+  const generation = state.freshness.beginRefresh(cause);
+  renderAnalysisPanel(state);
   let report: PreprocessorExplorerReport | null | undefined;
   let failureMessage: string | undefined;
   try {
@@ -540,22 +694,29 @@ async function refreshPreprocessorExplorer(
       error instanceof Error ? error.message : "The request failed.";
   }
   if (
-    generation !== preprocessorExplorerGeneration ||
-    preprocessorExplorerState?.uri.toString() !== uri.toString()
+    preprocessorExplorerState !== state ||
+    state.uri.toString() !== uri.toString()
   ) {
     return;
   }
+  const accepted =
+    report !== null && report !== undefined
+      ? state.freshness.succeed(generation)
+      : state.freshness.fail(generation);
+  if (!accepted) return;
   const outcome = resolvePreprocessorExplorerRefresh(
-    preprocessorExplorerState.hasContent,
+    state.hasContent,
     report,
     failureMessage,
   );
-  preprocessorExplorerState.hasContent = outcome.hasContent;
+  state.hasContent = outcome.hasContent;
   if (outcome.title !== undefined) {
-    preprocessorExplorerState.panel.title = outcome.title;
+    state.panel.title = outcome.title;
   }
   if (outcome.html !== undefined) {
-    preprocessorExplorerState.panel.webview.html = outcome.html;
+    setAnalysisPanelHtml(state, outcome.html);
+  } else {
+    renderAnalysisPanel(state);
   }
 }
 
@@ -574,6 +735,7 @@ async function refreshPreprocessorExplorer(
 // docs/call-hierarchy.md's "Includes and unsaved edits").
 async function refreshAllOpenAnalysisPanels(
   lifecycle: ClientLifecycle<ManagedClient>,
+  cause: AnalysisFreshnessCause,
 ): Promise<void> {
   const tasks: Promise<void>[] = [];
   if (memoryLayoutState !== undefined) {
@@ -583,27 +745,37 @@ async function refreshAllOpenAnalysisPanels(
           lifecycle,
           memoryLayoutState.uri,
           memoryLayoutState.position,
+          cause,
         ),
       );
     }
   }
   if (compilationInfoState !== undefined) {
-    tasks.push(refreshCompilationInfo(lifecycle, compilationInfoState.uri));
+    tasks.push(
+      refreshCompilationInfo(lifecycle, compilationInfoState.uri, cause),
+    );
   }
   if (resourceBindingsState !== undefined) {
-    tasks.push(refreshResourceBindings(lifecycle, resourceBindingsState.uri));
+    tasks.push(
+      refreshResourceBindings(lifecycle, resourceBindingsState.uri, cause),
+    );
   }
   if (preprocessorExplorerState !== undefined) {
     tasks.push(
-      refreshPreprocessorExplorer(lifecycle, preprocessorExplorerState.uri),
+      refreshPreprocessorExplorer(
+        lifecycle,
+        preprocessorExplorerState.uri,
+        cause,
+      ),
     );
   }
   const entryPointRefresh =
-    entryPointDataFlowState?.controller.refreshTracked();
+    entryPointDataFlowState?.controller.refreshTracked(cause);
   if (entryPointRefresh !== undefined) {
     tasks.push(entryPointRefresh);
   }
-  const computeRefresh = computeVisualizationState?.controller.refreshTracked();
+  const computeRefresh =
+    computeVisualizationState?.controller.refreshTracked(cause);
   if (computeRefresh !== undefined) {
     tasks.push(computeRefresh);
   }
@@ -619,24 +791,6 @@ async function refreshAllOpenAnalysisPanels(
 // `hlsl.virtualDirectoryMappings`/`hlsl.dxcRuntimeDirectory` are handled
 // separately: they restart the client, and every panel is refreshed after
 // that restart completes instead.
-const compilationAffectingSettings = [
-  "hlsl.entryPoint",
-  "hlsl.targetProfile",
-  "hlsl.preprocessorDefinitions",
-  "hlsl.additionalArguments",
-  "hlsl.languageVersion",
-  "hlsl.activeVariant",
-] as const;
-
-function affectsResolvedCompilation(
-  event: vscode.ConfigurationChangeEvent,
-  resource: vscode.Uri | undefined,
-): boolean {
-  return compilationAffectingSettings.some((setting) =>
-    event.affectsConfiguration(setting, resource),
-  );
-}
-
 function configurationResource(): vscode.Uri | undefined {
   return vscode.workspace.workspaceFolders?.[0]?.uri;
 }
@@ -706,6 +860,7 @@ class VscodeLanguageClient implements ManagedClient {
   private readonly settingsSynchronizer: RunningSettingsSynchronizer<ClientSettings>;
   private readonly stateSubscription: vscode.Disposable;
   private readonly watcherSubscriptions: vscode.Disposable[];
+  private readonly recoveryTracker = new ConnectionRecoveryTracker();
   private disposed = false;
 
   public constructor(
@@ -716,7 +871,8 @@ class VscodeLanguageClient implements ManagedClient {
     serverArgs: readonly string[],
     onRuntimeRestartRequired: (request: RuntimeRestartRequest) => void,
     onActiveVariantChanged: (variant: string | null) => void,
-    onWatchedFileEvent: () => void,
+    onWatchedFileEvent: (uri: vscode.Uri) => void,
+    onConnectionTransition: (transition: ConnectionTransition) => void,
   ) {
     const executable: Executable = {
       command: runtime.command,
@@ -805,14 +961,37 @@ class VscodeLanguageClient implements ManagedClient {
         this.applySettings(settings, isCurrentConnection),
     );
     this.stateSubscription = this.client.onDidChangeState((event) => {
-      const synchronization = this.settingsSynchronizer.stateChanged(
-        event.newState === State.Running,
-      );
-      void synchronization.catch((error: unknown) => {
+      const running = event.newState === State.Running;
+      const observation = this.disposed
+        ? undefined
+        : this.recoveryTracker.observe(running);
+      const synchronization = this.settingsSynchronizer.stateChanged(running);
+      const reportSynchronizationError = (error: unknown): void => {
         outputChannel.appendLine(
           `[error] Unable to synchronize HLSL settings after a language server state change: ${errorMessage(error)}`,
         );
-      });
+      };
+      if (observation?.transition === "recovered") {
+        void runGuardedRecovery(
+          synchronization,
+          () =>
+            new Promise<void>((resolve) => {
+              setTimeout(resolve, 0);
+            }),
+          () =>
+            !this.disposed &&
+            this.client.state === State.Running &&
+            this.recoveryTracker.isCurrentRecovery(observation.epoch),
+          () => {
+            onConnectionTransition(observation.transition);
+          },
+        ).catch(reportSynchronizationError);
+        return;
+      }
+      if (observation !== undefined) {
+        onConnectionTransition(observation.transition);
+      }
+      void synchronization.catch(reportSynchronizationError);
     });
   }
 
@@ -1073,9 +1252,29 @@ export async function activate(
         serverArgs,
         handleRuntimeRestartRequired,
         handleActiveVariantChanged,
-        () => {
+        (uri) => {
+          const cause: AnalysisFreshnessCause = uri.path
+            .toLowerCase()
+            .endsWith("/shadertoolsconfig.json")
+            ? "Configuration change"
+            : "Source edit";
+          watchedFileRefreshCause =
+            watchedFileRefreshCause === "Configuration change"
+              ? watchedFileRefreshCause
+              : cause;
+          invalidateOpenAnalysisPanels(cause, true);
           watchedFileRefreshDebouncer?.schedule();
           effectiveContextStatusDebouncer?.schedule();
+        },
+        (transition) => {
+          if (transition === "disconnected") {
+            cancelPendingAnalysisRefreshes();
+            invalidateOpenAnalysisPanels("Disconnected server");
+            return;
+          }
+          if (lifecycle.state === "running") {
+            void refreshAllOpenAnalysisPanels(lifecycle, "Disconnected server");
+          }
         },
       );
     } catch (error) {
@@ -1087,7 +1286,9 @@ export async function activate(
   });
   activeLifecycle = lifecycle;
   watchedFileRefreshDebouncer = new Debouncer(() => {
-    void refreshAllOpenAnalysisPanels(lifecycle);
+    const cause = watchedFileRefreshCause;
+    watchedFileRefreshCause = "Unknown";
+    void refreshAllOpenAnalysisPanels(lifecycle, cause);
   });
 
   let variantStatusGeneration = 0;
@@ -1139,6 +1340,8 @@ export async function activate(
   });
 
   const restart = async (): Promise<void> => {
+    cancelPendingAnalysisRefreshes();
+    invalidateOpenAnalysisPanels("Disconnected server", true);
     try {
       await lifecycle.restart();
       outputChannel.appendLine("Language server restarted.");
@@ -1152,7 +1355,7 @@ export async function activate(
       // workspace-folder changes, a server-requested runtime restart, and
       // the restart-triggering configuration branches below) so none of
       // them needs its own duplicate post-restart refresh.
-      await refreshAllOpenAnalysisPanels(lifecycle);
+      await refreshAllOpenAnalysisPanels(lifecycle, "Disconnected server");
     } catch (error) {
       await reportError(
         outputChannel,
@@ -1225,6 +1428,8 @@ export async function activate(
   context.subscriptions.push(
     vscode.commands.registerCommand("hlsl.restartServer", restart),
     vscode.commands.registerCommand("hlsl.stopServer", async () => {
+      cancelPendingAnalysisRefreshes();
+      invalidateOpenAnalysisPanels("Disconnected server");
       await lifecycle.stop();
       outputChannel.appendLine("Language server stopped.");
     }),
@@ -1332,15 +1537,24 @@ export async function activate(
             "hlslMemoryLayout",
             `Memory Layout: ${layout.name || layout.type}`,
             vscode.ViewColumn.Beside,
-            { enableScripts: false },
+            {
+              enableScripts: false,
+              enableCommandUris: [refreshMemoryLayoutCommand],
+            },
           );
           memoryLayoutState = {
             panel,
+            freshness: new AnalysisFreshness(),
+            refreshCommand: refreshMemoryLayoutCommand,
+            html: memoryLayoutHtml(layout),
             uri,
             position,
             hasContent: true,
           };
-          panel.webview.html = memoryLayoutHtml(layout);
+          const initialGeneration =
+            memoryLayoutState.freshness.beginRefresh("Manual refresh");
+          memoryLayoutState.freshness.succeed(initialGeneration);
+          renderAnalysisPanel(memoryLayoutState);
           panel.onDidDispose(() => {
             if (memoryLayoutState?.panel === panel) {
               ++memoryLayoutGeneration;
@@ -1353,16 +1567,8 @@ export async function activate(
           });
           return;
         } else {
-          const switchingTarget =
-            memoryLayoutState.uri.toString() !== uri.toString() ||
-            memoryLayoutState.position?.line !== position.line ||
-            memoryLayoutState.position.character !== position.character;
           memoryLayoutState.uri = uri;
           memoryLayoutState.position = position;
-          if (switchingTarget) {
-            memoryLayoutState.hasContent = false;
-            memoryLayoutState.panel.webview.html = memoryLayoutLoadingHtml();
-          }
           memoryLayoutState.panel.reveal(vscode.ViewColumn.Beside);
         }
         if (memoryLayoutState.uri.toString() === uri.toString()) {
@@ -1380,19 +1586,7 @@ export async function activate(
       }
       const uri = editor.document.uri;
       if (compilationInfoState !== undefined) {
-        const switchingDocument =
-          compilationInfoState.uri.toString() !== uri.toString();
         compilationInfoState.uri = uri;
-        if (switchingDocument) {
-          // Only the loading placeholder for a different document replaces
-          // what is on screen; a same-document refresh keeps showing the
-          // last successful content until the new result (or an explicit
-          // error, on failure) is ready.
-          compilationInfoState.hasContent = false;
-          compilationInfoState.lastInfo = undefined;
-          compilationInfoState.panel.webview.html =
-            compilationInfoLoadingHtml();
-        }
         compilationInfoState.panel.reveal(vscode.ViewColumn.Beside);
       } else {
         const panel = vscode.window.createWebviewPanel(
@@ -1403,13 +1597,16 @@ export async function activate(
             enableScripts: false,
             // No script execution is used for Copy/Save: the panel's
             // action links go through plain `command:` URIs, and this
-            // allowlists only the two commands they may invoke -- never
+            // allowlists only Copy, Save, and this panel's Refresh -- never
             // `true` (which would let static HTML trigger arbitrary
             // commands).
-            enableCommandUris: [copyDisassemblyCommand, saveDisassemblyCommand],
+            enableCommandUris: [
+              copyDisassemblyCommand,
+              saveDisassemblyCommand,
+              refreshCompilationInfoCommand,
+            ],
           },
         );
-        panel.webview.html = compilationInfoLoadingHtml();
         panel.onDidDispose(() => {
           if (compilationInfoState?.panel === panel) {
             compilationInfoState = undefined;
@@ -1417,10 +1614,15 @@ export async function activate(
         });
         compilationInfoState = {
           panel,
+          freshness: new AnalysisFreshness(),
+          refreshCommand: refreshCompilationInfoCommand,
+          html: compilationInfoLoadingHtml(),
           uri,
           hasContent: false,
           lastInfo: undefined,
+          lastInfoUri: undefined,
         };
+        renderAnalysisPanel(compilationInfoState);
       }
       await refreshCompilationInfo(lifecycle, uri);
     }),
@@ -1458,10 +1660,14 @@ export async function activate(
         return;
       }
       const suggestedName = disassemblyFileName(
-        state.uri.path,
+        (state.lastInfoUri ?? state.uri).path,
         disassembly.format,
       );
-      const defaultUri = vscode.Uri.joinPath(state.uri, "..", suggestedName);
+      const defaultUri = vscode.Uri.joinPath(
+        state.lastInfoUri ?? state.uri,
+        "..",
+        suggestedName,
+      );
       const filters =
         disassembly.format === "spirv"
           ? { "SPIR-V Assembly": ["spvasm"] }
@@ -1494,18 +1700,7 @@ export async function activate(
       }
       const uri = editor.document.uri;
       if (resourceBindingsState !== undefined) {
-        const switchingDocument =
-          resourceBindingsState.uri.toString() !== uri.toString();
         resourceBindingsState.uri = uri;
-        if (switchingDocument) {
-          // Only the loading placeholder for a different document replaces
-          // what is on screen; a same-document refresh keeps showing the
-          // last successful content until the new result (or an explicit
-          // error, on failure) is ready.
-          resourceBindingsState.hasContent = false;
-          resourceBindingsState.panel.webview.html =
-            resourceBindingsLoadingHtml();
-        }
         resourceBindingsState.panel.reveal(vscode.ViewColumn.Beside);
       } else {
         const panel = vscode.window.createWebviewPanel(
@@ -1516,18 +1711,28 @@ export async function activate(
             enableScripts: false,
             // No script execution is used for navigation: resource/collision
             // labels link through plain `command:` URIs, and this allowlists
-            // only the one command they may invoke -- never `true` (which
+            // only navigation and this panel's Refresh -- never `true` (which
             // would let static HTML trigger arbitrary commands).
-            enableCommandUris: [openResourceLocationCommand],
+            enableCommandUris: [
+              openResourceLocationCommand,
+              refreshResourceBindingsCommand,
+            ],
           },
         );
-        panel.webview.html = resourceBindingsLoadingHtml();
         panel.onDidDispose(() => {
           if (resourceBindingsState?.panel === panel) {
             resourceBindingsState = undefined;
           }
         });
-        resourceBindingsState = { panel, uri, hasContent: false };
+        resourceBindingsState = {
+          panel,
+          freshness: new AnalysisFreshness(),
+          refreshCommand: refreshResourceBindingsCommand,
+          html: resourceBindingsLoadingHtml(),
+          uri,
+          hasContent: false,
+        };
+        renderAnalysisPanel(resourceBindingsState);
       }
       await refreshResourceBindings(lifecycle, uri);
     }),
@@ -1591,18 +1796,7 @@ export async function activate(
         }
         const uri = editor.document.uri;
         if (preprocessorExplorerState !== undefined) {
-          const switchingDocument =
-            preprocessorExplorerState.uri.toString() !== uri.toString();
           preprocessorExplorerState.uri = uri;
-          if (switchingDocument) {
-            // Only the loading placeholder for a different document
-            // replaces what is on screen; a same-document refresh keeps
-            // showing the last successful content until the new result (or
-            // an explicit error, on failure) is ready.
-            preprocessorExplorerState.hasContent = false;
-            preprocessorExplorerState.panel.webview.html =
-              preprocessorExplorerLoadingHtml();
-          }
           preprocessorExplorerState.panel.reveal(vscode.ViewColumn.Beside);
         } else {
           const panel = vscode.window.createWebviewPanel(
@@ -1613,19 +1807,29 @@ export async function activate(
               enableScripts: false,
               // No script execution is used for navigation: file/include/
               // macro/skipped-region links go through plain `command:`
-              // URIs, and this allowlists only the one command they may
-              // invoke -- never `true` (which would let static HTML trigger
+              // URIs, and this allowlists only navigation and this panel's
+              // Refresh -- never `true` (which would let static HTML trigger
               // arbitrary commands).
-              enableCommandUris: [openPreprocessorLocationCommand],
+              enableCommandUris: [
+                openPreprocessorLocationCommand,
+                refreshPreprocessorExplorerCommand,
+              ],
             },
           );
-          panel.webview.html = preprocessorExplorerLoadingHtml();
           panel.onDidDispose(() => {
             if (preprocessorExplorerState?.panel === panel) {
               preprocessorExplorerState = undefined;
             }
           });
-          preprocessorExplorerState = { panel, uri, hasContent: false };
+          preprocessorExplorerState = {
+            panel,
+            freshness: new AnalysisFreshness(),
+            refreshCommand: refreshPreprocessorExplorerCommand,
+            html: preprocessorExplorerLoadingHtml(),
+            uri,
+            hasContent: false,
+          };
+          renderAnalysisPanel(preprocessorExplorerState);
         }
         await refreshPreprocessorExplorer(lifecycle, uri);
       },
@@ -1689,14 +1893,7 @@ export async function activate(
       const uri = editor.document.uri;
       if (entryPointDataFlowState !== undefined) {
         const { panel, controller } = entryPointDataFlowState;
-        const { switchingDocument } = controller.open(uri.toString());
-        if (switchingDocument) {
-          // Only the loading placeholder for a different document
-          // replaces what is on screen; a same-document refresh keeps
-          // showing the last successful content until the new result (or
-          // an explicit error, on failure) is ready.
-          panel.webview.html = entryPointDataFlowLoadingHtml();
-        }
+        controller.open(uri.toString());
         panel.reveal(vscode.ViewColumn.Beside);
       } else {
         const panel = vscode.window.createWebviewPanel(
@@ -1707,20 +1904,30 @@ export async function activate(
             enableScripts: false,
             // No script execution is used for navigation: entry
             // point/function/global-access links go through plain
-            // `command:` URIs, and this allowlists only the one command
-            // they may invoke -- never `true` (which would let static
+            // `command:` URIs, and this allowlists only navigation and this
+            // panel's Refresh -- never `true` (which would let static
             // HTML trigger arbitrary commands).
-            enableCommandUris: [openEntryPointDataFlowLocationCommand],
+            enableCommandUris: [
+              openEntryPointDataFlowLocationCommand,
+              refreshEntryPointDataFlowCommand,
+            ],
           },
         );
-        panel.webview.html = entryPointDataFlowLoadingHtml();
+        const freshness = new AnalysisFreshness();
         const controller = new PanelController<EntryPointDataFlow>(
           {
             setHtml: (html) => {
-              panel.webview.html = html;
+              if (entryPointDataFlowState?.panel === panel) {
+                setAnalysisPanelHtml(entryPointDataFlowState, html);
+              }
             },
             setTitle: (title) => {
               panel.title = title;
+            },
+            setFreshness: (state) => {
+              if (entryPointDataFlowState?.panel === panel) {
+                setAnalysisPanelFreshness(entryPointDataFlowState, state);
+              }
             },
           },
           (uriString) =>
@@ -1728,7 +1935,18 @@ export async function activate(
               client.entryPointDataFlow(vscode.Uri.parse(uriString)),
             ),
           resolveEntryPointDataFlowRefresh,
+          nodeScheduler,
+          500,
+          freshness,
         );
+        const viewState: EntryPointDataFlowViewState = {
+          panel,
+          controller,
+          freshness,
+          refreshCommand: refreshEntryPointDataFlowCommand,
+          html: entryPointDataFlowLoadingHtml(),
+        };
+        renderAnalysisPanel(viewState);
         controller.open(uri.toString());
         panel.onDidDispose(() => {
           if (entryPointDataFlowState?.panel === panel) {
@@ -1736,7 +1954,7 @@ export async function activate(
             entryPointDataFlowState = undefined;
           }
         });
-        entryPointDataFlowState = { panel, controller };
+        entryPointDataFlowState = viewState;
       }
       await entryPointDataFlowState.controller.refresh(uri.toString());
     }),
@@ -1789,11 +2007,7 @@ export async function activate(
         const uri = editor.document.uri;
         if (computeVisualizationState !== undefined) {
           const { panel, controller } = computeVisualizationState;
-          const { switchingDocument } = controller.open(uri.toString());
-          if (switchingDocument) {
-            computeVisualizationState.options = {};
-            panel.webview.html = computeVisualizationLoadingHtml();
-          }
+          controller.open(uri.toString());
           panel.reveal(vscode.ViewColumn.Beside);
         } else {
           const panel = vscode.window.createWebviewPanel(
@@ -1805,17 +2019,25 @@ export async function activate(
               enableCommandUris: [
                 configureComputeVisualizationCommand,
                 openComputeVisualizationLocationCommand,
+                refreshComputeVisualizationCommand,
               ],
             },
           );
-          panel.webview.html = computeVisualizationLoadingHtml();
+          const freshness = new AnalysisFreshness();
           const controller = new PanelController<ComputeVisualization>(
             {
               setHtml: (html) => {
-                panel.webview.html = html;
+                if (computeVisualizationState?.panel === panel) {
+                  setAnalysisPanelHtml(computeVisualizationState, html);
+                }
               },
               setTitle: (title) => {
                 panel.title = title;
+              },
+              setFreshness: (state) => {
+                if (computeVisualizationState?.panel === panel) {
+                  setAnalysisPanelFreshness(computeVisualizationState, state);
+                }
               },
             },
             (uriString) =>
@@ -1826,7 +2048,19 @@ export async function activate(
                 ),
               ),
             resolveComputeVisualizationRefresh,
+            nodeScheduler,
+            500,
+            freshness,
           );
+          const viewState: ComputeVisualizationViewState = {
+            panel,
+            controller,
+            freshness,
+            refreshCommand: refreshComputeVisualizationCommand,
+            html: computeVisualizationLoadingHtml(),
+            options: {},
+          };
+          renderAnalysisPanel(viewState);
           controller.open(uri.toString());
           panel.onDidDispose(() => {
             if (computeVisualizationState?.panel === panel) {
@@ -1834,7 +2068,7 @@ export async function activate(
               computeVisualizationState = undefined;
             }
           });
-          computeVisualizationState = { panel, controller, options: {} };
+          computeVisualizationState = viewState;
         }
         await computeVisualizationState.controller.refresh(uri.toString());
       },
@@ -1851,7 +2085,7 @@ export async function activate(
           return;
         }
         state.options = options;
-        await state.controller.refreshTracked();
+        await state.controller.refreshTracked("Configuration change");
       },
     ),
     vscode.commands.registerCommand(
@@ -1892,6 +2126,61 @@ export async function activate(
             }`,
           );
         }
+      },
+    ),
+    vscode.commands.registerCommand(refreshMemoryLayoutCommand, async () => {
+      const state = memoryLayoutState;
+      if (state?.position !== undefined) {
+        await refreshMemoryLayout(
+          lifecycle,
+          state.uri,
+          state.position,
+          "Manual refresh",
+        );
+      }
+    }),
+    vscode.commands.registerCommand(refreshCompilationInfoCommand, async () => {
+      const state = compilationInfoState;
+      if (state !== undefined) {
+        await refreshCompilationInfo(lifecycle, state.uri, "Manual refresh");
+      }
+    }),
+    vscode.commands.registerCommand(
+      refreshResourceBindingsCommand,
+      async () => {
+        const state = resourceBindingsState;
+        if (state !== undefined) {
+          await refreshResourceBindings(lifecycle, state.uri, "Manual refresh");
+        }
+      },
+    ),
+    vscode.commands.registerCommand(
+      refreshPreprocessorExplorerCommand,
+      async () => {
+        const state = preprocessorExplorerState;
+        if (state !== undefined) {
+          await refreshPreprocessorExplorer(
+            lifecycle,
+            state.uri,
+            "Manual refresh",
+          );
+        }
+      },
+    ),
+    vscode.commands.registerCommand(
+      refreshEntryPointDataFlowCommand,
+      async () => {
+        await entryPointDataFlowState?.controller.refreshTracked(
+          "Manual refresh",
+        );
+      },
+    ),
+    vscode.commands.registerCommand(
+      refreshComputeVisualizationCommand,
+      async () => {
+        await computeVisualizationState?.controller.refreshTracked(
+          "Manual refresh",
+        );
       },
     ),
     vscode.commands.registerCommand("hlsl.selectVariant", async () => {
@@ -1992,20 +2281,17 @@ export async function activate(
       if (!event.affectsConfiguration("hlsl", resource)) {
         return;
       }
-      if (event.affectsConfiguration("hlsl.dxcRuntimeDirectory", resource)) {
-        // An explicit editor runtime supersedes any workspace-driven selection.
-        workspaceRuntimeDirectory = undefined;
-        await restart();
-        return;
+      const analysisChange = analysisConfigurationChange((setting) =>
+        event.affectsConfiguration(setting, resource),
+      );
+      if (analysisChange !== undefined) {
+        invalidateOpenAnalysisPanels(analysisChange.cause);
       }
-      if (
-        event.affectsConfiguration("hlsl.server.path", resource) ||
-        event.affectsConfiguration(
-          "hlsl.additionalIncludeDirectories",
-          resource,
-        ) ||
-        event.affectsConfiguration("hlsl.virtualDirectoryMappings", resource)
-      ) {
+      if (analysisChange?.action === "restart") {
+        if (event.affectsConfiguration("hlsl.dxcRuntimeDirectory", resource)) {
+          // An explicit editor runtime supersedes any workspace-driven selection.
+          workspaceRuntimeDirectory = undefined;
+        }
         await restart();
         return;
       }
@@ -2021,8 +2307,8 @@ export async function activate(
         );
       }
       await updateVariantStatus();
-      if (affectsResolvedCompilation(event, resource)) {
-        await refreshAllOpenAnalysisPanels(lifecycle);
+      if (analysisChange?.action === "refresh") {
+        await refreshAllOpenAnalysisPanels(lifecycle, analysisChange.cause);
       }
     }),
     vscode.workspace.onDidChangeWorkspaceFolders(restart),
@@ -2038,7 +2324,8 @@ export async function activate(
       if (document.languageId !== "hlsl") {
         return;
       }
-      void refreshAllOpenAnalysisPanels(lifecycle);
+      invalidateOpenAnalysisPanels("Source edit", true);
+      void refreshAllOpenAnalysisPanels(lifecycle, "Source edit");
       effectiveContextStatusDebouncer?.schedule();
     }),
     vscode.workspace.onDidChangeTextDocument((event) => {
@@ -2048,6 +2335,7 @@ export async function activate(
       if (event.document.languageId !== "hlsl") {
         return;
       }
+      ++memoryLayoutGeneration;
       if (
         vscode.window.activeTextEditor?.document.uri.toString() ===
         event.document.uri.toString()
@@ -2065,12 +2353,8 @@ export async function activate(
           event.contentChanges,
         );
         if (update.invalidated) {
-          ++memoryLayoutGeneration;
-          memoryLayoutState.position = undefined;
-          memoryLayoutState.hasContent = false;
-          memoryLayoutState.panel.webview.html = memoryLayoutErrorHtml(
-            "The tracked declaration was edited. Run Memory Layout again at the desired position.",
-          );
+          memoryLayoutState.freshness.invalidate("Source edit");
+          renderAnalysisPanel(memoryLayoutState);
           memoryLayoutDebounce = undefined;
         } else if (update.position !== undefined) {
           memoryLayoutState.position = new vscode.Position(
@@ -2078,12 +2362,15 @@ export async function activate(
             update.position.character,
           );
           if (update.shouldRefresh) {
+            memoryLayoutState.freshness.invalidate("Source edit", true);
+            renderAnalysisPanel(memoryLayoutState);
             memoryLayoutDebounce = setTimeout(() => {
               if (memoryLayoutState?.position !== undefined) {
                 void refreshMemoryLayout(
                   lifecycle,
                   memoryLayoutState.uri,
                   memoryLayoutState.position,
+                  "Source edit",
                 );
               }
             }, 500);
@@ -2091,26 +2378,40 @@ export async function activate(
         }
       }
       if (compilationInfoState !== undefined) {
+        compilationInfoState.freshness.invalidate("Source edit", true);
+        renderAnalysisPanel(compilationInfoState);
         if (compilationInfoDebounce !== undefined) {
           clearTimeout(compilationInfoDebounce);
         }
         compilationInfoDebounce = setTimeout(() => {
           if (compilationInfoState !== undefined) {
-            void refreshCompilationInfo(lifecycle, compilationInfoState.uri);
+            void refreshCompilationInfo(
+              lifecycle,
+              compilationInfoState.uri,
+              "Source edit",
+            );
           }
         }, 500);
       }
       if (resourceBindingsState !== undefined) {
+        resourceBindingsState.freshness.invalidate("Source edit", true);
+        renderAnalysisPanel(resourceBindingsState);
         if (resourceBindingsDebounce !== undefined) {
           clearTimeout(resourceBindingsDebounce);
         }
         resourceBindingsDebounce = setTimeout(() => {
           if (resourceBindingsState !== undefined) {
-            void refreshResourceBindings(lifecycle, resourceBindingsState.uri);
+            void refreshResourceBindings(
+              lifecycle,
+              resourceBindingsState.uri,
+              "Source edit",
+            );
           }
         }, 500);
       }
       if (preprocessorExplorerState !== undefined) {
+        preprocessorExplorerState.freshness.invalidate("Source edit", true);
+        renderAnalysisPanel(preprocessorExplorerState);
         if (preprocessorExplorerDebounce !== undefined) {
           clearTimeout(preprocessorExplorerDebounce);
         }
@@ -2119,6 +2420,7 @@ export async function activate(
             void refreshPreprocessorExplorer(
               lifecycle,
               preprocessorExplorerState.uri,
+              "Source edit",
             );
           }
         }, 500);
@@ -2163,26 +2465,11 @@ export async function activate(
 export async function deactivate(): Promise<void> {
   const lifecycle = activeLifecycle;
   activeLifecycle = undefined;
+  cancelPendingAnalysisRefreshes();
   ++memoryLayoutGeneration;
-  if (memoryLayoutDebounce !== undefined) {
-    clearTimeout(memoryLayoutDebounce);
-    memoryLayoutDebounce = undefined;
-  }
   memoryLayoutState = undefined;
-  if (compilationInfoDebounce !== undefined) {
-    clearTimeout(compilationInfoDebounce);
-    compilationInfoDebounce = undefined;
-  }
   compilationInfoState = undefined;
-  if (resourceBindingsDebounce !== undefined) {
-    clearTimeout(resourceBindingsDebounce);
-    resourceBindingsDebounce = undefined;
-  }
   resourceBindingsState = undefined;
-  if (preprocessorExplorerDebounce !== undefined) {
-    clearTimeout(preprocessorExplorerDebounce);
-    preprocessorExplorerDebounce = undefined;
-  }
   preprocessorExplorerState = undefined;
   entryPointDataFlowState?.controller.dispose();
   entryPointDataFlowState = undefined;

@@ -20,6 +20,120 @@ using HlslLsp.VisualStudio.Bootstrap;
 
 namespace HlslLsp.VisualStudio;
 
+internal enum SavedAnalysisImpact
+{
+    None,
+    Source,
+    Configuration,
+}
+
+internal static class HlslSavedAnalysisPolicy
+{
+    internal static SavedAnalysisImpact Classify(
+        string path,
+        IEnumerable<string> configuredExtensions)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return SavedAnalysisImpact.None;
+        }
+        if (string.Equals(
+                Path.GetFileName(path),
+                "shadertoolsconfig.json",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return SavedAnalysisImpact.Configuration;
+        }
+        var extension = Path.GetExtension(path);
+        if (string.Equals(extension, ".hlsl", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(extension, ".hlsli", StringComparison.OrdinalIgnoreCase) ||
+            (configuredExtensions?.Contains(
+                extension,
+                StringComparer.OrdinalIgnoreCase) ?? false))
+        {
+            return SavedAnalysisImpact.Source;
+        }
+        return SavedAnalysisImpact.None;
+    }
+}
+
+internal sealed class HlslOptionsChange
+{
+    internal bool FileExtensionsChanged { get; set; }
+
+    internal bool LanguageVersionChanged { get; set; }
+
+    internal bool RuntimeChanged { get; set; }
+
+    internal bool InlayHintsChanged { get; set; }
+
+    internal bool AnalysisAffected =>
+        FileExtensionsChanged ||
+        LanguageVersionChanged ||
+        RuntimeChanged;
+}
+
+internal static class HlslOptionsAnalysisPolicy
+{
+    internal static HlslOptionsChange Classify(
+        HlslOptionsSnapshot previous,
+        HlslOptionsSnapshot current)
+    {
+        if (current == null)
+        {
+            throw new ArgumentNullException(nameof(current));
+        }
+        if (previous == null)
+        {
+            return new HlslOptionsChange();
+        }
+        return new HlslOptionsChange
+        {
+            FileExtensionsChanged = !new HashSet<string>(
+                    ParseExtensions(previous.FileExtensions),
+                    StringComparer.OrdinalIgnoreCase)
+                .SetEquals(
+                    ParseExtensions(current.FileExtensions)),
+            LanguageVersionChanged = !string.Equals(
+                previous.LanguageVersion,
+                current.LanguageVersion,
+                StringComparison.Ordinal),
+            RuntimeChanged = !string.Equals(
+                previous.DxcRuntimeDirectory?.Trim(),
+                current.DxcRuntimeDirectory?.Trim(),
+                StringComparison.OrdinalIgnoreCase),
+            InlayHintsChanged = !InlayHintsEqual(
+                previous.InlayHints,
+                current.InlayHints),
+        };
+    }
+
+    private static IEnumerable<string> ParseExtensions(string value)
+        => (value ?? string.Empty)
+            .Split(
+                new[] { ';', ',', ' ' },
+                StringSplitOptions.RemoveEmptyEntries)
+            .Select(extension => extension.Trim())
+            .Where(extension => extension.Length > 0)
+            .Select(extension =>
+                extension[0] == '.' ? extension : "." + extension)
+            .Distinct(StringComparer.OrdinalIgnoreCase);
+
+    private static bool InlayHintsEqual(
+        InlayHintOptionsSnapshot left,
+        InlayHintOptionsSnapshot right)
+        => ReferenceEquals(left, right) ||
+           (left != null &&
+            right != null &&
+            left.Types == right.Types &&
+            left.Parameters == right.Parameters &&
+            left.MatrixOrientation == right.MatrixOrientation &&
+            left.Registers == right.Registers &&
+            left.PackedOffsets == right.PackedOffsets &&
+            left.ArrayStrides == right.ArrayStrides &&
+            left.ActiveVariant == right.ActiveVariant);
+}
+
 public sealed class HlslLspActivator :
     IVsSolutionEvents,
     IVsSolutionEvents7,
@@ -57,6 +171,7 @@ public sealed class HlslLspActivator :
     private string workspaceRuntimeDirectory = string.Empty;
     private string lastRuntimeDirectory = string.Empty;
     private string workspaceActiveVariant = string.Empty;
+    private HlslOptionsSnapshot lastOptions;
 
     private HlslLspActivator(
         HlslBootstrapPackage host,
@@ -134,7 +249,9 @@ public sealed class HlslLspActivator :
         }
         ErrorHandler.ThrowOnFailure(
             runningDocuments.AdviseRunningDocTableEvents(this, out _));
-        ApplyFileExtensions(GetOptions().FileExtensions);
+        var initialOptions = GetOptions();
+        lastOptions = initialOptions;
+        ApplyFileExtensions(initialOptions.FileExtensions);
         nativeShaderContentType = contentTypes.GetContentType("HLSL")
             ?? throw new InvalidOperationException(
                 "Visual Studio's HLSL content type is unavailable.");
@@ -152,7 +269,6 @@ public sealed class HlslLspActivator :
         await ApplyOpenDocumentMappingsAsync(cancellationToken);
 
         var broker = componentModel.GetService<ILanguageClientBroker>();
-        var initialOptions = GetOptions();
         lastRuntimeDirectory = EffectiveRuntimeDirectory(initialOptions);
         languageClient = new HlslLanguageClient(
             initialOptions.LanguageVersion,
@@ -161,7 +277,8 @@ public sealed class HlslLspActivator :
             initialOptions.InlayHints,
             OnServerRuntimeRestartRequestedAsync,
             OnActiveVariantChangedFromServerAsync,
-            OnConfigurationChangedFromServerAsync);
+            OnConfigurationChangedFromServerAsync,
+            OnLanguageServerConnectionChanged);
         MemoryLayoutBridge.Register(languageClient.GetMemoryLayoutAsync);
         HlslCommandContextBridge.Register(languageClient.GetCommandContextAsync);
         CompilationInfoBridge.Register(languageClient.GetCompilationInfoAsync);
@@ -185,6 +302,19 @@ public sealed class HlslLspActivator :
             joinableTaskFactory,
             host);
         ScheduleNavigationBarAttachment();
+    }
+
+    private void OnLanguageServerConnectionChanged(bool running)
+    {
+        if (!running)
+        {
+            host.InvalidateAnalysisViews(
+                AnalysisFreshnessCause.DisconnectedServer);
+            return;
+        }
+        RefreshVariantDependentWindows(
+            CancellationToken.None,
+            AnalysisFreshnessCause.DisconnectedServer);
     }
 
     private async Task ApplyOpenDocumentMappingsAsync(CancellationToken cancellationToken)
@@ -290,6 +420,13 @@ public sealed class HlslLspActivator :
         }
 
         var options = GetOptions();
+        var change = HlslOptionsAnalysisPolicy.Classify(lastOptions, options);
+        lastOptions = options;
+        if (change.AnalysisAffected)
+        {
+            host.InvalidateAnalysisViews(
+                AnalysisFreshnessCause.ConfigurationChange);
+        }
         ApplyFileExtensions(options.FileExtensions);
         await ApplyOpenDocumentMappingsAsync(disposalToken);
         if (languageClient == null)
@@ -314,11 +451,20 @@ public sealed class HlslLspActivator :
                 options.LanguageVersion,
                 effectiveRuntime);
         }
-        else
+        else if (change.LanguageVersionChanged)
         {
             await languageClient.UpdateLanguageVersionAsync(options.LanguageVersion);
         }
-        await languageClient.UpdateInlayHintsAsync(options.InlayHints);
+        if (change.InlayHintsChanged)
+        {
+            await languageClient.UpdateInlayHintsAsync(options.InlayHints);
+        }
+        if (change.FileExtensionsChanged && !change.RuntimeChanged)
+        {
+            RefreshVariantDependentWindows(
+                disposalToken,
+                AnalysisFreshnessCause.ConfigurationChange);
+        }
         host.ScheduleEffectiveContextIndicatorRefresh();
     }
 
@@ -360,7 +506,9 @@ public sealed class HlslLspActivator :
                 await languageClient.RestartWithRuntimeAsync(
                     options.LanguageVersion,
                     requested);
-                RefreshVariantDependentWindows(CancellationToken.None);
+                RefreshVariantDependentWindows(
+                    CancellationToken.None,
+                    AnalysisFreshnessCause.ConfigurationChange);
                 host.ScheduleEffectiveContextIndicatorRefresh();
                 navigationBars?.Refresh();
             })
@@ -388,7 +536,12 @@ public sealed class HlslLspActivator :
         // error-propagation behavior for a failed notification while adding
         // that ordering guarantee.
         await client.UpdateActiveVariantAsync(value);
-        RefreshVariantDependentWindows(cancellationToken);
+        host.InvalidateAnalysisViews(
+            AnalysisFreshnessCause.VariantChange,
+            true);
+        RefreshVariantDependentWindows(
+            cancellationToken,
+            AnalysisFreshnessCause.VariantChange);
         host.ScheduleEffectiveContextIndicatorRefresh();
     }
 
@@ -404,7 +557,12 @@ public sealed class HlslLspActivator :
     private Task OnActiveVariantChangedFromServerAsync(string variant)
     {
         workspaceActiveVariant = variant ?? string.Empty;
-        RefreshVariantDependentWindows(CancellationToken.None);
+        host.InvalidateAnalysisViews(
+            AnalysisFreshnessCause.VariantChange,
+            true);
+        RefreshVariantDependentWindows(
+            CancellationToken.None,
+            AnalysisFreshnessCause.VariantChange);
         host.ScheduleEffectiveContextIndicatorRefresh();
         return Task.CompletedTask;
     }
@@ -414,7 +572,12 @@ public sealed class HlslLspActivator :
         ActivityLog.LogInformation(
             nameof(HlslLspActivator),
             "Refreshing HLSL views after server configuration processing.");
-        RefreshVariantDependentWindows(CancellationToken.None);
+        host.InvalidateAnalysisViews(
+            AnalysisFreshnessCause.ConfigurationChange,
+            true);
+        RefreshVariantDependentWindows(
+            CancellationToken.None,
+            AnalysisFreshnessCause.ConfigurationChange);
         host.ScheduleEffectiveContextIndicatorRefresh();
         joinableTaskFactory.RunAsync(async () =>
             {
@@ -425,38 +588,40 @@ public sealed class HlslLspActivator :
         return Task.CompletedTask;
     }
 
-    private void RefreshVariantDependentWindows(CancellationToken cancellationToken)
+    private void RefreshVariantDependentWindows(
+        CancellationToken cancellationToken,
+        AnalysisFreshnessCause cause)
     {
         HlslCommandContextBridge.Invalidate();
         joinableTaskFactory.RunAsync(
-                () => host.RefreshMemoryLayoutIfOpenAsync(null, cancellationToken))
+                () => host.RefreshMemoryLayoutIfOpenAsync(null, cancellationToken, cause))
             .FileAndForget("HlslLsp/RefreshMemoryLayout");
         // A previously opened Shader Compilation window can only become stale
         // through this variant change (the server itself is not restarted),
         // so refresh it here rather than waiting for the next manual
         // invocation of the context command.
         joinableTaskFactory.RunAsync(
-                () => host.RefreshCompilationInfoIfOpenAsync(null, cancellationToken))
+                () => host.RefreshCompilationInfoIfOpenAsync(null, cancellationToken, cause))
             .FileAndForget("HlslLsp/RefreshCompilationInfo");
         // The Resource Bindings window reuses the same request and is
         // refreshed independently, mirroring Shader Compilation above.
         joinableTaskFactory.RunAsync(
-                () => host.RefreshResourceBindingsIfOpenAsync(null, cancellationToken))
+                () => host.RefreshResourceBindingsIfOpenAsync(null, cancellationToken, cause))
             .FileAndForget("HlslLsp/RefreshResourceBindings");
         // The Preprocessor Explorer window issues its own request and is
         // refreshed independently, mirroring the other two windows above.
         joinableTaskFactory.RunAsync(
-                () => host.RefreshPreprocessorExplorerIfOpenAsync(null, cancellationToken))
+                () => host.RefreshPreprocessorExplorerIfOpenAsync(null, cancellationToken, cause))
             .FileAndForget("HlslLsp/RefreshPreprocessorExplorer");
         // The Entry-Point Data Flow window issues its own request and is
         // refreshed independently, mirroring the other windows above: a
         // variant change can change the configured entry point, so a
         // previously opened window can only become stale through this path.
         joinableTaskFactory.RunAsync(
-                () => host.RefreshEntryPointDataFlowIfOpenAsync(null, cancellationToken))
+                () => host.RefreshEntryPointDataFlowIfOpenAsync(null, cancellationToken, cause))
             .FileAndForget("HlslLsp/RefreshEntryPointDataFlow");
         joinableTaskFactory.RunAsync(
-                () => host.RefreshComputeVisualizationIfOpenAsync(null, cancellationToken))
+                () => host.RefreshComputeVisualizationIfOpenAsync(null, cancellationToken, cause))
             .FileAndForget("HlslLsp/RefreshComputeVisualization");
         // The Call Hierarchy window issues its own request (re-fetching
         // incoming/outgoing calls for its current item, not a fresh
@@ -466,18 +631,16 @@ public sealed class HlslLspActivator :
         // identifies, so a previously opened window can only become stale
         // through this path.
         joinableTaskFactory.RunAsync(
-                () => host.RefreshCallHierarchyIfOpenAsync(null, cancellationToken))
+                () => host.RefreshCallHierarchyIfOpenAsync(null, cancellationToken, cause))
             .FileAndForget("HlslLsp/RefreshCallHierarchy");
     }
 
-    // A saved HLSL document may change what the server would compile, so a
-    // currently open Shader Compilation window is refreshed if it is showing
-    // that same document. Unrelated saves are filtered out inside
-    // RefreshCompilationInfoIfOpenAsync to avoid unnecessary requests.
+    // Each tool window applies its own save relevance before changing
+    // freshness or request generation: document-local views require the
+    // tracked URI, while dependency-aware views conservatively refresh for
+    // any configured HLSL/header save.
     public int OnAfterSave(uint docCookie)
     {
-        HlslCommandContextBridge.Invalidate();
-        host.ScheduleEffectiveContextIndicatorRefresh();
         if (runningDocuments == null)
         {
             return VSConstants.S_OK;
@@ -501,11 +664,19 @@ public sealed class HlslLspActivator :
             {
                 return VSConstants.S_OK;
             }
-            if (string.Equals(
-                    Path.GetFileName(moniker),
-                    "shadertoolsconfig.json",
-                    StringComparison.OrdinalIgnoreCase))
+            var impact = HlslSavedAnalysisPolicy.Classify(
+                moniker,
+                configuredExtensions);
+            if (impact == SavedAnalysisImpact.None)
             {
+                return VSConstants.S_OK;
+            }
+            HlslCommandContextBridge.Invalidate();
+            host.ScheduleEffectiveContextIndicatorRefresh();
+            if (impact == SavedAnalysisImpact.Configuration)
+            {
+                host.InvalidateAnalysisViews(
+                    AnalysisFreshnessCause.ConfigurationChange);
                 ActivityLog.LogInformation(
                     nameof(HlslLspActivator),
                     "Notifying the HLSL language server about a saved configuration file.");
@@ -522,31 +693,49 @@ public sealed class HlslLspActivator :
                 return VSConstants.S_OK;
             }
             joinableTaskFactory.RunAsync(
-                    () => host.RefreshCompilationInfoIfOpenAsync(moniker, disposalToken))
+                    () => host.RefreshCompilationInfoIfOpenAsync(
+                        moniker,
+                        disposalToken,
+                        AnalysisFreshnessCause.SourceEdit))
                 .FileAndForget("HlslLsp/RefreshCompilationInfoOnSave");
             joinableTaskFactory.RunAsync(
-                    () => host.RefreshMemoryLayoutIfOpenAsync(moniker, disposalToken))
+                    () => host.RefreshMemoryLayoutIfOpenAsync(
+                        moniker,
+                        disposalToken,
+                        AnalysisFreshnessCause.SourceEdit))
                 .FileAndForget("HlslLsp/RefreshMemoryLayoutOnSave");
             // The Resource Bindings window is refreshed independently on the
             // same save, matching the same non-file/unrelated-document
             // filtering performed inside RefreshResourceBindingsIfOpenAsync.
             joinableTaskFactory.RunAsync(
-                    () => host.RefreshResourceBindingsIfOpenAsync(moniker, disposalToken))
+                    () => host.RefreshResourceBindingsIfOpenAsync(
+                        moniker,
+                        disposalToken,
+                        AnalysisFreshnessCause.SourceEdit))
                 .FileAndForget("HlslLsp/RefreshResourceBindingsOnSave");
             // The Preprocessor Explorer window is refreshed independently on
             // the same save, matching the same non-file/unrelated-document
             // filtering performed inside RefreshPreprocessorExplorerIfOpenAsync.
             joinableTaskFactory.RunAsync(
-                    () => host.RefreshPreprocessorExplorerIfOpenAsync(moniker, disposalToken))
+                    () => host.RefreshPreprocessorExplorerIfOpenAsync(
+                        moniker,
+                        disposalToken,
+                        AnalysisFreshnessCause.SourceEdit))
                 .FileAndForget("HlslLsp/RefreshPreprocessorExplorerOnSave");
             // The Entry-Point Data Flow window is refreshed independently on
             // the same save, matching the same non-file/unrelated-document
             // filtering performed inside RefreshEntryPointDataFlowIfOpenAsync.
             joinableTaskFactory.RunAsync(
-                    () => host.RefreshEntryPointDataFlowIfOpenAsync(moniker, disposalToken))
+                    () => host.RefreshEntryPointDataFlowIfOpenAsync(
+                        moniker,
+                        disposalToken,
+                        AnalysisFreshnessCause.SourceEdit))
                 .FileAndForget("HlslLsp/RefreshEntryPointDataFlowOnSave");
             joinableTaskFactory.RunAsync(
-                    () => host.RefreshComputeVisualizationIfOpenAsync(moniker, disposalToken))
+                    () => host.RefreshComputeVisualizationIfOpenAsync(
+                        moniker,
+                        disposalToken,
+                        AnalysisFreshnessCause.SourceEdit))
                 .FileAndForget("HlslLsp/RefreshComputeVisualizationOnSave");
             // The Call Hierarchy window is refreshed independently on the
             // same save, matching the same non-file/unrelated-document
@@ -554,7 +743,10 @@ public sealed class HlslLspActivator :
             // (which re-fetches incoming/outgoing calls for its current
             // item only).
             joinableTaskFactory.RunAsync(
-                    () => host.RefreshCallHierarchyIfOpenAsync(moniker, disposalToken))
+                    () => host.RefreshCallHierarchyIfOpenAsync(
+                        moniker,
+                        disposalToken,
+                        AnalysisFreshnessCause.SourceEdit))
                 .FileAndForget("HlslLsp/RefreshCallHierarchyOnSave");
             return VSConstants.S_OK;
         }
@@ -716,9 +908,8 @@ public sealed class HlslLspActivator :
             // unsaved in-editor edit has no effect on the server's analysis
             // until the file is saved. Debounced refresh on every keystroke
             // here would just be wasted requests against unchanged server
-            // state. OnAfterSave's IsHlslOrConfigRelevantPath-filtered
-            // refresh already covers this file once its on-disk content
-            // actually changes.
+            // state. OnAfterSave's per-view relevance policy covers this
+            // file once its on-disk content actually changes.
         }
     }
 
@@ -753,6 +944,7 @@ public sealed class HlslLspActivator :
             return;
         }
         HlslCommandContextBridge.Invalidate();
+        host.InvalidateAnalysisViews(AnalysisFreshnessCause.SourceEdit);
         ScheduleUnsavedHlslBufferDebouncedRefresh();
     }
 
@@ -789,18 +981,39 @@ public sealed class HlslLspActivator :
         {
             return;
         }
-        await host.RefreshEntryPointDataFlowIfOpenAsync(null, cancellationToken);
-        await host.RefreshMemoryLayoutIfOpenAsync(null, cancellationToken);
-        await host.RefreshCompilationInfoIfOpenAsync(null, cancellationToken);
-        await host.RefreshResourceBindingsIfOpenAsync(null, cancellationToken);
-        await host.RefreshPreprocessorExplorerIfOpenAsync(null, cancellationToken);
-        await host.RefreshComputeVisualizationIfOpenAsync(null, cancellationToken);
+        await host.RefreshEntryPointDataFlowIfOpenAsync(
+            null,
+            cancellationToken,
+            AnalysisFreshnessCause.SourceEdit);
+        await host.RefreshMemoryLayoutIfOpenAsync(
+            null,
+            cancellationToken,
+            AnalysisFreshnessCause.SourceEdit);
+        await host.RefreshCompilationInfoIfOpenAsync(
+            null,
+            cancellationToken,
+            AnalysisFreshnessCause.SourceEdit);
+        await host.RefreshResourceBindingsIfOpenAsync(
+            null,
+            cancellationToken,
+            AnalysisFreshnessCause.SourceEdit);
+        await host.RefreshPreprocessorExplorerIfOpenAsync(
+            null,
+            cancellationToken,
+            AnalysisFreshnessCause.SourceEdit);
+        await host.RefreshComputeVisualizationIfOpenAsync(
+            null,
+            cancellationToken,
+            AnalysisFreshnessCause.SourceEdit);
         // The Call Hierarchy window is refreshed independently on the same
         // debounced trigger, matching the same non-file/unrelated-document
         // filtering performed inside RefreshCallHierarchyIfOpenAsync (which
         // re-runs prepareCallHierarchy at the original root position rather
         // than trusting the possibly now-stale current item).
-        await host.RefreshCallHierarchyIfOpenAsync(null, cancellationToken);
+        await host.RefreshCallHierarchyIfOpenAsync(
+            null,
+            cancellationToken,
+            AnalysisFreshnessCause.SourceEdit);
         host.ScheduleEffectiveContextIndicatorRefresh();
     }
 

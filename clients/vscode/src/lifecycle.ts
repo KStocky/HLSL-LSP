@@ -5,6 +5,57 @@ export interface LifecycleClient {
 
 export type LifecycleState = "stopped" | "starting" | "running" | "stopping";
 
+export type ConnectionTransition = "disconnected" | "recovered";
+
+export interface ConnectionObservation {
+  readonly transition: ConnectionTransition;
+  readonly epoch: number;
+}
+
+export class ConnectionRecoveryTracker {
+  private hasRun = false;
+  private disconnected = false;
+  private epoch = 0;
+
+  public observe(running: boolean): ConnectionObservation | undefined {
+    if (!running) {
+      if (this.hasRun && !this.disconnected) {
+        this.disconnected = true;
+        return { transition: "disconnected", epoch: ++this.epoch };
+      }
+      return undefined;
+    }
+    if (!this.hasRun) {
+      this.hasRun = true;
+      return undefined;
+    }
+    if (!this.disconnected) {
+      return undefined;
+    }
+    this.disconnected = false;
+    return { transition: "recovered", epoch: ++this.epoch };
+  }
+
+  public isCurrentRecovery(epoch: number): boolean {
+    return !this.disconnected && epoch === this.epoch;
+  }
+}
+
+export async function runGuardedRecovery(
+  synchronization: Promise<void>,
+  defer: () => Promise<void>,
+  isCurrentRecovery: () => boolean,
+  refresh: () => void | Promise<void>,
+): Promise<boolean> {
+  await synchronization;
+  await defer();
+  if (!isCurrentRecovery()) {
+    return false;
+  }
+  await refresh();
+  return true;
+}
+
 export class ClientLifecycle<T extends LifecycleClient> {
   private client: T | undefined;
   private operation: Promise<void> = Promise.resolve();

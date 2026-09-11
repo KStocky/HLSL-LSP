@@ -1,5 +1,9 @@
 # HLSL memory layout
 
+The editor views retain the last good layout across refreshes and expose the
+shared tracked-symbol freshness/Refresh behavior described in
+[analysis result freshness](analysis-freshness.md).
+
 HLSL-LSP provides memory-layout information for a deliberately supported,
 unambiguous subset of HLSL. Hover shows the selected declaration's byte size,
 alignment, and constant-buffer offset, and includes a `Memory Layout` command

@@ -26,15 +26,18 @@ internal static class MemoryLayoutTargetIdentity
 }
 
 [Guid("9d208088-c1e2-451d-907c-6e7f825b9714")]
-public sealed class MemoryLayoutToolWindow : ToolWindowPane
+public sealed class MemoryLayoutToolWindow : ToolWindowPane, IAnalysisFreshnessView
 {
     private readonly MemoryLayoutControl control = new();
+    private readonly AnalysisFreshnessTracker freshness = new();
+    private readonly AnalysisFreshnessHeader freshnessHeader =
+        new(AnalysisViewKind.MemoryLayout);
 
     public MemoryLayoutToolWindow()
         : base(null)
     {
         Caption = "HLSL Memory Layout";
-        Content = control;
+        Content = AnalysisFreshnessHeader.Wrap(freshnessHeader, control);
     }
 
     internal Uri DocumentUri { get; private set; }
@@ -62,6 +65,8 @@ public sealed class MemoryLayoutToolWindow : ToolWindowPane
         Line = line;
         Character = character;
         TrackingPoint = trackingPoint;
+        freshness.Succeed();
+        freshnessHeader.Update(freshness.State);
         control.SetLayout(layout);
     }
 
@@ -73,20 +78,25 @@ public sealed class MemoryLayoutToolWindow : ToolWindowPane
         string message,
         bool preserveContent)
     {
-        var preserve =
-            preserveContent &&
-            MemoryLayoutTargetIdentity.IsSame(
-                DocumentUri,
-                Line,
-                Character,
-                uri,
-                line,
-                character);
         DocumentUri = uri;
         Line = line;
         Character = character;
         TrackingPoint = trackingPoint;
-        control.SetError(message, preserve);
+        freshness.Fail();
+        freshnessHeader.Update(freshness.State);
+        control.SetError(message, preserveContent);
+    }
+
+    public void BeginRefresh(AnalysisFreshnessCause cause)
+    {
+        freshness.Begin(cause);
+        freshnessHeader.Update(freshness.State);
+    }
+
+    public void MarkStale(AnalysisFreshnessCause cause, bool refreshPending = false)
+    {
+        freshness.Invalidate(cause, refreshPending);
+        freshnessHeader.Update(freshness.State);
     }
 }
 

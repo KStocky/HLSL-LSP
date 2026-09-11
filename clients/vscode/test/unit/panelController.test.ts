@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { AnalysisFreshnessState } from "../../src/analysisFreshness";
 import {
   PanelController,
   PanelHost,
@@ -46,6 +47,7 @@ class FakeScheduler implements Scheduler {
 class RecordingHost implements PanelHost {
   public readonly htmlCalls: string[] = [];
   public readonly titleCalls: string[] = [];
+  public readonly freshnessCalls: AnalysisFreshnessState[] = [];
 
   public setHtml(html: string): void {
     this.htmlCalls.push(html);
@@ -53,6 +55,10 @@ class RecordingHost implements PanelHost {
 
   public setTitle(title: string): void {
     this.titleCalls.push(title);
+  }
+
+  public setFreshness(state: AnalysisFreshnessState): void {
+    this.freshnessCalls.push(state);
   }
 }
 
@@ -112,12 +118,33 @@ function makeController(
   return { controller, host };
 }
 
-void test("open() reports switchingDocument true for a new document and resets hasContent", () => {
+void test("open() reports switchingDocument true for a new document", () => {
   const { controller } = makeController(() => Promise.resolve("x"));
   const result = controller.open("file:///a.hlsl");
   assert.equal(result.switchingDocument, true);
   assert.equal(controller.hasSuccessfulContent, false);
   assert.equal(controller.trackedUri, "file:///a.hlsl");
+});
+
+void test("switching targets retains the last successful content until replacement", async () => {
+  const pending = deferred<string | null>();
+  let call = 0;
+  const { controller, host } = makeController(() => {
+    call += 1;
+    return call === 1 ? Promise.resolve("old") : pending.promise;
+  });
+  controller.open("file:///a.hlsl");
+  await controller.refresh("file:///a.hlsl");
+
+  const switched = controller.open("file:///b.hlsl");
+  const refresh = controller.refresh("file:///b.hlsl");
+  pending.reject(new Error("failed"));
+  await refresh;
+
+  assert.equal(switched.switchingDocument, true);
+  assert.equal(controller.hasSuccessfulContent, true);
+  assert.deepEqual(host.htmlCalls, ["content:old@file:///a.hlsl"]);
+  assert.equal(host.freshnessCalls.at(-1)?.status, "Refresh failed");
 });
 
 void test("open() reports switchingDocument false for a re-invocation on the same document, preserving hasContent", async () => {
@@ -188,6 +215,19 @@ void test("an out-of-order (slower) refresh's result is discarded once a newer r
   await firstRefresh;
   assert.deepEqual(host.htmlCalls, ["content:new@file:///shader.hlsl"]);
   assert.deepEqual(host.titleCalls, ["title:new"]);
+  assert.equal(host.freshnessCalls.at(-1)?.status, "Current");
+});
+
+void test("manual refresh uses the tracked URI and exposes Manual refresh while retaining content", async () => {
+  const pending = deferred<string | null>();
+  const { controller, host } = makeController(() => pending.promise);
+  controller.open("file:///tracked.hlsl");
+  const refresh = controller.refreshTracked();
+  assert.equal(host.freshnessCalls.at(-1)?.status, "Refreshing");
+  assert.equal(host.freshnessCalls.at(-1)?.cause, "Manual refresh");
+  pending.resolve("fresh");
+  await refresh;
+  assert.equal(host.freshnessCalls.at(-1)?.status, "Current");
 });
 
 void test("a refresh whose document has since switched away is discarded even though it is the latest generation", async () => {
@@ -247,6 +287,50 @@ void test("scheduleDebouncedRefresh cancels a previously pending timer so only t
   assert.equal(scheduler.pendingCount, 1);
   scheduler.flush();
   assert.deepEqual(requestedUris, ["file:///shader.hlsl"]);
+});
+
+void test("an edit immediately invalidates an in-flight result before the debounced replacement starts", async () => {
+  const scheduler = new FakeScheduler();
+  const first = deferred<string | null>();
+  const second = deferred<string | null>();
+  let call = 0;
+  const { controller, host } = makeController(() => {
+    call += 1;
+    return call === 1 ? first.promise : second.promise;
+  }, scheduler);
+  controller.open("file:///shader.hlsl");
+  const initial = controller.refresh("file:///shader.hlsl");
+
+  controller.scheduleDebouncedRefresh("Source edit");
+  first.resolve("obsolete");
+  await initial;
+  assert.deepEqual(host.htmlCalls, []);
+  assert.equal(host.freshnessCalls.at(-1)?.status, "Refreshing");
+
+  scheduler.flush();
+  second.resolve("fresh");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(host.htmlCalls, ["content:fresh@file:///shader.hlsl"]);
+  assert.equal(host.freshnessCalls.at(-1)?.status, "Current");
+});
+
+void test("edit then stop cancels the pending refresh and leaves disconnected state stale", () => {
+  const scheduler = new FakeScheduler();
+  let requested = false;
+  const { controller, host } = makeController(() => {
+    requested = true;
+    return Promise.resolve("unexpected");
+  }, scheduler);
+  controller.open("file:///shader.hlsl");
+
+  controller.scheduleDebouncedRefresh("Source edit");
+  controller.cancelScheduledRefresh();
+  controller.markStale("Disconnected server");
+  scheduler.flush();
+
+  assert.equal(requested, false);
+  assert.equal(host.freshnessCalls.at(-1)?.status, "Stale");
+  assert.equal(host.freshnessCalls.at(-1)?.cause, "Disconnected server");
 });
 
 void test("scheduleDebouncedRefresh does nothing when no document is open", () => {

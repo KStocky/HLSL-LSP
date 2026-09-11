@@ -28,10 +28,14 @@ export class Debouncer {
 
   // Cancels any pending invocation without running it. Safe to call
   // whether or not a schedule() is currently pending.
-  public dispose(): void {
+  public cancel(): void {
     if (this.handle !== undefined) {
       this.scheduler.clearTimeout(this.handle);
       this.handle = undefined;
     }
+  }
+
+  public dispose(): void {
+    this.cancel();
   }
 }

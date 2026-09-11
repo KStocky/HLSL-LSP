@@ -12,15 +12,18 @@ using Microsoft.Win32;
 namespace HlslLsp.VisualStudio.Bootstrap;
 
 [Guid("050603cd-412a-4cd8-b2f8-62bc4e854367")]
-public sealed class CompilationInfoToolWindow : ToolWindowPane
+public sealed class CompilationInfoToolWindow : ToolWindowPane, IAnalysisFreshnessView
 {
     private readonly CompilationInfoControl control = new();
+    private readonly AnalysisFreshnessTracker freshness = new();
+    private readonly AnalysisFreshnessHeader freshnessHeader =
+        new(AnalysisViewKind.CompilationInfo);
 
     public CompilationInfoToolWindow()
         : base(null)
     {
         Caption = "HLSL Shader Compilation";
-        Content = control;
+        Content = AnalysisFreshnessHeader.Wrap(freshnessHeader, control);
     }
 
     // Tracks the document the window currently shows so external refresh
@@ -31,6 +34,8 @@ public sealed class CompilationInfoToolWindow : ToolWindowPane
     internal void SetInfo(Uri uri, CompilationInfoModel info)
     {
         DocumentUri = uri;
+        freshness.Succeed();
+        freshnessHeader.Update(freshness.State);
         control.SetInfo(uri, info);
     }
 
@@ -41,12 +46,22 @@ public sealed class CompilationInfoToolWindow : ToolWindowPane
     // placeholder with an explicit error when there is no content yet.
     internal void SetError(Uri uri, string message, bool preserveSameDocumentContent)
     {
-        var preserveContent =
-            preserveSameDocumentContent &&
-            DocumentUri != null &&
-            DocumentUri.Equals(uri);
         DocumentUri = uri;
-        control.SetError(message, preserveContent);
+        freshness.Fail();
+        freshnessHeader.Update(freshness.State);
+        control.SetError(message, true);
+    }
+
+    public void BeginRefresh(AnalysisFreshnessCause cause)
+    {
+        freshness.Begin(cause);
+        freshnessHeader.Update(freshness.State);
+    }
+
+    public void MarkStale(AnalysisFreshnessCause cause, bool refreshPending = false)
+    {
+        freshness.Invalidate(cause, refreshPending);
+        freshnessHeader.Update(freshness.State);
     }
 }
 

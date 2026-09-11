@@ -1,3 +1,4 @@
+import "./analysisFreshness.test";
 import "./compilationInfo.test";
 import "./computeVisualization.test";
 import "./configuration.test";

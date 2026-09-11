@@ -1,5 +1,9 @@
 # HLSL resource bindings
 
+The editor views retain the last good result across refreshes and expose the
+shared tracked-document freshness/Refresh behavior described in
+[analysis result freshness](analysis-freshness.md).
+
 HLSL-LSP can report a grouped view of a shader's resource bindings, the
 embedded root signature (if any), and whether the two are compatible,
 through the combined **HLSL Resource Bindings** view/command. This view is

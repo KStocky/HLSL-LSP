@@ -29,7 +29,7 @@ namespace HlslLsp.VisualStudio.Bootstrap;
 // mirroring EntryPointDataFlowToolWindow's/PreprocessorExplorerToolWindow's
 // structure against distinct protocol requests.
 [Guid("6f2e6f36-9a3d-4e6a-9f0b-2f7f8f0b9a1c")]
-public sealed class CallHierarchyExplorerToolWindow : ToolWindowPane
+public sealed class CallHierarchyExplorerToolWindow : ToolWindowPane, IAnalysisFreshnessView
 {
     private readonly CallHierarchyExplorerControl control = new();
     private readonly CallHierarchyExplorerState state = new();
@@ -38,13 +38,16 @@ public sealed class CallHierarchyExplorerToolWindow : ToolWindowPane
     private string placeholderMessage =
         "Right-click a function in an HLSL document, then choose " +
         "HLSL > Call Hierarchy.";
+    private readonly AnalysisFreshnessTracker freshness = new();
+    private readonly AnalysisFreshnessHeader freshnessHeader =
+        new(AnalysisViewKind.CallHierarchy);
 
     public CallHierarchyExplorerToolWindow()
         : base(null)
     {
         ThreadHelper.ThrowIfNotOnUIThread();
         Caption = "HLSL Call Hierarchy";
-        Content = control;
+        Content = AnalysisFreshnessHeader.Wrap(freshnessHeader, control);
         Render();
     }
 
@@ -103,7 +106,8 @@ public sealed class CallHierarchyExplorerToolWindow : ToolWindowPane
     // The current drill-in path (empty when showing only the root), used
     // by a background refresh to attempt to relocate the user's position
     // underneath a freshly re-resolved root (see CallHierarchyItemIdentity).
-    internal IReadOnlyList<CallHierarchyPathStep> CapturePathSteps() => state.CapturePath();
+    internal IReadOnlyList<CallHierarchyPathStep> CapturePathSteps()
+        => state.CapturePath();
 
     // Wires the control's Back/drill-in interactions to package-owned
     // callbacks exactly once per window instance: ShowToolWindowAsync/
@@ -151,16 +155,22 @@ public sealed class CallHierarchyExplorerToolWindow : ToolWindowPane
     // all. This is an authoritative result, not a transient failure, so it
     // always replaces whatever was shown before, exactly like
     // EntryPointDataFlowToolWindow's not-found handling.
-    internal void SetNotCallable()
+    internal void SetNotCallable(
+        Uri documentUri = null,
+        int line = 0,
+        int character = 0,
+        ITrackingPoint trackingPoint = null)
     {
         ThreadHelper.ThrowIfNotOnUIThread();
         state.Clear();
         banner = null;
-        RootDocumentUri = null;
-        RootLine = 0;
-        RootCharacter = 0;
-        RootTrackingPoint = null;
+        RootDocumentUri = documentUri;
+        RootLine = line;
+        RootCharacter = character;
+        RootTrackingPoint = trackingPoint;
         placeholderMessage = CallHierarchyExplorerDisplay.NoCallableMessage();
+        freshness.Succeed();
+        freshnessHeader.Update(freshness.State);
         Render();
     }
 
@@ -186,6 +196,8 @@ public sealed class CallHierarchyExplorerToolWindow : ToolWindowPane
         RootLine = line;
         RootCharacter = character;
         RootTrackingPoint = trackingPoint;
+        freshness.Succeed();
+        freshnessHeader.Update(freshness.State);
         Render();
     }
 
@@ -210,6 +222,21 @@ public sealed class CallHierarchyExplorerToolWindow : ToolWindowPane
         RootTrackingPoint = trackingPoint;
     }
 
+    internal void PreserveTrackedRootAfterFailedReplacement(
+        Uri requestedDocumentUri,
+        int requestedLine,
+        int requestedCharacter)
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        var target =
+            CallHierarchyRootRefreshPolicy.TrackedTargetAfterFailedReplacement(
+                (RootDocumentUri, RootLine, RootCharacter),
+                (requestedDocumentUri, requestedLine, requestedCharacter));
+        RootDocumentUri = target.DocumentUri;
+        RootLine = target.Line;
+        RootCharacter = target.Character;
+    }
+
     // The user drilled into a caller/callee: pushes a new frame on top of
     // the existing stack so Back can return to it. section records which
     // of the parent frame's two lists item was found in, so a later
@@ -220,6 +247,8 @@ public sealed class CallHierarchyExplorerToolWindow : ToolWindowPane
         ThreadHelper.ThrowIfNotOnUIThread();
         state.Push(frame, CallHierarchyItemIdentity.CapturePathStep(section, item));
         banner = null;
+        freshness.Succeed();
+        freshnessHeader.Update(freshness.State);
         Render();
     }
 
@@ -232,6 +261,8 @@ public sealed class CallHierarchyExplorerToolWindow : ToolWindowPane
         ThreadHelper.ThrowIfNotOnUIThread();
         state.ReplaceCurrent(frame);
         banner = null;
+        freshness.Succeed();
+        freshnessHeader.Update(freshness.State);
         Render();
     }
 
@@ -247,6 +278,8 @@ public sealed class CallHierarchyExplorerToolWindow : ToolWindowPane
         ThreadHelper.ThrowIfNotOnUIThread();
         state.ReplaceAll(frames, steps);
         banner = null;
+        freshness.Succeed();
+        freshnessHeader.Update(freshness.State);
         Render();
     }
 
@@ -256,10 +289,15 @@ public sealed class CallHierarchyExplorerToolWindow : ToolWindowPane
     // exactly as before and overlays an explanatory banner rather than
     // erasing it, matching EntryPointDataFlowToolWindow's "preserve last
     // successful content on transient errors" contract.
-    internal void SetBannerOnCurrent(string message)
+    internal void SetBannerOnCurrent(string message, bool refreshFailed = true)
     {
         ThreadHelper.ThrowIfNotOnUIThread();
         banner = message;
+        if (refreshFailed)
+        {
+            freshness.Fail();
+            freshnessHeader.Update(freshness.State);
+        }
         Render();
     }
 
@@ -267,17 +305,46 @@ public sealed class CallHierarchyExplorerToolWindow : ToolWindowPane
     // explicit invocation's own request failed outright): unlike
     // SetBannerOnCurrent, there is nothing to preserve, so this replaces
     // the placeholder text itself with the failure reason.
-    internal void SetGlobalError(string message)
+    internal void SetGlobalError(
+        string message,
+        Uri documentUri = null,
+        int line = 0,
+        int character = 0,
+        ITrackingPoint trackingPoint = null)
     {
         ThreadHelper.ThrowIfNotOnUIThread();
         state.Clear();
         banner = null;
-        RootDocumentUri = null;
-        RootLine = 0;
-        RootCharacter = 0;
-        RootTrackingPoint = null;
+        RootDocumentUri = documentUri;
+        RootLine = line;
+        RootCharacter = character;
+        RootTrackingPoint = trackingPoint;
         placeholderMessage = message;
+        freshness.Fail();
+        freshnessHeader.Update(freshness.State);
         Render();
+    }
+
+    public void BeginRefresh(AnalysisFreshnessCause cause)
+    {
+        freshness.Begin(cause);
+        freshnessHeader.Update(freshness.State);
+    }
+
+    public void MarkStale(AnalysisFreshnessCause cause, bool refreshPending = false)
+    {
+        freshness.Invalidate(cause, refreshPending);
+        freshnessHeader.Update(freshness.State);
+    }
+
+    internal void DiscardRefreshAfterNavigation(
+        AnalysisFreshnessCause cause)
+    {
+        freshness.Set(
+            CallHierarchyRefreshFreshness.AfterNavigationMismatch(
+                freshness.State,
+                cause));
+        freshnessHeader.Update(freshness.State);
     }
 
     private void Render()
