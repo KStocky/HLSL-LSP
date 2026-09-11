@@ -1,0 +1,185 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/KStocky/HLSL-LSP/main/schemas/v1/shadertoolsconfig.schema.json",
+  "title": "HLSL-LSP shadertoolsconfig.json",
+  "description": "Versioned schema for HLSL-LSP shader configuration files.",
+  "type": "object",
+  "examples": [
+    {
+      "$schema": "https://raw.githubusercontent.com/KStocky/HLSL-LSP/main/schemas/v1/shadertoolsconfig.schema.json",
+      "root": true,
+      "hlsl.languageVersion": "2021",
+      "hlsl.targetProfile": "cs_6_6",
+      "hlsl.entryPoint": "Main",
+      "hlsl.preprocessorDefinitions": {
+        "PLATFORM_WINDOWS": 1
+      },
+      "hlsl.additionalIncludeDirectories": ["Shaders/Shared"]
+    }
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "const": "https://raw.githubusercontent.com/KStocky/HLSL-LSP/main/schemas/v1/shadertoolsconfig.schema.json",
+      "description": "Optional JSON Schema URI. Visual Studio users can set this to the schema's $id to enable schema-backed editing."
+    },
+    "root": {
+      "type": "boolean",
+      "description": "Stop configuration discovery at this file."
+    },
+    "hlsl.preprocessorDefinitions": {
+      "$ref": "#/$defs/definitions"
+    },
+    "hlsl.additionalIncludeDirectories": {
+      "$ref": "#/$defs/pathList"
+    },
+    "hlsl.virtualDirectoryMappings": {
+      "$ref": "#/$defs/virtualMappings"
+    },
+    "hlsl.languageVersion": {
+      "type": "string",
+      "enum": ["2016", "2017", "2018", "2021", "202x"],
+      "description": "Default DXC HLSL language version."
+    },
+    "hlsl.targetProfile": {
+      "type": "string",
+      "description": "Optional DXC target profile, such as ps_6_6 or lib_6_8."
+    },
+    "hlsl.entryPoint": {
+      "type": "string",
+      "description": "Optional shader entry point supplied to DXC."
+    },
+    "hlsl.additionalArguments": {
+      "$ref": "#/$defs/argumentList"
+    },
+    "hlsl.dxcRuntimeDirectory": {
+      "type": "string",
+      "description": "Directory containing a compatible DXC runtime to load instead of the bundled one."
+    },
+    "hlsl.fileGroups": {
+      "$ref": "#/$defs/fileGroups"
+    },
+    "hlsl.variantsVersion": {
+      "type": "integer",
+      "const": 1,
+      "description": "Declares the named-variants schema version."
+    },
+    "hlsl.variants": {
+      "$ref": "#/$defs/variants"
+    }
+  },
+  "allOf": [
+    {
+      "if": { "required": ["hlsl.variants"] },
+      "then": { "required": ["hlsl.variantsVersion"] }
+    }
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "definitionValue": {
+      "anyOf": [
+        { "type": "string" },
+        { "type": "number" },
+        { "type": "boolean" }
+      ]
+    },
+    "definitions": {
+      "type": "object",
+      "description": "DXC preprocessor definitions keyed by macro name.",
+      "propertyNames": { "minLength": 1 },
+      "additionalProperties": { "$ref": "#/$defs/definitionValue" }
+    },
+    "pathList": {
+      "type": "array",
+      "description": "Include directories resolved relative to the declaring configuration file.",
+      "items": { "type": "string" }
+    },
+    "virtualMappings": {
+      "type": "object",
+      "description": "Virtual include-root mappings from leading-slash keys to directory paths.",
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[\\\\/]"
+      },
+      "additionalProperties": { "type": "string" }
+    },
+    "argumentList": {
+      "type": "array",
+      "description": "Additional DXC arguments.",
+      "items": { "type": "string" }
+    },
+    "globPattern": {
+      "type": "string",
+      "pattern": "^(?![A-Za-z]:)(?![\\\\/])(?!.*[\\[\\]])(?!.*[\\\\/]{2})(?!\\.{1,2}(?:[\\\\/]|$))(?!.*[\\\\/]\\.{1,2}(?:[\\\\/]|$))(?:(?:\\*\\*|(?:[^*\\\\/\\[\\]]|\\*(?!\\*))+)(?:[\\\\/]|$))+$",
+      "description": "Relative shader path glob. ** is supported only as a complete path segment; character classes and current/parent-directory segments are not supported."
+    },
+    "fileGroups": {
+      "type": "array",
+      "description": "Ordered file-specific configuration groups.",
+      "items": { "$ref": "#/$defs/fileGroup" }
+    },
+    "fileGroup": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "files": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/globPattern" }
+        },
+        "hlsl.preprocessorDefinitions": { "$ref": "#/$defs/definitions" },
+        "hlsl.additionalIncludeDirectories": { "$ref": "#/$defs/pathList" },
+        "hlsl.virtualDirectoryMappings": { "$ref": "#/$defs/virtualMappings" },
+        "hlsl.languageVersion": { "$ref": "#/$defs/languageVersion" },
+        "hlsl.targetProfile": { "$ref": "#/$defs/stringSetting" },
+        "hlsl.entryPoint": { "$ref": "#/$defs/stringSetting" },
+        "hlsl.additionalArguments": { "$ref": "#/$defs/argumentList" }
+      },
+      "required": ["files"],
+      "additionalProperties": false
+    },
+    "stringSetting": { "type": "string" },
+    "languageVersion": {
+      "type": "string",
+      "enum": ["2016", "2017", "2018", "2021", "202x"]
+    },
+    "variants": {
+      "type": "array",
+      "description": "Named compilation variants.",
+      "items": { "$ref": "#/$defs/variant" }
+    },
+    "variant": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "default": { "type": "boolean" },
+        "inherits": {
+          "anyOf": [
+            { "type": "string", "minLength": 1 },
+            {
+              "type": "array",
+              "minItems": 1,
+              "items": { "type": "string", "minLength": 1 }
+            }
+          ]
+        },
+        "files": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/globPattern" }
+        },
+        "hlsl.preprocessorDefinitions": { "$ref": "#/$defs/definitions" },
+        "hlsl.additionalIncludeDirectories": { "$ref": "#/$defs/pathList" },
+        "hlsl.virtualDirectoryMappings": { "$ref": "#/$defs/virtualMappings" },
+        "hlsl.languageVersion": { "$ref": "#/$defs/languageVersion" },
+        "hlsl.targetProfile": { "$ref": "#/$defs/stringSetting" },
+        "hlsl.entryPoint": { "$ref": "#/$defs/stringSetting" },
+        "hlsl.additionalArguments": { "$ref": "#/$defs/argumentList" },
+        "hlsl.dxcRuntimeDirectory": { "type": "string" }
+      },
+      "required": ["name"],
+      "additionalProperties": false
+    }
+  }
+}

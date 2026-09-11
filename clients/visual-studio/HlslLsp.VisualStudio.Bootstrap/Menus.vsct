@@ -41,6 +41,13 @@
           <ButtonText>Select Shader Variant</ButtonText>
         </Strings>
       </Button>
+      <Button guid="guidHlslLspCommands" id="OpenEffectiveConfiguration" priority="0x0102" type="Button">
+        <Parent guid="guidHlslLspCommands" id="HlslContextGroup"/>
+        <CommandFlag>DynamicVisibility</CommandFlag>
+        <Strings>
+          <ButtonText>Open Effective Configuration</ButtonText>
+        </Strings>
+      </Button>
       <Button guid="guidHlslLspCommands" id="ShowCompilationInfo" priority="0x0101" type="Button">
         <Parent guid="guidHlslLspCommands" id="HlslContextGroup"/>
         <CommandFlag>DynamicVisibility</CommandFlag>
@@ -101,6 +108,7 @@
       <IDSymbol name="ShowEntryPointDataFlow" value="0x0105"/>
       <IDSymbol name="ShowCallHierarchy" value="0x0106"/>
       <IDSymbol name="ShowComputeVisualization" value="0x0107"/>
+      <IDSymbol name="OpenEffectiveConfiguration" value="0x0108"/>
     </GuidSymbol>
   </Symbols>
 </CommandTable>

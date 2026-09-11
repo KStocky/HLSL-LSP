@@ -4,9 +4,28 @@ export interface EffectiveContextOrigin {
   readonly uri?: string;
 }
 
+export function effectiveConfigurationOriginUri(
+  context: EffectiveShaderContext,
+): string | undefined {
+  if (
+    context.configurationUri !== null &&
+    context.configurationUri !== undefined
+  ) {
+    return context.configurationUri;
+  }
+  return [
+    context.origins.variant,
+    context.origins.entryPoint,
+    context.origins.targetProfile,
+  ]
+    .map((origin) => origin?.uri)
+    .find((uri) => uri !== undefined && uri !== "");
+}
+
 export interface EffectiveShaderContext {
   readonly documentUri: string;
   readonly file: string;
+  readonly configurationUri?: string | null;
   readonly activeVariant: string | null;
   readonly entryPoint: string;
   readonly targetProfile: string;

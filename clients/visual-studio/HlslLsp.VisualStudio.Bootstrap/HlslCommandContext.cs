@@ -31,12 +31,56 @@ internal enum HlslCommandKind
 {
     MemoryLayout,
     SelectVariant,
+    OpenEffectiveConfiguration,
     Compilation,
     ResourceBindings,
     PreprocessorExplorer,
     EntryPointDataFlow,
     CallHierarchy,
     ComputeVisualization,
+}
+
+internal static class HlslCommandIds
+{
+    internal const int MemoryLayout = 0x0100;
+    internal const int SelectVariant = 0x0101;
+    internal const int Compilation = 0x0102;
+    internal const int ResourceBindings = 0x0103;
+    internal const int PreprocessorExplorer = 0x0104;
+    internal const int EntryPointDataFlow = 0x0105;
+    internal const int CallHierarchy = 0x0106;
+    internal const int ComputeVisualization = 0x0107;
+    internal const int OpenEffectiveConfiguration = 0x0108;
+
+    internal static HlslCommandKind CommandKind(int commandId)
+    {
+        switch (commandId)
+        {
+            case MemoryLayout:
+                return HlslCommandKind.MemoryLayout;
+            case SelectVariant:
+                return HlslCommandKind.SelectVariant;
+            case Compilation:
+                return HlslCommandKind.Compilation;
+            case ResourceBindings:
+                return HlslCommandKind.ResourceBindings;
+            case PreprocessorExplorer:
+                return HlslCommandKind.PreprocessorExplorer;
+            case EntryPointDataFlow:
+                return HlslCommandKind.EntryPointDataFlow;
+            case CallHierarchy:
+                return HlslCommandKind.CallHierarchy;
+            case ComputeVisualization:
+                return HlslCommandKind.ComputeVisualization;
+            case OpenEffectiveConfiguration:
+                return HlslCommandKind.OpenEffectiveConfiguration;
+            default:
+                throw new ArgumentOutOfRangeException(
+                    nameof(commandId),
+                    commandId,
+                    "Unknown HLSL command identifier.");
+        }
+    }
 }
 
 internal sealed class HlslCommandPresentation
@@ -88,6 +132,7 @@ internal sealed class HlslCommandPresentation
 
     private static bool IsDocumentCommand(HlslCommandKind kind)
         => kind == HlslCommandKind.SelectVariant ||
+           kind == HlslCommandKind.OpenEffectiveConfiguration ||
            kind == HlslCommandKind.Compilation ||
            kind == HlslCommandKind.ResourceBindings ||
            kind == HlslCommandKind.PreprocessorExplorer;
@@ -141,6 +186,8 @@ internal sealed class HlslCommandPresentation
                 return "Memory Layout";
             case HlslCommandKind.SelectVariant:
                 return "Select Shader Variant";
+            case HlslCommandKind.OpenEffectiveConfiguration:
+                return "Open Effective Configuration";
             case HlslCommandKind.Compilation:
                 return "Shader Compilation";
             case HlslCommandKind.ResourceBindings:

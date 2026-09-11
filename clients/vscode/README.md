@@ -17,11 +17,11 @@ code --install-extension hlsl-lsp-vscode.vsix
 The release VSIX contains the Windows x64 `hlsl-lsp.exe`, `dxcompiler.dll`, and
 `dxil.dll`, plus the Linux x64 `hlsl-lsp` and `libdxcompiler.so`. Opening an
 HLSL document starts the matching bundled server automatically.
-Right-click an HLSL editor to open the **HLSL** submenu for shader variants,
-compilation, resource bindings, preprocessor exploration, memory layout,
-compute visualization, and entry-point data flow. The same actions remain
-available from the Command Palette; call hierarchy uses VS Code's native
-**Show Call Hierarchy** action.
+Right-click an HLSL editor to open the **HLSL** submenu for opening the
+effective configuration file, shader variants, compilation, resource bindings,
+preprocessor exploration, memory layout, compute visualization, and
+entry-point data flow. The same actions remain available from the Command
+Palette; call hierarchy uses VS Code's native **Show Call Hierarchy** action.
 
 Additional extensions can be associated with the contributed `hlsl` language
 through VS Code's built-in setting:
@@ -248,7 +248,11 @@ for directories named explicitly by the editor's
 `hlsl.additionalIncludeDirectories` and `hlsl.virtualDirectoryMappings`
 settings, including external absolute directories and relative directories
 resolved against each workspace folder. Changing either editor setting
-rebuilds the watcher set by restarting the client.
+rebuilds the watcher set by restarting the client. Use **HLSL: Open Effective
+Configuration File** to jump to the server-reported `shadertoolsconfig.json`
+that supplies the active shader's effective configuration; if no file-backed
+origin exists, the command explains that the current context was synthesized
+without one.
 
 Only the three built-in shader extensions are watched. A custom extension
 associated through `files.associations` works while open, but changes to a

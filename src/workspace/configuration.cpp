@@ -448,6 +448,11 @@ parse_glob_array(const Json& array, const std::filesystem::path& path, const std
         return result;
     }
     if (!inherits->is_array()) {
+        throw ConfigurationError{ConfigurationErrorCode::invalid_variant, path, inherits_key,
+                                 "Variant 'inherits' must be a string or a non-empty array of "
+                                 "variant names"};
+    }
+    if (inherits->empty()) {
         throw ConfigurationError{
             ConfigurationErrorCode::invalid_variant, path, inherits_key,
             "Variant 'inherits' must be a string or a non-empty array of variant names"};

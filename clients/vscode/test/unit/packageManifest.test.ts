@@ -13,6 +13,10 @@ interface MenuEntry {
 interface PackageManifest {
   readonly activationEvents: readonly string[];
   readonly contributes: {
+    readonly jsonValidation: readonly {
+      readonly fileMatch: readonly string[];
+      readonly url: string;
+    }[];
     readonly commands: readonly {
       readonly command: string;
       readonly shortTitle?: string;
@@ -58,12 +62,22 @@ void test("package contributes an HLSL-only editor context submenu", () => {
   ]);
 });
 
+void test("package contributes JSON validation for shadertoolsconfig.json", () => {
+  assert.deepEqual(manifest.contributes.jsonValidation, [
+    {
+      fileMatch: ["**/shadertoolsconfig.json"],
+      url: "./schemas/v1/shadertoolsconfig.schema.json",
+    },
+  ]);
+});
+
 void test("HLSL submenu exposes every custom shader workflow in stable groups", () => {
   const entries = manifest.contributes.menus["hlsl.editorContext"];
   assert(entries);
   assert.deepEqual(
     entries.map((entry) => [entry.command, entry.group]),
     [
+      ["hlsl.openEffectiveConfigurationFile", "1_configuration@0"],
       ["hlsl.selectVariant", "1_configuration@1"],
       ["hlsl.showCompilationInfo", "1_configuration@2"],
       ["hlsl.showPreprocessorExplorer", "1_configuration@3"],
@@ -93,6 +107,7 @@ void test("HLSL submenu uses concise command labels", () => {
       shortTitles.get(entry.command ?? ""),
     ),
     [
+      "Open Effective Configuration",
       "Select Shader Variant",
       "Shader Compilation",
       "Preprocessor Explorer",

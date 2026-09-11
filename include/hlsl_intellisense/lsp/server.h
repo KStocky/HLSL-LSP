@@ -56,6 +56,7 @@ struct EffectiveShaderContext {
     std::optional<std::string> active_variant;
     std::string entry_point;
     std::string target_profile;
+    std::optional<std::filesystem::path> configuration_file;
     std::optional<EffectiveContextOrigin> variant_origin;
     std::optional<EffectiveContextOrigin> entry_point_origin;
     std::optional<EffectiveContextOrigin> target_profile_origin;

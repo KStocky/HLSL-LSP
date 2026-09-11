@@ -12,6 +12,7 @@ import "./packageManifest.test";
 import "./panelController.test";
 import "./preprocessorExplorer.test";
 import "./resourceBindings.test";
+import "./schema.test";
 import "./runtime.test";
 import "./settingsSynchronizer.test";
 import "./variants.test";

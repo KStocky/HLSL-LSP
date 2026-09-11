@@ -1,5 +1,12 @@
 # `shadertoolsconfig.json`
 
+The repository publishes an authoritative versioned JSON Schema at
+[`../schemas/v1/shadertoolsconfig.schema.json`](../schemas/v1/shadertoolsconfig.schema.json).
+Visual Studio Code validates `shadertoolsconfig.json` files against the same
+shape automatically. Visual Studio users can opt into the same completion and
+validation by retaining the `$schema` property shown below; the schema is also
+included in the Visual Studio extension package.
+
 HLSL-LSP supports the `shadertoolsconfig.json` format created by
 [Tim Jones for HLSL Tools](https://github.com/tgjones/HlslTools#custom-preprocessor-definitions-and-additional-include-directories).
 The shared fields make existing HLSL Tools configurations reusable. HLSL-LSP
@@ -12,6 +19,8 @@ JSON comments are accepted.
 
 ```jsonc
 {
+  "$schema": "https://raw.githubusercontent.com/KStocky/HLSL-LSP/main/schemas/v1/shadertoolsconfig.schema.json",
+
   // Do not inspect parent directories above this file.
   "root": true,
 

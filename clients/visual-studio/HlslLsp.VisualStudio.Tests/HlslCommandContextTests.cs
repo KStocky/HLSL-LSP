@@ -191,6 +191,21 @@ public sealed class HlslCommandContextTests : IDisposable
         Assert.Equal("Call Hierarchy for helper", result.Text);
     }
 
+
+    [Fact]
+    public void DocumentCommand_UsesEffectiveConfigurationLabel()
+    {
+        var result = HlslCommandPresentation.Evaluate(
+            HlslCommandKind.OpenEffectiveConfiguration,
+            hlslEditor: true,
+            contextKnown: false,
+            context: null);
+
+        Assert.True(result.Visible);
+        Assert.True(result.Enabled);
+        Assert.Equal("Open Effective Configuration", result.Text);
+    }
+
     [Fact]
     public void NonHlslEditor_HidesAllCommandsAndRestoresBaseLabel()
     {

@@ -91,6 +91,11 @@ effective_shader_target(const workspace::WorkspaceConfiguration& configuration) 
     }
     return {{"documentUri", context.document_uri},
             {"file", context.file},
+            {"configurationUri", context.configuration_file.has_value()
+                                     ? Json(workspace::DocumentUri::from_path(
+                                                context.configuration_file->generic_string())
+                                                .uri())
+                                     : Json(nullptr)},
             {"activeVariant",
              context.active_variant.has_value() ? Json(*context.active_variant) : Json(nullptr)},
             {"entryPoint", context.entry_point},
@@ -5476,10 +5481,22 @@ Server::effective_context_for(const workspace::SourceSnapshot& snapshot,
         .active_variant = std::nullopt,
         .entry_point = effective_target.entry_point,
         .target_profile = effective_target.target_profile,
+        .configuration_file = std::nullopt,
         .variant_origin = std::nullopt,
         .entry_point_origin = std::nullopt,
         .target_profile_origin = std::nullopt,
     };
+    const auto shader_directory = std::filesystem::path{snapshot.path()}.parent_path();
+    std::error_code directory_error;
+    if (std::filesystem::is_directory(shader_directory, directory_error)) {
+        const auto configuration_files = workspace::discover_configuration_files(shader_directory);
+        if (!configuration_files.empty()) {
+            result.configuration_file = configuration_files.front();
+        }
+    } else if (directory_error && directory_error != std::errc::no_such_file_or_directory) {
+        throw std::filesystem::filesystem_error{"Unable to inspect shader directory",
+                                                shader_directory, directory_error};
+    }
 
     const auto setting_origin =
         [&configuration](std::string_view key,
