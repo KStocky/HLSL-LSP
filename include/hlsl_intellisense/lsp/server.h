@@ -202,6 +202,8 @@ class Server final {
                                        const json_rpc::RequestContext& context);
     [[nodiscard]] json_rpc::Json memory_layout(const std::optional<json_rpc::Json>& params,
                                                const json_rpc::RequestContext& context);
+    [[nodiscard]] json_rpc::Json macro_expansion(const std::optional<json_rpc::Json>& params,
+                                                 const json_rpc::RequestContext& context);
     [[nodiscard]] json_rpc::Json command_context(const std::optional<json_rpc::Json>& params,
                                                  const json_rpc::RequestContext& context);
     [[nodiscard]] json_rpc::Json compilation_info(const std::optional<json_rpc::Json>& params,

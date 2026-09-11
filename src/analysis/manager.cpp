@@ -1128,6 +1128,38 @@ Manager::memory_layout(std::string root_identity, std::int64_t version, std::str
         });
 }
 
+WithGeneration<std::optional<dxc::MacroExpansion>>
+Manager::macro_expansion(std::string root_identity, std::int64_t version, std::string path,
+                         std::uint32_t line, std::uint32_t column,
+                         const json_rpc::CancellationToken& cancellation) {
+    return implementation_->query<WithGeneration<std::optional<dxc::MacroExpansion>>>(
+        std::move(root_identity), version, cancellation,
+        [implementation = implementation_.get(), requested_path = std::move(path), line,
+         column](WorkerClient& worker, Impl::Entry& entry, const json_rpc::CancellationToken& token)
+            -> WithGeneration<std::optional<dxc::MacroExpansion>> {
+            return {.value = worker.macro_expansion(
+                        entry.root_identity, Impl::worker_path(entry, requested_path), line, column,
+                        implementation->options.budgets.interactive_timeout, token),
+                    .generation = entry.generation};
+        });
+}
+
+WithGeneration<std::optional<std::string>>
+Manager::macro_name(std::string root_identity, std::int64_t version, std::string path,
+                    std::uint32_t line, std::uint32_t column,
+                    const json_rpc::CancellationToken& cancellation) {
+    return implementation_->query<WithGeneration<std::optional<std::string>>>(
+        std::move(root_identity), version, cancellation,
+        [implementation = implementation_.get(), requested_path = std::move(path), line,
+         column](WorkerClient& worker, Impl::Entry& entry, const json_rpc::CancellationToken& token)
+            -> WithGeneration<std::optional<std::string>> {
+            return {.value = worker.macro_name(
+                        entry.root_identity, Impl::worker_path(entry, requested_path), line, column,
+                        implementation->options.budgets.interactive_timeout, token),
+                    .generation = entry.generation};
+        });
+}
+
 dxc::CompilationInfo Manager::compilation_info(std::string root_identity, std::int64_t version,
                                                std::string path,
                                                const json_rpc::CancellationToken& cancellation) {

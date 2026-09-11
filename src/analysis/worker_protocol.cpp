@@ -152,6 +152,8 @@ void from_json(const Json& input, CompilerOptions& value) {
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(SourceLocation, path, line, column, offset)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(SourceRange, start, end)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(MacroDefinition, name, value, location)
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(MacroExpansion, name, invocation, range, expanded_text,
+                                   definition_location)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(FixIt, range, replacement_text)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Diagnostic, severity, message, location, fix_its)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Completion, label, detail, cursor_kind)
@@ -404,6 +406,20 @@ class Worker final {
                                     required<std::uint32_t>(params, "line"),
                                     required<std::uint32_t>(params, "column"))));
         }
+        if (method == "macroExpansion") {
+            auto& entry = find_entry(params);
+            return response(id, Json(entry.translation_unit.macro_expansion_at(
+                                    required<std::string>(params, "path"),
+                                    required<std::uint32_t>(params, "line"),
+                                    required<std::uint32_t>(params, "column"))));
+        }
+        if (method == "macroName") {
+            auto& entry = find_entry(params);
+            return response(id, Json(entry.translation_unit.macro_name_at(
+                                    required<std::string>(params, "path"),
+                                    required<std::uint32_t>(params, "line"),
+                                    required<std::uint32_t>(params, "column"))));
+        }
         if (method == "compilationInfo") {
             return response(id, Json(find_entry(params).translation_unit.compilation_info()));
         }
@@ -638,6 +654,27 @@ WorkerClient::memory_layout(std::string_view root_identity, std::string path, st
                                    timeout, cancellation);
     return decode_result<std::optional<dxc::MemoryLayout>>(process_, std::move(result),
                                                            "memoryLayout");
+}
+
+std::optional<dxc::MacroExpansion>
+WorkerClient::macro_expansion(std::string_view root_identity, std::string path, std::uint32_t line,
+                              std::uint32_t column, std::chrono::milliseconds timeout,
+                              const json_rpc::CancellationToken& cancellation) {
+    auto result = process_.request("macroExpansion",
+                                   position_params(root_identity, std::move(path), line, column),
+                                   timeout, cancellation);
+    return decode_result<std::optional<dxc::MacroExpansion>>(process_, std::move(result),
+                                                             "macroExpansion");
+}
+
+std::optional<std::string>
+WorkerClient::macro_name(std::string_view root_identity, std::string path, std::uint32_t line,
+                         std::uint32_t column, std::chrono::milliseconds timeout,
+                         const json_rpc::CancellationToken& cancellation) {
+    auto result =
+        process_.request("macroName", position_params(root_identity, std::move(path), line, column),
+                         timeout, cancellation);
+    return decode_result<std::optional<std::string>>(process_, std::move(result), "macroName");
 }
 
 dxc::CompilationInfo

@@ -18,6 +18,7 @@
 #include <memory>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -49,6 +50,32 @@ class TestDirectory final {
 [[nodiscard]] std::string frame(const Json& message) {
     const auto payload = message.dump();
     return "Content-Length: " + std::to_string(payload.size()) + "\r\n\r\n" + payload;
+}
+
+[[nodiscard]] std::string percent_decode(std::string_view value) {
+    const auto hex = [](char character) -> unsigned {
+        if (character >= '0' && character <= '9') {
+            return static_cast<unsigned>(character - '0');
+        }
+        if (character >= 'A' && character <= 'F') {
+            return static_cast<unsigned>(character - 'A' + 10);
+        }
+        throw std::invalid_argument{"Invalid percent-encoded test value"};
+    };
+    std::string result;
+    result.reserve(value.size());
+    for (std::size_t index = 0; index < value.size(); ++index) {
+        if (value[index] != '%') {
+            result.push_back(value[index]);
+            continue;
+        }
+        if (index + 2 >= value.size()) {
+            throw std::invalid_argument{"Truncated percent-encoded test value"};
+        }
+        result.push_back(static_cast<char>((hex(value[index + 1]) << 4U) | hex(value[index + 2])));
+        index += 2;
+    }
+    return result;
 }
 
 // Matches `Scheduler::owner_for`'s own hash exactly: used by concurrency
@@ -195,7 +222,7 @@ TEST_CASE("LSP handler enforces lifecycle and invalid parameters", "[lsp][handle
     CHECK(params_error->error.code == hlsl_intellisense::json_rpc::invalid_params_code);
 
     for (const auto method : {"textDocument/hover", "textDocument/signatureHelp",
-                              "hlsl/memoryLayout", "hlsl/commandContext"}) {
+                              "hlsl/memoryLayout", "hlsl/macroExpansion", "hlsl/commandContext"}) {
         const auto invalid = server.handle(hlsl_intellisense::json_rpc::Request{
             .id = std::int64_t{4},
             .method = method,
@@ -357,6 +384,117 @@ TEST_CASE("Server exposes memory layouts through hover and the custom protocol",
     CHECK(edited_response->result["members"][0]["type"] == "double");
 }
 
+TEST_CASE("Server exposes compiler-backed macro expansion and command applicability",
+          "[lsp][macro-expansion][integration]") {
+    TestDirectory directory;
+    const auto document = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "macros.hlsl").string());
+    const std::string source = "#define VALUE 7\n"
+                               "#define TWICE(value) ((value) + (value))\n"
+                               "#if VALUE\n"
+                               "#endif\n"
+                               "float4 main() : SV_Target {\n"
+                               "    return TWICE(VALUE).xxxx;\n"
+                               "}\n";
+    hlsl_intellisense::lsp::Server server{[](const auto&) {}};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1},
+        .method = "initialize",
+        .params = Json{{"initializationOptions", {{"commandLinks", true}}}}}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(
+        hlsl_intellisense::json_rpc::Notification{.method = "textDocument/didOpen",
+                                                  .params = Json{{"textDocument",
+                                                                  {{"uri", document.uri()},
+                                                                   {"languageId", "hlsl"},
+                                                                   {"version", 1},
+                                                                   {"text", source}}}}}));
+
+    const auto invocation_offset = source.find("TWICE(VALUE)");
+    REQUIRE(invocation_offset != std::string::npos);
+    const auto params = Json{{"textDocument", {{"uri", document.uri()}}},
+                             {"position", position_at(source, invocation_offset + 8)}};
+    const auto command_response = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{3}, .method = "hlsl/commandContext", .params = params});
+    REQUIRE(command_response.has_value());
+    const auto* command = std::get_if<hlsl_intellisense::json_rpc::Response>(&*command_response);
+    REQUIRE(command != nullptr);
+    CHECK(command->result["macroExpansionAvailable"] == true);
+    CHECK(command->result["macroName"] == "TWICE");
+
+    const auto response = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{2}, .method = "hlsl/macroExpansion", .params = params});
+    REQUIRE(response.has_value());
+    std::string response_description{"response"};
+    if (const auto* error = std::get_if<hlsl_intellisense::json_rpc::ErrorResponse>(&*response)) {
+        response_description = error->error.message;
+    }
+    INFO(response_description);
+    const auto* expansion = std::get_if<hlsl_intellisense::json_rpc::Response>(&*response);
+    REQUIRE(expansion != nullptr);
+    INFO(expansion->result.dump());
+    CHECK(expansion->result["name"] == "TWICE");
+    CHECK(expansion->result["invocation"] == "TWICE(VALUE)");
+    CHECK(expansion->result["expansion"].get<std::string>().find('7') != std::string::npos);
+    CHECK(expansion->result["range"]["start"] == position_at(source, invocation_offset));
+    CHECK(expansion->result["range"]["end"] ==
+          position_at(source, invocation_offset + std::string_view{"TWICE(VALUE)"}.size()));
+    CHECK(expansion->result["definitionLocation"]["uri"] == document.uri());
+    CHECK(expansion->result["context"]["file"] == "macros.hlsl");
+
+    const auto hover_response = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{6}, .method = "textDocument/hover", .params = params});
+    REQUIRE(hover_response.has_value());
+    const auto* hover = std::get_if<hlsl_intellisense::json_rpc::Response>(&*hover_response);
+    REQUIRE(hover != nullptr);
+    CHECK(hover->result["contents"]["kind"] == "markdown");
+    const auto hover_text = hover->result["contents"]["value"].get<std::string>();
+    constexpr std::string_view command_prefix = "[Expand Macro](command:hlsl.expandMacro?";
+    const auto command_start = hover_text.find(command_prefix);
+    REQUIRE(command_start != std::string::npos);
+    const auto arguments_start = command_start + command_prefix.size();
+    const auto command_end = hover_text.find(')', arguments_start);
+    REQUIRE(command_end != std::string::npos);
+    const auto arguments = Json::parse(percent_decode(
+        std::string_view{hover_text}.substr(arguments_start, command_end - arguments_start)));
+    CHECK(arguments ==
+          Json::array({Json{{"textDocument", {{"uri", document.uri()}}},
+                            {"position", position_at(source, invocation_offset + 8)}}}));
+
+    const auto no_macro = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{4},
+        .method = "hlsl/macroExpansion",
+        .params = Json{{"textDocument", {{"uri", document.uri()}}},
+                       {"position", position_at(source, source.find("return"))}}});
+    REQUIRE(no_macro.has_value());
+    const auto* no_macro_result = std::get_if<hlsl_intellisense::json_rpc::Response>(&*no_macro);
+    REQUIRE(no_macro_result != nullptr);
+    CHECK(no_macro_result->result.is_null());
+
+    const auto directive = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{5},
+        .method = "hlsl/macroExpansion",
+        .params = Json{{"textDocument", {{"uri", document.uri()}}},
+                       {"position", position_at(source, source.find("#if VALUE") + 5)}}});
+    REQUIRE(directive.has_value());
+    const auto* directive_result = std::get_if<hlsl_intellisense::json_rpc::Response>(&*directive);
+    REQUIRE(directive_result != nullptr);
+    CHECK(directive_result->result.is_null());
+
+    const auto directive_context = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{7},
+        .method = "hlsl/commandContext",
+        .params = Json{{"textDocument", {{"uri", document.uri()}}},
+                       {"position", position_at(source, source.find("#if VALUE") + 5)}}});
+    REQUIRE(directive_context.has_value());
+    const auto* directive_command =
+        std::get_if<hlsl_intellisense::json_rpc::Response>(&*directive_context);
+    REQUIRE(directive_command != nullptr);
+    CHECK(directive_command->result["macroExpansionAvailable"] == false);
+    CHECK(directive_command->result["macroName"] == "");
+}
+
 TEST_CASE("Server reports caret-specific HLSL command applicability",
           "[lsp][command-context][integration]") {
     TestDirectory directory;
@@ -418,6 +556,8 @@ TEST_CASE("Server reports caret-specific HLSL command applicability",
     const auto structure = context_at("Payload");
     CHECK(structure["memoryLayoutAvailable"] == true);
     CHECK(structure["memoryLayoutTarget"] == "Payload");
+    CHECK(structure["macroExpansionAvailable"] == false);
+    CHECK(structure["macroName"] == "");
     CHECK(structure["callHierarchyAvailable"] == false);
     CHECK(structure["entryPointDataFlowAvailable"] == false);
     CHECK(structure["computeVisualizationAvailable"] == false);
@@ -425,6 +565,7 @@ TEST_CASE("Server reports caret-specific HLSL command applicability",
 
     const auto helper = context_at("helper");
     CHECK(helper["memoryLayoutAvailable"] == false);
+    CHECK(helper["macroExpansionAvailable"] == false);
     CHECK(helper["callHierarchyAvailable"] == true);
     CHECK(helper["callableName"] == "helper");
     CHECK(helper["entryPointDataFlowAvailable"] == false);

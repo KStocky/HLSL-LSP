@@ -440,6 +440,67 @@ TEST_CASE("Memory layout queries preserve cancellation and stale-version safety"
                     json_rpc::HandlerError);
 }
 
+TEST_CASE("Macro expansion queries round-trip through workers and preserve stale-version safety",
+          "[analysis][macro-expansion]") {
+    TestDirectory directory;
+    const auto uri = workspace::DocumentUri::from_path((directory.path() / "root.hlsl").string());
+    const std::string source = "#define VALUE 7\n"
+                               "float4 main() : SV_Target { return VALUE.xxxx; }\n";
+    analysis::Manager manager{[](const auto&, const auto&, std::uint64_t) {}, test_options()};
+    manager.analyze(input(uri, 1, source));
+    manager.wait_idle();
+
+    json_rpc::CancellationToken cancellation;
+    const auto expansion =
+        manager.macro_expansion(uri.identity(), 1, uri.path(), 2, 37, cancellation);
+    REQUIRE(expansion.value.has_value());
+    CHECK(expansion.value->name == "VALUE");
+    CHECK(expansion.value->invocation == "VALUE");
+    CHECK(expansion.value->expanded_text == "7");
+    CHECK(expansion.generation != 0);
+
+    const auto name = manager.macro_name(uri.identity(), 1, uri.path(), 2, 37, cancellation);
+    REQUIRE(name.value.has_value());
+    CHECK(*name.value == "VALUE");
+    CHECK(name.generation == expansion.generation);
+
+    CHECK_THROWS_AS(manager.macro_expansion(uri.identity(), 2, uri.path(), 2, 42, cancellation),
+                    json_rpc::HandlerError);
+}
+
+TEST_CASE("Macro expansion queries preserve cancellation",
+          "[analysis][macro-expansion][cancellation]") {
+    TestDirectory directory;
+    const auto uri = workspace::DocumentUri::from_path((directory.path() / "root.hlsl").string());
+    auto hooks = std::make_shared<analysis::AnalysisHooks>();
+    Gate interactive;
+    hooks->before_interactive = [&](std::string_view) {
+        interactive.enter();
+        interactive.wait_until_released();
+    };
+    analysis::Manager manager{[](const auto&, const auto&, std::uint64_t) {}, test_options(),
+                              hooks};
+    manager.analyze(input(uri, 1,
+                          "#define VALUE 7\n"
+                          "float4 main() : SV_Target { return VALUE.xxxx; }\n"));
+    manager.wait_idle();
+
+    json_rpc::CancellationToken cancellation;
+    auto request = std::async(std::launch::async, [&] {
+        return manager.macro_expansion(uri.identity(), 1, uri.path(), 2, 37, cancellation);
+    });
+    interactive.wait_until_entered();
+    cancellation.cancel();
+    try {
+        static_cast<void>(request.get());
+        FAIL("Cancelled macro expansion unexpectedly returned");
+    } catch (const json_rpc::HandlerError& error) {
+        CHECK(error.code() == json_rpc::request_cancelled_code);
+    }
+    interactive.release();
+    manager.wait_idle();
+}
+
 TEST_CASE("Inlay hint queries preserve cancellation and stale-version safety",
           "[analysis][inlay-hints][cancellation]") {
     TestDirectory directory;

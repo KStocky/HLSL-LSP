@@ -12,6 +12,7 @@
 #include <dxcisense.h>
 
 #include <algorithm>
+#include <atomic>
 #include <charconv>
 #include <cstddef>
 #include <cstdint>
@@ -627,6 +628,210 @@ class TaskRanges final {
            kind == DxcCursor_ClassDecl || kind == DxcCursor_EnumDecl ||
            kind == DxcCursor_Namespace || kind == DxcCursor_ClassTemplate ||
            kind == DxcCursor_ClassTemplatePartialSpecialization;
+}
+
+struct MacroCursorMatch {
+    ComPtr<IDxcCursor> cursor;
+    SourceRange range;
+    unsigned start{};
+    unsigned end{};
+};
+
+void find_macro_expansions(IDxcCursor& parent, std::string_view path, unsigned offset,
+                           std::optional<MacroCursorMatch>& best, std::uint32_t depth = 0) {
+    if (depth >= 64) {
+        return;
+    }
+    constexpr unsigned page_size = 256;
+    for (unsigned skip = 0;; skip += page_size) {
+        unsigned child_count{};
+        IDxcCursor** raw_children{};
+        check(parent.GetChildren(skip, page_size, &child_count, &raw_children), "GetChildren");
+        TaskCursors children{raw_children, child_count};
+        for (unsigned index = 0; index < child_count; ++index) {
+            auto* child = children[index];
+            if (child == nullptr) {
+                continue;
+            }
+            DxcCursorKind child_kind{DxcCursor_UnexposedDecl};
+            check(child->GetKind(&child_kind), "GetKind");
+            if (child_kind == DxcCursor_MacroExpansion) {
+                ComPtr<IDxcSourceRange> extent;
+                check(child->GetExtent(extent.put()), "GetExtent");
+                auto range = safe_source_range(extent.get());
+                unsigned start{};
+                unsigned end{};
+                if (range.has_value() && range->start.path == path && range->end.path == path &&
+                    SUCCEEDED(extent->GetOffsets(&start, &end)) && start <= offset &&
+                    offset < end && (!best.has_value() || end - start > best->end - best->start)) {
+                    child->AddRef();
+                    ComPtr<IDxcCursor> owned;
+                    *owned.put() = child;
+                    best = MacroCursorMatch{.cursor = std::move(owned),
+                                            .range = std::move(*range),
+                                            .start = start,
+                                            .end = end};
+                }
+            }
+            find_macro_expansions(*child, path, offset, best, depth + 1);
+        }
+        if (child_count < page_size) {
+            break;
+        }
+    }
+}
+
+[[nodiscard]] bool inside_block_comment_at(std::string_view text, std::size_t offset) {
+    bool block_comment = false;
+    bool line_comment = false;
+    char quote = '\0';
+    bool escaped = false;
+    for (std::size_t index = 0; index < offset && index < text.size(); ++index) {
+        const auto current = text[index];
+        const auto next = index + 1 < offset ? text[index + 1] : '\0';
+        if (block_comment) {
+            if (current == '*' && next == '/') {
+                block_comment = false;
+                ++index;
+            }
+            continue;
+        }
+        if (line_comment) {
+            if (current == '\n') {
+                line_comment = false;
+            }
+            continue;
+        }
+        if (quote != '\0') {
+            if (escaped) {
+                escaped = false;
+            } else if (current == '\\') {
+                escaped = true;
+            } else if (current == quote) {
+                quote = '\0';
+            } else if (current == '\n') {
+                quote = '\0';
+            }
+            continue;
+        }
+        if (current == '/' && next == '*') {
+            block_comment = true;
+            ++index;
+        } else if (current == '/' && next == '/') {
+            line_comment = true;
+            ++index;
+        } else if (current == '"' || current == '\'') {
+            quote = current;
+        }
+    }
+    return block_comment;
+}
+
+[[nodiscard]] bool is_directive_invocation(std::string_view text, std::size_t offset) {
+    offset = (std::min)(offset, text.size());
+    auto logical_start = text.rfind('\n', offset == 0 ? 0 : offset - 1);
+    logical_start = logical_start == std::string_view::npos ? 0 : logical_start + 1;
+    while (logical_start > 0) {
+        const auto previous_end = logical_start - 1;
+        auto previous_start = text.rfind('\n', previous_end == 0 ? 0 : previous_end - 1);
+        previous_start = previous_start == std::string_view::npos ? 0 : previous_start + 1;
+        auto content_end = previous_end;
+        if (content_end > previous_start && text[content_end - 1] == '\r') {
+            --content_end;
+        }
+        auto last = content_end;
+        while (last > previous_start && (text[last - 1] == ' ' || text[last - 1] == '\t')) {
+            --last;
+        }
+        if (last == previous_start || text[last - 1] != '\\') {
+            break;
+        }
+        logical_start = previous_start;
+    }
+
+    bool block_comment = inside_block_comment_at(text, logical_start);
+    for (std::size_t index = logical_start; index < offset;) {
+        if (block_comment) {
+            const auto end = text.find("*/", index);
+            if (end == std::string_view::npos || end >= offset) {
+                return false;
+            }
+            index = end + 2;
+            block_comment = false;
+            continue;
+        }
+        if (text[index] == ' ' || text[index] == '\t' || text[index] == '\r' ||
+            text[index] == '\n' || text[index] == '\\') {
+            ++index;
+            continue;
+        }
+        if (index + 1 < offset && text.substr(index, 2) == "/*") {
+            block_comment = true;
+            index += 2;
+            continue;
+        }
+        if (index + 1 < offset && text.substr(index, 2) == "//") {
+            return false;
+        }
+        return text[index] == '#';
+    }
+    return false;
+}
+
+[[nodiscard]] std::string normalized_expansion(std::string_view text) {
+    while (!text.empty() && (text.front() == ' ' || text.front() == '\t' || text.front() == '\r' ||
+                             text.front() == '\n')) {
+        text.remove_prefix(1);
+    }
+    while (!text.empty() && (text.back() == ' ' || text.back() == '\t' || text.back() == '\r' ||
+                             text.back() == '\n')) {
+        text.remove_suffix(1);
+    }
+    std::string result;
+    result.reserve(text.size());
+    for (std::size_t index = 0; index < text.size(); ++index) {
+        if (text[index] == '\r') {
+            if (index + 1 < text.size() && text[index + 1] == '\n') {
+                continue;
+            }
+            result.push_back('\n');
+        } else {
+            result.push_back(text[index]);
+        }
+    }
+    return result;
+}
+
+[[nodiscard]] std::optional<MacroCursorMatch>
+macro_cursor_at(IDxcTranslationUnit& translation_unit, const std::vector<SourceFile>& sources,
+                std::string_view path, std::uint32_t line, std::uint32_t column) {
+    const auto source = std::ranges::find(sources, path, &SourceFile::path);
+    if (source == sources.end() || source->text.size() > (std::numeric_limits<unsigned>::max)()) {
+        return std::nullopt;
+    }
+
+    const std::string owned_path{path};
+    ComPtr<IDxcFile> file;
+    check(translation_unit.GetFile(owned_path.c_str(), file.put()), "GetFile");
+    if (file.get() == nullptr) {
+        return std::nullopt;
+    }
+    ComPtr<IDxcSourceLocation> location;
+    check(translation_unit.GetLocation(file.get(), line, column, location.put()), "GetLocation");
+    unsigned requested_offset{};
+    check(location->GetSpellingLocation(nullptr, nullptr, nullptr, &requested_offset),
+          "GetSpellingLocation");
+
+    ComPtr<IDxcCursor> root;
+    check(translation_unit.GetCursor(root.put()), "GetCursor");
+    std::optional<MacroCursorMatch> selected;
+    find_macro_expansions(*root.get(), path, requested_offset, selected);
+    if (!selected.has_value() || selected->start >= selected->end ||
+        selected->end > source->text.size() ||
+        is_directive_invocation(source->text, selected->start)) {
+        return std::nullopt;
+    }
+    return selected;
 }
 
 [[nodiscard]] auto
@@ -2948,6 +3153,115 @@ auto TranslationUnit::memory_layout_at(std::string_view path, std::uint32_t line
     return detail::memory_layout_from_probe(implementation_->owner->create_instance,
                                             implementation_->sources, implementation_->arguments,
                                             implementation_->root_path, probe_target);
+}
+
+auto TranslationUnit::macro_expansion_at(std::string_view path, std::uint32_t line,
+                                         std::uint32_t column) const
+    -> std::optional<MacroExpansion> {
+    constexpr std::size_t max_expansion_bytes = std::size_t{256} * 1024U;
+    const auto source_it = std::ranges::find(implementation_->sources, path, &SourceFile::path);
+    if (source_it == implementation_->sources.end()) {
+        return std::nullopt;
+    }
+
+    auto selected = macro_cursor_at(*implementation_->translation_unit.get(),
+                                    implementation_->sources, path, line, column);
+    if (!selected.has_value()) {
+        return std::nullopt;
+    }
+
+    auto name = cursor_spelling(*selected->cursor.get());
+    if (name.empty()) {
+        return std::nullopt;
+    }
+
+    std::optional<SourceLocation> definition_location;
+    ComPtr<IDxcCursor> definition;
+    check(selected->cursor->GetReferencedCursor(definition.put()), "GetReferencedCursor");
+    if (!is_null_cursor(definition.get()) &&
+        cursor_kind(*definition.get()) == DxcCursor_MacroDefinition) {
+        ComPtr<IDxcSourceLocation> definition_source;
+        check(definition->GetLocation(definition_source.put()), "GetLocation");
+        if (definition_source.get() != nullptr) {
+            BOOL is_null{};
+            check(definition_source->IsNull(&is_null), "IsNull");
+            if (is_null == FALSE) {
+                definition_location = make_source_location(*definition_source.get());
+            }
+        }
+    }
+
+    static std::atomic<std::uint64_t> sentinel_counter{};
+    std::string begin_marker;
+    std::string end_marker;
+    for (;;) {
+        const auto suffix =
+            std::to_string(sentinel_counter.fetch_add(1, std::memory_order_relaxed));
+        begin_marker = "__HLSL_LSP_MACRO_BEGIN_" + suffix + "__";
+        end_marker = "__HLSL_LSP_MACRO_END_" + suffix + "__";
+        const auto marker_absent = [&](std::string_view value) {
+            return value.find(begin_marker) == std::string_view::npos &&
+                   value.find(end_marker) == std::string_view::npos;
+        };
+        if (std::ranges::all_of(implementation_->sources,
+                                [&](const auto& source) {
+                                    return marker_absent(source.path) && marker_absent(source.text);
+                                }) &&
+            marker_absent(implementation_->root_path) &&
+            std::ranges::all_of(implementation_->full_arguments, marker_absent)) {
+            break;
+        }
+    }
+
+    auto instrumented_sources = implementation_->sources;
+    auto instrumented = std::ranges::find(instrumented_sources, path, &SourceFile::path);
+    if (instrumented == instrumented_sources.end()) {
+        return std::nullopt;
+    }
+    instrumented->text.insert(selected->end, " " + end_marker + " ");
+    instrumented->text.insert(selected->start, begin_marker + " ");
+
+    const auto preprocessed = detail::preprocess_from_compile(
+        implementation_->owner->create_instance, instrumented_sources,
+        implementation_->full_arguments, implementation_->root_path);
+    if (!preprocessed.available || preprocessed.text.empty()) {
+        return std::nullopt;
+    }
+    const auto begin = preprocessed.text.find(begin_marker);
+    if (begin == std::string::npos ||
+        preprocessed.text.find(begin_marker, begin + begin_marker.size()) != std::string::npos) {
+        return std::nullopt;
+    }
+    const auto content_start = begin + begin_marker.size();
+    const auto end = preprocessed.text.find(end_marker, content_start);
+    if (end == std::string::npos ||
+        preprocessed.text.find(end_marker, end + end_marker.size()) != std::string::npos ||
+        end - content_start > max_expansion_bytes) {
+        return std::nullopt;
+    }
+    auto expanded = normalized_expansion(
+        std::string_view{preprocessed.text}.substr(content_start, end - content_start));
+    if (expanded.size() > max_expansion_bytes) {
+        return std::nullopt;
+    }
+
+    return MacroExpansion{
+        .name = std::move(name),
+        .invocation = source_it->text.substr(selected->start, selected->end - selected->start),
+        .range = std::move(selected->range),
+        .expanded_text = std::move(expanded),
+        .definition_location = std::move(definition_location)};
+}
+
+auto TranslationUnit::macro_name_at(std::string_view path, std::uint32_t line,
+                                    std::uint32_t column) const -> std::optional<std::string> {
+    auto selected = macro_cursor_at(*implementation_->translation_unit.get(),
+                                    implementation_->sources, path, line, column);
+    if (!selected.has_value()) {
+        return std::nullopt;
+    }
+    auto name = cursor_spelling(*selected->cursor.get());
+    return name.empty() ? std::nullopt : std::optional<std::string>{std::move(name)};
 }
 
 auto TranslationUnit::compilation_info(const ComputeMetadataLimits& limits) const

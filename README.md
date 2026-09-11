@@ -13,6 +13,7 @@ with:
 - Native shader-aware inlay hints for inferred types, parameter names, variants,
   layouts, and resource bindings
 - Natural structure and constant-buffer memory layout inspection
+- Compiler-authoritative macro expansion at HLSL invocation sites
 - DXC-backed shader compilation inspection: effective configuration,
   diagnostics, reflection, and compiler-generated disassembly
 - Resource binding inspection: register-space/class grouping, collisions,
@@ -117,6 +118,18 @@ function, or entry point. File-wide commands such as shader compilation and
 variant selection remain available throughout an HLSL document.
 
 ![Compiler-backed memory layout for an HLSL structure in Visual Studio](art/memory-layout.png)
+
+### Macro expansion
+
+Place the caret on an object-like or function-like macro invocation and choose
+**Expand Macro** from Quick Info/hover or the editor's **HLSL** context menu.
+The result shows the original invocation beside the final token sequence
+produced by DXC, using the current unsaved source, includes, active variant,
+and effective compiler configuration. Nested expansion, variadic arguments,
+stringification, and token pasting are handled by DXC rather than recreated by
+the language server. See
+[`docs/macro-expansion.md`](docs/macro-expansion.md) for protocol behavior and
+limitations.
 
 ### Shader compilation
 

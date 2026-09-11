@@ -119,6 +119,7 @@ public sealed class CommandTablePackagingTests
     [InlineData(0x0106, "ShowCallHierarchy", "CallHierarchy")]
     [InlineData(0x0107, "ShowComputeVisualization", "ComputeVisualization")]
     [InlineData(0x0108, "OpenEffectiveConfiguration", "OpenEffectiveConfiguration")]
+    [InlineData(0x0109, "ExpandMacro", "MacroExpansion")]
     public void RuntimeCommandIds_PreserveExistingBindings(
         int commandId,
         string commandName,

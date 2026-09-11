@@ -398,6 +398,139 @@ TEST_CASE("DXC IntelliSense reports compiler-skipped preprocessor ranges", "[dxc
     CHECK(scale->value == "(value) ((value) * ACTIVE_VALUE)");
 }
 
+TEST_CASE("DXC expands object, function, and nested macros through the compiler",
+          "[dxc][macro-expansion]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    const std::string source = "#define VALUE 7\n"
+                               "#define ADD_ONE(value) ((value) + 1)\n"
+                               "#define TWICE(value) ADD_ONE(ADD_ONE(value))\n"
+                               "float4 main() : SV_Target {\n"
+                               "    float objectValue = VALUE;\n"
+                               "    float functionValue = ADD_ONE(2);\n"
+                               "    return TWICE(VALUE).xxxx;\n"
+                               "}\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}});
+
+    const auto object = translation_unit.macro_expansion_at(shader_path, 5, 27);
+    REQUIRE(object.has_value());
+    CHECK(object->name == "VALUE");
+    CHECK(object->invocation == "VALUE");
+    CHECK(object->expanded_text == "7");
+    CHECK(object->range.start.line == 5);
+    CHECK(object->range.start.column == 25);
+    CHECK(object->range.end.column == 30);
+    REQUIRE(object->definition_location.has_value());
+    CHECK(object->definition_location->line == 1);
+
+    const auto function = translation_unit.macro_expansion_at(shader_path, 6, 31);
+    REQUIRE(function.has_value());
+    CHECK(function->name == "ADD_ONE");
+    CHECK(function->invocation == "ADD_ONE(2)");
+    CHECK(function->expanded_text.find('2') != std::string::npos);
+    CHECK(function->expanded_text.find('1') != std::string::npos);
+
+    const auto nested = translation_unit.macro_expansion_at(shader_path, 7, 18);
+    REQUIRE(nested.has_value());
+    CHECK(nested->name == "TWICE");
+    CHECK(nested->invocation == "TWICE(VALUE)");
+    CHECK(nested->expanded_text.find('7') != std::string::npos);
+    CHECK(std::ranges::count(nested->expanded_text, '1') == 2);
+
+    CHECK_FALSE(translation_unit.macro_expansion_at(shader_path, 4, 8).has_value());
+    CHECK_FALSE(translation_unit.macro_expansion_at(shader_path, 1, 15).has_value());
+
+    const std::string empty_source = "#define EMPTY\n"
+                                     "float value EMPTY;\n";
+    auto empty_unit = intellisense.parse(shader_path, {{shader_path, empty_source}});
+    const auto empty = empty_unit.macro_expansion_at(shader_path, 2, 14);
+    REQUIRE(empty.has_value());
+    CHECK(empty->name == "EMPTY");
+    CHECK(empty->expanded_text.empty());
+}
+
+TEST_CASE("DXC reports cursor-only macro applicability without expansion output",
+          "[dxc][macro-applicability]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    const std::string source = "#define INNER(value) ((value) + 1)\n"
+                               "#define OUTER(value) INNER(value)\n"
+                               "#if OUTER(1)\n"
+                               "#endif\n"
+                               "/* preceding\n"
+                               "   comment */ #if OUTER(2)\n"
+                               "#endif\n"
+                               "float value = OUTER(INNER(2));\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}});
+
+    const auto outer = translation_unit.macro_name_at(shader_path, 8, 23);
+    REQUIRE(outer.has_value());
+    CHECK(*outer == "OUTER");
+    CHECK_FALSE(translation_unit.macro_name_at(shader_path, 3, 8).has_value());
+    CHECK_FALSE(translation_unit.macro_name_at(shader_path, 6, 22).has_value());
+    CHECK_FALSE(translation_unit.macro_name_at(shader_path, 8, 7).has_value());
+}
+
+TEST_CASE("DXC macro expansion preserves variadic, stringification, and token-pasting semantics",
+          "[dxc][macro-expansion]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    const std::string source = "#define JOIN_IMPL(left, right) left ## right\n"
+                               "#define JOIN(left, right) JOIN_IMPL(left, right)\n"
+                               "#define STRINGIFY_IMPL(value) #value\n"
+                               "#define STRINGIFY(value) STRINGIFY_IMPL(value)\n"
+                               "#define CALL(function, ...) function(__VA_ARGS__)\n"
+                               "float add(float left, float right) { return left + right; }\n"
+                               "float4 main() : SV_Target {\n"
+                               "    float joined = JOIN(1, 25);\n"
+                               "    const char* text = STRINGIFY(JOIN(alpha, beta));\n"
+                               "    return CALL(add, joined, 3).xxxx;\n"
+                               "}\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}});
+
+    const auto pasted = translation_unit.macro_expansion_at(shader_path, 8, 24);
+    REQUIRE(pasted.has_value());
+    CHECK(pasted->name == "JOIN");
+    CHECK(pasted->expanded_text == "125");
+
+    const auto stringified = translation_unit.macro_expansion_at(shader_path, 9, 40);
+    REQUIRE(stringified.has_value());
+    CHECK(stringified->name == "STRINGIFY");
+    CHECK(stringified->invocation == "STRINGIFY(JOIN(alpha, beta))");
+    CHECK(stringified->expanded_text == "\"alphabeta\"");
+
+    const auto variadic = translation_unit.macro_expansion_at(shader_path, 10, 19);
+    REQUIRE(variadic.has_value());
+    CHECK(variadic->name == "CALL");
+    CHECK(variadic->invocation == "CALL(add, joined, 3)");
+    CHECK(variadic->expanded_text.find("add") != std::string::npos);
+    CHECK(variadic->expanded_text.find("joined") != std::string::npos);
+    CHECK(variadic->expanded_text.find('3') != std::string::npos);
+}
+
+TEST_CASE("DXC macro expansion honors includes and effective configuration defines",
+          "[dxc][macro-expansion]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.defines = {"CONFIG_VALUE=9"};
+    const auto directory = std::filesystem::current_path() / "macro-expansion";
+    const auto root = (directory / shader_path).generic_string();
+    const auto include_path = (directory / "macros.hlsli").generic_string();
+    const std::string include_source = "#define CONFIGURED(value) ((value) * CONFIG_VALUE)\n";
+    const std::string source = "#include \"macros.hlsli\"\n"
+                               "float4 main() : SV_Target {\n"
+                               "    return CONFIGURED(2).xxxx;\n"
+                               "}\n";
+    auto translation_unit =
+        intellisense.parse(root, {{root, source}, {include_path, include_source}}, options);
+
+    const auto expansion = translation_unit.macro_expansion_at(root, 3, 16);
+    REQUIRE(expansion.has_value());
+    CHECK(expansion->name == "CONFIGURED");
+    CHECK(expansion->invocation == "CONFIGURED(2)");
+    CHECK(expansion->expanded_text.find('2') != std::string::npos);
+    CHECK(expansion->expanded_text.find('9') != std::string::npos);
+    REQUIRE(expansion->definition_location.has_value());
+    CHECK(expansion->definition_location->path == include_path);
+}
+
 TEST_CASE("DXC exposes rewritten-source skipped-range capability",
           "[dxc][preprocessor][platform]") {
     hlsl_intellisense::dxc::Intellisense intellisense;

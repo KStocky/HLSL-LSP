@@ -21,6 +21,18 @@ struct PreprocessDiagnostics {
     std::vector<Diagnostic> diagnostics;
 };
 
+struct PreprocessOutput {
+    bool available{};
+    std::string text;
+    std::vector<Diagnostic> diagnostics;
+};
+
+// Runs the loaded DXC compiler preprocessor over the exact in-memory source
+// graph and effective arguments. `text` is populated only from DXC_OUT_HLSL.
+[[nodiscard]] PreprocessOutput preprocess_from_compile(
+    DxcCreateInstanceProc create_instance, const std::vector<SourceFile>& sources,
+    const std::vector<std::string>& arguments, std::string_view main_path);
+
 // Runs DXC's compiler preprocessor over the exact in-memory source snapshot.
 // This is used only to arbitrate diagnostics from known-divergent legacy
 // IntelliSense preprocessing paths; AST features still come from IDxcIndex.

@@ -124,6 +124,17 @@ restoration. Last good content stays visible during refresh/failure or when a
 tracked document closes; see
 [analysis result freshness](../../docs/analysis-freshness.md).
 
+## Macro expansion
+
+Place the caret on a macro invocation and choose **Expand Macro** from the
+hover action or the **HLSL** editor context submenu. The command appears only
+when DXC resolves an expansion at the current caret. A theme-aware view shows
+the original invocation and DXC's final preprocessed token sequence, including
+nested, function-like, variadic, stringified, and token-pasted results. The
+request uses the current unsaved document, includes, active variant, and
+effective compiler configuration. See
+[macro expansion](../../docs/macro-expansion.md) for details.
+
 ## Shader compilation
 
 Run **HLSL: Show Shader Compilation** to open a combined view of the active

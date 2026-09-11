@@ -99,6 +99,16 @@ struct MacroDefinition {
     SourceLocation location;
 };
 
+struct MacroExpansion {
+    std::string name;
+    std::string invocation;
+    SourceRange range;
+    std::string expanded_text;
+    std::optional<SourceLocation> definition_location;
+
+    friend bool operator==(const MacroExpansion&, const MacroExpansion&) = default;
+};
+
 // A textual replacement DXC itself considers a safe, deterministic fix for a
 // diagnostic ("fix-it"). `range` is the exact byte span in the diagnostic's
 // file to replace with `replacement_text`. DXC's IntelliSense fix-it support
@@ -935,6 +945,13 @@ class TranslationUnit final {
                                                 std::uint32_t column) const;
     [[nodiscard]] std::optional<MemoryLayout>
     memory_layout_at(std::string_view path, std::uint32_t line, std::uint32_t column) const;
+    [[nodiscard]] std::optional<MacroExpansion>
+    macro_expansion_at(std::string_view path, std::uint32_t line, std::uint32_t column) const;
+    // Resolves only the compiler-owned preprocessing cursor. This does not run
+    // IDxcCompiler3 preprocessing and is suitable for caret-driven command
+    // applicability checks.
+    [[nodiscard]] std::optional<std::string>
+    macro_name_at(std::string_view path, std::uint32_t line, std::uint32_t column) const;
     // Compiles the actual root source and all resolved in-memory include
     // sources with the effective compiler arguments and returns the
     // compiler-authoritative configuration and reflection. DXC is invoked

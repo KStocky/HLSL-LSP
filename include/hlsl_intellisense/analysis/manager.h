@@ -201,6 +201,14 @@ class Manager final {
     memory_layout(std::string root_identity, std::int64_t version, std::string path,
                   std::uint32_t line, std::uint32_t column,
                   const json_rpc::CancellationToken& cancellation);
+    [[nodiscard]] WithGeneration<std::optional<dxc::MacroExpansion>>
+    macro_expansion(std::string root_identity, std::int64_t version, std::string path,
+                    std::uint32_t line, std::uint32_t column,
+                    const json_rpc::CancellationToken& cancellation);
+    [[nodiscard]] WithGeneration<std::optional<std::string>>
+    macro_name(std::string root_identity, std::int64_t version, std::string path,
+               std::uint32_t line, std::uint32_t column,
+               const json_rpc::CancellationToken& cancellation);
     // Compiles the actual root source and resolved in-memory includes with
     // the effective compiler arguments and returns the compiler-authoritative
     // configuration, output, and reflection for an open document. Unlike the

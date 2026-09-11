@@ -16,6 +16,10 @@ public sealed class HlslCommandContextModel
 
     public string MemoryLayoutTarget { get; set; }
 
+    public bool MacroExpansionAvailable { get; set; }
+
+    public string MacroName { get; set; }
+
     public bool CallHierarchyAvailable { get; set; }
 
     public string CallableName { get; set; }
@@ -30,6 +34,7 @@ public sealed class HlslCommandContextModel
 internal enum HlslCommandKind
 {
     MemoryLayout,
+    MacroExpansion,
     SelectVariant,
     OpenEffectiveConfiguration,
     Compilation,
@@ -51,6 +56,7 @@ internal static class HlslCommandIds
     internal const int CallHierarchy = 0x0106;
     internal const int ComputeVisualization = 0x0107;
     internal const int OpenEffectiveConfiguration = 0x0108;
+    internal const int MacroExpansion = 0x0109;
 
     internal static HlslCommandKind CommandKind(int commandId)
     {
@@ -74,6 +80,8 @@ internal static class HlslCommandIds
                 return HlslCommandKind.ComputeVisualization;
             case OpenEffectiveConfiguration:
                 return HlslCommandKind.OpenEffectiveConfiguration;
+            case MacroExpansion:
+                return HlslCommandKind.MacroExpansion;
             default:
                 throw new ArgumentOutOfRangeException(
                     nameof(commandId),
@@ -145,6 +153,8 @@ internal sealed class HlslCommandPresentation
         {
             case HlslCommandKind.MemoryLayout:
                 return context.MemoryLayoutAvailable;
+            case HlslCommandKind.MacroExpansion:
+                return context.MacroExpansionAvailable;
             case HlslCommandKind.EntryPointDataFlow:
                 return context.EntryPointDataFlowAvailable;
             case HlslCommandKind.CallHierarchy:
@@ -164,6 +174,8 @@ internal sealed class HlslCommandPresentation
         {
             case HlslCommandKind.MemoryLayout:
                 return WithTarget("Memory Layout", context.MemoryLayoutTarget);
+            case HlslCommandKind.MacroExpansion:
+                return WithTarget("Expand Macro", context.MacroName);
             case HlslCommandKind.EntryPointDataFlow:
                 return WithTarget("Entry-Point Data Flow", context.EntryPoint);
             case HlslCommandKind.CallHierarchy:
@@ -184,6 +196,8 @@ internal sealed class HlslCommandPresentation
         {
             case HlslCommandKind.MemoryLayout:
                 return "Memory Layout";
+            case HlslCommandKind.MacroExpansion:
+                return "Expand Macro";
             case HlslCommandKind.SelectVariant:
                 return "Select Shader Variant";
             case HlslCommandKind.OpenEffectiveConfiguration:
