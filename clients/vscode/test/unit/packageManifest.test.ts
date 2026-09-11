@@ -11,6 +11,7 @@ interface MenuEntry {
 }
 
 interface PackageManifest {
+  readonly activationEvents: readonly string[];
   readonly contributes: {
     readonly commands: readonly {
       readonly command: string;
@@ -27,6 +28,22 @@ interface PackageManifest {
 const manifest = JSON.parse(
   readFileSync(join(__dirname, "../../../package.json"), "utf8"),
 ) as PackageManifest;
+
+void test("restorable analysis panels activate their serializers", () => {
+  assert.deepEqual(
+    manifest.activationEvents.filter((event) =>
+      event.startsWith("onWebviewPanel:hlsl"),
+    ),
+    [
+      "onWebviewPanel:hlslMemoryLayout",
+      "onWebviewPanel:hlslCompilationInfo",
+      "onWebviewPanel:hlslResourceBindings",
+      "onWebviewPanel:hlslPreprocessorExplorer",
+      "onWebviewPanel:hlslEntryPointDataFlow",
+      "onWebviewPanel:hlslComputeVisualization",
+    ],
+  );
+});
 
 void test("package contributes an HLSL-only editor context submenu", () => {
   assert.deepEqual(manifest.contributes.submenus, [

@@ -22,6 +22,9 @@ public enum AnalysisFreshnessCause
     ConfigurationChange,
     DisconnectedServer,
     ManualRefresh,
+    ActiveShaderChange,
+    ActiveShaderUnavailable,
+    TrackedShaderClosed,
     Unknown,
 }
 
@@ -134,6 +137,9 @@ public static class AnalysisFreshnessReducer
             AnalysisFreshnessCause.ConfigurationChange => "Configuration change",
             AnalysisFreshnessCause.DisconnectedServer => "Disconnected server",
             AnalysisFreshnessCause.ManualRefresh => "Manual refresh",
+            AnalysisFreshnessCause.ActiveShaderChange => "Active shader change",
+            AnalysisFreshnessCause.ActiveShaderUnavailable => "Active shader unavailable",
+            AnalysisFreshnessCause.TrackedShaderClosed => "Tracked shader closed",
             AnalysisFreshnessCause.Unknown => "Unknown",
             _ => throw new ArgumentOutOfRangeException(nameof(state)),
         };
@@ -160,8 +166,9 @@ internal static class AnalysisRefreshCancellation
 internal static class AnalysisFreshnessCausePolicy
 {
     // A coalesced refresh reports the most actionable invalidation reason,
-    // independent of trigger order: disconnect > variant > configuration >
-    // source edit > manual refresh > unknown.
+    // independent of trigger order: disconnect > unavailable/closed target >
+    // variant > configuration > source edit > active-shader retarget > manual
+    // refresh > unknown.
     internal static AnalysisFreshnessCause Coalesce(
         AnalysisFreshnessCause current,
         AnalysisFreshnessCause incoming)
@@ -170,10 +177,13 @@ internal static class AnalysisFreshnessCausePolicy
     private static int Priority(AnalysisFreshnessCause cause)
         => cause switch
         {
-            AnalysisFreshnessCause.DisconnectedServer => 6,
-            AnalysisFreshnessCause.VariantChange => 5,
-            AnalysisFreshnessCause.ConfigurationChange => 4,
-            AnalysisFreshnessCause.SourceEdit => 3,
+            AnalysisFreshnessCause.DisconnectedServer => 8,
+            AnalysisFreshnessCause.ActiveShaderUnavailable => 7,
+            AnalysisFreshnessCause.TrackedShaderClosed => 7,
+            AnalysisFreshnessCause.VariantChange => 6,
+            AnalysisFreshnessCause.ConfigurationChange => 5,
+            AnalysisFreshnessCause.SourceEdit => 4,
+            AnalysisFreshnessCause.ActiveShaderChange => 3,
             AnalysisFreshnessCause.ManualRefresh => 2,
             AnalysisFreshnessCause.Unknown => 1,
             _ => throw new ArgumentOutOfRangeException(nameof(cause)),
@@ -216,6 +226,14 @@ internal sealed class AnalysisFreshnessTracker
 
     internal void Set(AnalysisFreshnessState state)
         => State = state ?? throw new ArgumentNullException(nameof(state));
+
+    internal void CancelRefresh(AnalysisFreshnessCause cause)
+    {
+        if (State.Status == AnalysisFreshnessStatus.Refreshing)
+        {
+            Invalidate(cause);
+        }
+    }
 }
 
 internal sealed class AnalysisRefreshGate
@@ -378,18 +396,145 @@ internal static class AnalysisFreshnessBridge
         => Volatile.Read(ref refresh)?.Invoke(kind);
 }
 
+internal enum AnalysisTrackingMode
+{
+    FollowActiveShader,
+    Pinned,
+}
+
+internal enum AnalysisTrackingAction
+{
+    None,
+    Retarget,
+    MarkUnavailable,
+}
+
+internal static class AnalysisTrackingPolicy
+{
+    internal static AnalysisTrackingMode DefaultMode =>
+        AnalysisTrackingMode.Pinned;
+
+    internal static AnalysisTrackingMode Toggle(AnalysisTrackingMode mode)
+        => mode == AnalysisTrackingMode.Pinned
+            ? AnalysisTrackingMode.FollowActiveShader
+            : AnalysisTrackingMode.Pinned;
+
+    internal static AnalysisTrackingAction OnActiveViewChanged(
+        AnalysisTrackingMode mode,
+        bool activeShaderAvailable)
+    {
+        if (mode != AnalysisTrackingMode.FollowActiveShader)
+        {
+            return AnalysisTrackingAction.None;
+        }
+        return activeShaderAvailable
+            ? AnalysisTrackingAction.Retarget
+            : AnalysisTrackingAction.MarkUnavailable;
+    }
+
+    internal static bool IsSameDocument(Uri left, Uri right)
+    {
+        if (left == null || right == null)
+        {
+            return false;
+        }
+        if (left.IsFile && right.IsFile)
+        {
+            return string.Equals(
+                Path.GetFullPath(left.LocalPath),
+                Path.GetFullPath(right.LocalPath),
+                StringComparison.OrdinalIgnoreCase);
+        }
+        return Uri.Compare(
+                left,
+                right,
+                UriComponents.AbsoluteUri,
+                UriFormat.SafeUnescaped,
+                StringComparison.OrdinalIgnoreCase) == 0;
+    }
+
+    internal static (string TargetText, string ButtonText, string ToolTip)
+        Presentation(AnalysisTrackingMode mode, Uri documentUri)
+    {
+        var path = documentUri?.IsFile == true
+            ? documentUri.LocalPath
+            : documentUri?.ToString();
+        var file = string.IsNullOrEmpty(path)
+            ? "No shader"
+            : Path.GetFileName(path);
+        if (string.IsNullOrEmpty(file))
+        {
+            file = path;
+        }
+        return (
+            (mode == AnalysisTrackingMode.Pinned ? "Pinned: " : "Following: ") +
+            file,
+            mode == AnalysisTrackingMode.Pinned
+                ? "Follow active shader"
+                : "Pin this shader",
+            path);
+    }
+}
+
+internal static class AnalysisTrackingBridge
+{
+    private static Action<AnalysisViewKind, AnalysisTrackingMode> changeMode;
+
+    internal static void Register(
+        Action<AnalysisViewKind, AnalysisTrackingMode> handler)
+        => Volatile.Write(
+            ref changeMode,
+            handler ?? throw new ArgumentNullException(nameof(handler)));
+
+    internal static void RequestMode(
+        AnalysisViewKind kind,
+        AnalysisTrackingMode mode)
+        => Volatile.Read(ref changeMode)?.Invoke(kind, mode);
+}
+
 internal sealed class AnalysisFreshnessHeader : UserControl
 {
+    private readonly AnalysisViewKind kind;
     private readonly TextBlock status = new()
     {
         VerticalAlignment = VerticalAlignment.Center,
         Opacity = 0.75,
     };
+    private readonly TextBlock target = new()
+    {
+        VerticalAlignment = VerticalAlignment.Center,
+        FontWeight = FontWeights.SemiBold,
+    };
+    private readonly Button trackingButton;
+    private AnalysisTrackingMode trackingMode = AnalysisTrackingPolicy.DefaultMode;
 
     internal AnalysisFreshnessHeader(AnalysisViewKind kind)
     {
+        this.kind = kind;
         VisualStudioTheme.ApplyToolWindowTheme(this);
-        var row = new StackPanel { Orientation = Orientation.Horizontal };
+        var row = new WrapPanel();
+        row.Children.Add(target);
+        row.Children.Add(new TextBlock
+        {
+            Text = "  ·  ",
+            VerticalAlignment = VerticalAlignment.Center,
+            Opacity = 0.55,
+        });
+        trackingButton = VisualStudioTheme.ApplyButtonStyle(new Button
+        {
+            Padding = new Thickness(7, 1, 7, 1),
+        });
+        trackingButton.Click += (_, _) =>
+            AnalysisTrackingBridge.RequestMode(
+                this.kind,
+                AnalysisTrackingPolicy.Toggle(trackingMode));
+        row.Children.Add(trackingButton);
+        row.Children.Add(new TextBlock
+        {
+            Text = "  ·  ",
+            VerticalAlignment = VerticalAlignment.Center,
+            Opacity = 0.55,
+        });
         row.Children.Add(status);
         row.Children.Add(new TextBlock
         {
@@ -411,10 +556,20 @@ internal sealed class AnalysisFreshnessHeader : UserControl
             Child = row,
         };
         Update(AnalysisFreshnessReducer.Initial);
+        UpdateTracking(AnalysisTrackingPolicy.DefaultMode, null);
     }
 
     internal void Update(AnalysisFreshnessState state)
         => status.Text = AnalysisFreshnessReducer.Text(state);
+
+    internal void UpdateTracking(AnalysisTrackingMode mode, Uri documentUri)
+    {
+        trackingMode = mode;
+        var presentation = AnalysisTrackingPolicy.Presentation(mode, documentUri);
+        target.Text = presentation.TargetText;
+        target.ToolTip = presentation.ToolTip;
+        trackingButton.Content = presentation.ButtonText;
+    }
 
     internal static UIElement Wrap(
         AnalysisFreshnessHeader header,
@@ -433,4 +588,15 @@ internal interface IAnalysisFreshnessView
     void BeginRefresh(AnalysisFreshnessCause cause);
 
     void MarkStale(AnalysisFreshnessCause cause, bool refreshPending = false);
+}
+
+internal interface IAnalysisTrackingView : IAnalysisFreshnessView
+{
+    AnalysisTrackingMode TrackingMode { get; }
+
+    Uri TrackingDocumentUri { get; }
+
+    void SetTrackingMode(AnalysisTrackingMode mode);
+
+    void CancelTrackingRefresh();
 }

@@ -89,9 +89,20 @@ consistently).
 Memory Layout, Shader Compilation, Resource Bindings, Preprocessor Explorer,
 Entry-Point Data Flow, Compute Visualization, and the custom Call Hierarchy
 window also share a compact **Current**, **Refreshing**, **Stale**, or
-**Refresh failed** header with a tracked-target **Refresh** button. Last good
-content stays visible during refresh/failure, and known causes are reported
-consistently. See
+**Refresh failed** header with a tracked-target **Refresh** button. Each window
+opens in **Pinned** mode, preserving the shader (and, for Memory Layout and
+Call Hierarchy, the selected caret target) until explicitly retargeted. Choose
+**Follow active shader** in the header to refresh that existing window in
+place whenever the active HLSL editor changes; this never opens another tool
+window or steals focus. Switching back to **Pin this shader** stops following.
+If the active view is not HLSL, the last good content remains visible and is
+marked stale instead of guessing another target. Compute Visualization keeps
+its last submitted workload and hardware options while following. Tracking
+mode is intentionally per tool-window instance and returns to the safe
+**Pinned** default if Visual Studio reconstructs the pane during session
+restoration; the extension has no established per-pane settings store to
+persist it safely. Last good content stays visible during refresh/failure, and
+known causes are reported consistently. See
 [analysis result freshness](../../docs/analysis-freshness.md).
 
 Choose **HLSL > Shader Compilation** from the editor context menu to open a tool window with the active

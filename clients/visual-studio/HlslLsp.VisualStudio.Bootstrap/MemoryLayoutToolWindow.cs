@@ -26,7 +26,7 @@ internal static class MemoryLayoutTargetIdentity
 }
 
 [Guid("9d208088-c1e2-451d-907c-6e7f825b9714")]
-public sealed class MemoryLayoutToolWindow : ToolWindowPane, IAnalysisFreshnessView
+public sealed class MemoryLayoutToolWindow : ToolWindowPane, IAnalysisTrackingView
 {
     private readonly MemoryLayoutControl control = new();
     private readonly AnalysisFreshnessTracker freshness = new();
@@ -42,11 +42,31 @@ public sealed class MemoryLayoutToolWindow : ToolWindowPane, IAnalysisFreshnessV
 
     internal Uri DocumentUri { get; private set; }
 
+    internal AnalysisTrackingMode TrackingMode { get; private set; } =
+        AnalysisTrackingPolicy.DefaultMode;
+
+    AnalysisTrackingMode IAnalysisTrackingView.TrackingMode => TrackingMode;
+
+    Uri IAnalysisTrackingView.TrackingDocumentUri => DocumentUri;
+
     internal int Line { get; private set; }
 
     internal int Character { get; private set; }
 
     internal ITrackingPoint TrackingPoint { get; private set; }
+
+    internal void BeginRetarget(
+        Uri uri,
+        int line,
+        int character,
+        ITrackingPoint trackingPoint)
+    {
+        DocumentUri = uri;
+        Line = line;
+        Character = character;
+        TrackingPoint = trackingPoint;
+        freshnessHeader.UpdateTracking(TrackingMode, DocumentUri);
+    }
 
     internal void UpdateTrackedPosition(int line, int character)
     {
@@ -67,6 +87,7 @@ public sealed class MemoryLayoutToolWindow : ToolWindowPane, IAnalysisFreshnessV
         TrackingPoint = trackingPoint;
         freshness.Succeed();
         freshnessHeader.Update(freshness.State);
+        freshnessHeader.UpdateTracking(TrackingMode, DocumentUri);
         control.SetLayout(layout);
     }
 
@@ -84,7 +105,23 @@ public sealed class MemoryLayoutToolWindow : ToolWindowPane, IAnalysisFreshnessV
         TrackingPoint = trackingPoint;
         freshness.Fail();
         freshnessHeader.Update(freshness.State);
+        freshnessHeader.UpdateTracking(TrackingMode, DocumentUri);
         control.SetError(message, preserveContent);
+    }
+
+    void IAnalysisTrackingView.SetTrackingMode(AnalysisTrackingMode mode)
+        => SetTrackingMode(mode);
+
+    void IAnalysisTrackingView.CancelTrackingRefresh()
+    {
+        freshness.CancelRefresh(AnalysisFreshnessCause.ActiveShaderChange);
+        freshnessHeader.Update(freshness.State);
+    }
+
+    internal void SetTrackingMode(AnalysisTrackingMode mode)
+    {
+        TrackingMode = mode;
+        freshnessHeader.UpdateTracking(mode, DocumentUri);
     }
 
     public void BeginRefresh(AnalysisFreshnessCause cause)

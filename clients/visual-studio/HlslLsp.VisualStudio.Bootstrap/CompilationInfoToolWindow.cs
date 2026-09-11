@@ -12,7 +12,7 @@ using Microsoft.Win32;
 namespace HlslLsp.VisualStudio.Bootstrap;
 
 [Guid("050603cd-412a-4cd8-b2f8-62bc4e854367")]
-public sealed class CompilationInfoToolWindow : ToolWindowPane, IAnalysisFreshnessView
+public sealed class CompilationInfoToolWindow : ToolWindowPane, IAnalysisTrackingView
 {
     private readonly CompilationInfoControl control = new();
     private readonly AnalysisFreshnessTracker freshness = new();
@@ -31,11 +31,25 @@ public sealed class CompilationInfoToolWindow : ToolWindowPane, IAnalysisFreshne
     // to re-request without needing the caret or active-view context.
     internal Uri DocumentUri { get; private set; }
 
+    internal AnalysisTrackingMode TrackingMode { get; private set; } =
+        AnalysisTrackingPolicy.DefaultMode;
+
+    AnalysisTrackingMode IAnalysisTrackingView.TrackingMode => TrackingMode;
+
+    Uri IAnalysisTrackingView.TrackingDocumentUri => DocumentUri;
+
+    internal void BeginRetarget(Uri uri)
+    {
+        DocumentUri = uri;
+        freshnessHeader.UpdateTracking(TrackingMode, DocumentUri);
+    }
+
     internal void SetInfo(Uri uri, CompilationInfoModel info)
     {
         DocumentUri = uri;
         freshness.Succeed();
         freshnessHeader.Update(freshness.State);
+        freshnessHeader.UpdateTracking(TrackingMode, DocumentUri);
         control.SetInfo(uri, info);
     }
 
@@ -49,7 +63,23 @@ public sealed class CompilationInfoToolWindow : ToolWindowPane, IAnalysisFreshne
         DocumentUri = uri;
         freshness.Fail();
         freshnessHeader.Update(freshness.State);
+        freshnessHeader.UpdateTracking(TrackingMode, DocumentUri);
         control.SetError(message, true);
+    }
+
+    void IAnalysisTrackingView.SetTrackingMode(AnalysisTrackingMode mode)
+        => SetTrackingMode(mode);
+
+    void IAnalysisTrackingView.CancelTrackingRefresh()
+    {
+        freshness.CancelRefresh(AnalysisFreshnessCause.ActiveShaderChange);
+        freshnessHeader.Update(freshness.State);
+    }
+
+    internal void SetTrackingMode(AnalysisTrackingMode mode)
+    {
+        TrackingMode = mode;
+        freshnessHeader.UpdateTracking(mode, DocumentUri);
     }
 
     public void BeginRefresh(AnalysisFreshnessCause cause)

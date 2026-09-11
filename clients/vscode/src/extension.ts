@@ -58,9 +58,16 @@ import {
   AnalysisFreshness,
   AnalysisFreshnessCause,
   AnalysisFreshnessState,
+  AnalysisTrackingMode,
   analysisConfigurationChange,
+  parseAnalysisTrackingCommand,
   withAnalysisFreshness,
 } from "./analysisFreshness";
+import {
+  analysisTargetTransition,
+  defaultAnalysisTrackingMode,
+  isReopenedAnalysisTarget,
+} from "./analysisTracking";
 import {
   HlslServerSettings,
   readActiveVariant,
@@ -158,12 +165,34 @@ interface MemoryLayoutTarget {
 
 let activeLifecycle: ClientLifecycle<ManagedClient> | undefined;
 
-interface MemoryLayoutViewState {
+type AnalysisPanelKind =
+  | "memoryLayout"
+  | "compilationInfo"
+  | "resourceBindings"
+  | "preprocessorExplorer"
+  | "entryPointDataFlow"
+  | "computeVisualization";
+
+interface AnalysisPanelTracking {
+  readonly kind: AnalysisPanelKind;
+  trackingMode: AnalysisTrackingMode;
+  targetAvailable: boolean;
+  uri: vscode.Uri;
+}
+
+interface PersistedAnalysisPanel {
+  readonly mode: AnalysisTrackingMode;
+  readonly uri: string;
+  readonly line?: number;
+  readonly character?: number;
+  readonly options?: ComputeVisualizationOptions;
+}
+
+interface MemoryLayoutViewState extends AnalysisPanelTracking {
   readonly panel: vscode.WebviewPanel;
   readonly freshness: AnalysisFreshness;
   readonly refreshCommand: string;
   html: string;
-  uri: vscode.Uri;
   position: vscode.Position | undefined;
   hasContent: boolean;
 }
@@ -172,12 +201,11 @@ let memoryLayoutState: MemoryLayoutViewState | undefined;
 let memoryLayoutGeneration = 0;
 let memoryLayoutDebounce: NodeJS.Timeout | undefined;
 
-interface CompilationInfoViewState {
+interface CompilationInfoViewState extends AnalysisPanelTracking {
   readonly panel: vscode.WebviewPanel;
   readonly freshness: AnalysisFreshness;
   readonly refreshCommand: string;
   html: string;
-  uri: vscode.Uri;
   // True once a successful hlsl/compilationInfo result has been rendered for
   // the current uri. A later failed or cancelled refresh must never regress
   // this panel to a placeholder or a perpetual loading state, so this flag
@@ -200,12 +228,11 @@ let compilationInfoDebounce: NodeJS.Timeout | undefined;
 // Independently tracked from CompilationInfoViewState: the two panels can be
 // open for different documents at the same time, and neither refresh path
 // may interfere with the other's generation counter or debounce timer.
-interface ResourceBindingsViewState {
+interface ResourceBindingsViewState extends AnalysisPanelTracking {
   readonly panel: vscode.WebviewPanel;
   readonly freshness: AnalysisFreshness;
   readonly refreshCommand: string;
   html: string;
-  uri: vscode.Uri;
   hasContent: boolean;
 }
 
@@ -215,12 +242,11 @@ let resourceBindingsDebounce: NodeJS.Timeout | undefined;
 // Independently tracked from the other two panels: all three can be open
 // for different documents at the same time, and none may interfere with
 // another's generation counter or debounce timer.
-interface PreprocessorExplorerViewState {
+interface PreprocessorExplorerViewState extends AnalysisPanelTracking {
   readonly panel: vscode.WebviewPanel;
   readonly freshness: AnalysisFreshness;
   readonly refreshCommand: string;
   html: string;
-  uri: vscode.Uri;
   hasContent: boolean;
 }
 
@@ -235,7 +261,7 @@ let preprocessorExplorerDebounce: NodeJS.Timeout | undefined;
 // panelController.ts) so it has a single, unit-tested seam for exact
 // request payload, out-of-order suppression, document switching, debounce
 // timing, and disposal.
-interface EntryPointDataFlowViewState {
+interface EntryPointDataFlowViewState extends AnalysisPanelTracking {
   readonly panel: vscode.WebviewPanel;
   readonly controller: PanelController<EntryPointDataFlow>;
   readonly freshness: AnalysisFreshness;
@@ -245,7 +271,7 @@ interface EntryPointDataFlowViewState {
 
 let entryPointDataFlowState: EntryPointDataFlowViewState | undefined;
 
-interface ComputeVisualizationViewState {
+interface ComputeVisualizationViewState extends AnalysisPanelTracking {
   readonly panel: vscode.WebviewPanel;
   readonly controller: PanelController<ComputeVisualization>;
   readonly freshness: AnalysisFreshness;
@@ -273,8 +299,50 @@ const refreshResourceBindingsCommand = "hlsl.refreshResourceBindings";
 const refreshPreprocessorExplorerCommand = "hlsl.refreshPreprocessorExplorer";
 const refreshEntryPointDataFlowCommand = "hlsl.refreshEntryPointDataFlow";
 const refreshComputeVisualizationCommand = "hlsl.refreshComputeVisualization";
+const setAnalysisTrackingModeCommand = "hlsl.setAnalysisTrackingMode";
+const analysisPanelStateKeyPrefix = "hlsl.analysisPanel.";
 
-interface AnalysisPanelViewState {
+function analysisPanelCommandUris(kind: AnalysisPanelKind): string[] {
+  const shared = [setAnalysisTrackingModeCommand];
+  switch (kind) {
+    case "memoryLayout":
+      return [refreshMemoryLayoutCommand, ...shared];
+    case "compilationInfo":
+      return [
+        copyDisassemblyCommand,
+        saveDisassemblyCommand,
+        refreshCompilationInfoCommand,
+        ...shared,
+      ];
+    case "resourceBindings":
+      return [
+        openResourceLocationCommand,
+        refreshResourceBindingsCommand,
+        ...shared,
+      ];
+    case "preprocessorExplorer":
+      return [
+        openPreprocessorLocationCommand,
+        refreshPreprocessorExplorerCommand,
+        ...shared,
+      ];
+    case "entryPointDataFlow":
+      return [
+        openEntryPointDataFlowLocationCommand,
+        refreshEntryPointDataFlowCommand,
+        ...shared,
+      ];
+    case "computeVisualization":
+      return [
+        configureComputeVisualizationCommand,
+        openComputeVisualizationLocationCommand,
+        refreshComputeVisualizationCommand,
+        ...shared,
+      ];
+  }
+}
+
+interface AnalysisPanelViewState extends AnalysisPanelTracking {
   readonly panel: vscode.WebviewPanel;
   readonly freshness: AnalysisFreshness;
   readonly refreshCommand: string;
@@ -286,7 +354,143 @@ function renderAnalysisPanel(state: AnalysisPanelViewState): void {
     state.html,
     state.freshness.state,
     state.refreshCommand,
+    {
+      mode: state.trackingMode,
+      target: vscode.workspace.asRelativePath(state.uri, false),
+      command: setAnalysisTrackingModeCommand,
+      panel: state.kind,
+    },
   );
+}
+
+function persistedAnalysisPanel(
+  context: vscode.ExtensionContext,
+  kind: AnalysisPanelKind,
+): PersistedAnalysisPanel | undefined {
+  const value = context.workspaceState.get<unknown>(
+    `${analysisPanelStateKeyPrefix}${kind}`,
+  );
+  if (typeof value !== "object" || value === null) {
+    return undefined;
+  }
+  const candidate = value as Record<string, unknown>;
+  if (
+    (candidate.mode !== "follow" && candidate.mode !== "pinned") ||
+    typeof candidate.uri !== "string" ||
+    candidate.uri === ""
+  ) {
+    return undefined;
+  }
+  const options = validComputeVisualizationOptions(candidate.options);
+  return {
+    mode: candidate.mode,
+    uri: candidate.uri,
+    ...(Number.isSafeInteger(candidate.line) && (candidate.line as number) >= 0
+      ? { line: candidate.line as number }
+      : {}),
+    ...(Number.isSafeInteger(candidate.character) &&
+    (candidate.character as number) >= 0
+      ? { character: candidate.character as number }
+      : {}),
+    ...(options === undefined ? {} : { options }),
+  };
+}
+
+function persistAnalysisPanel(
+  context: vscode.ExtensionContext,
+  state: AnalysisPanelViewState,
+): void {
+  const persisted: PersistedAnalysisPanel = {
+    mode: state.trackingMode,
+    uri: state.uri.toString(),
+    ...(state.kind === "memoryLayout" &&
+    memoryLayoutState?.position !== undefined
+      ? {
+          line: memoryLayoutState.position.line,
+          character: memoryLayoutState.position.character,
+        }
+      : {}),
+    ...(state.kind === "computeVisualization" &&
+    computeVisualizationState !== undefined
+      ? { options: computeVisualizationState.options }
+      : {}),
+  };
+  void context.workspaceState.update(
+    `${analysisPanelStateKeyPrefix}${state.kind}`,
+    persisted,
+  );
+}
+
+function validComputeVisualizationOptions(
+  value: unknown,
+): ComputeVisualizationOptions | undefined {
+  if (typeof value !== "object" || value === null) {
+    return undefined;
+  }
+  const candidate = value as Record<string, unknown>;
+  const dimensions = candidate.dispatchDimensions;
+  if (dimensions !== undefined) {
+    if (typeof dimensions !== "object" || dimensions === null) {
+      return undefined;
+    }
+    const values = dimensions as Record<string, unknown>;
+    if (
+      !Number.isSafeInteger(values.x) ||
+      !Number.isSafeInteger(values.y) ||
+      !Number.isSafeInteger(values.z) ||
+      (values.x as number) <= 0 ||
+      (values.y as number) <= 0 ||
+      (values.z as number) <= 0
+    ) {
+      return undefined;
+    }
+  }
+  const hardware = candidate.hardwareProfile;
+  if (hardware !== undefined) {
+    if (typeof hardware !== "object" || hardware === null) {
+      return undefined;
+    }
+    const values = hardware as Record<string, unknown>;
+    if (
+      typeof values.name !== "string" ||
+      values.name.trim() === "" ||
+      ![
+        values.waveSize,
+        values.maxThreadsPerGroup,
+        values.maxThreadsPerComputeUnit,
+        values.maxGroupsPerComputeUnit,
+        values.sharedMemoryBytesPerComputeUnit,
+      ].every(
+        (number) =>
+          typeof number === "number" &&
+          Number.isSafeInteger(number) &&
+          number > 0,
+      )
+    ) {
+      return undefined;
+    }
+  }
+  return value;
+}
+
+function openAnalysisPanelStates(): AnalysisPanelViewState[] {
+  const states: (AnalysisPanelViewState | undefined)[] = [
+    memoryLayoutState,
+    compilationInfoState,
+    resourceBindingsState,
+    preprocessorExplorerState,
+    entryPointDataFlowState,
+    computeVisualizationState,
+  ];
+  return states.filter(
+    (state): state is AnalysisPanelViewState => state !== undefined,
+  );
+}
+
+function analysisPanelState(
+  kind: AnalysisPanelKind,
+): AnalysisPanelViewState | undefined {
+  return openAnalysisPanelStates().find((state) => state.kind === kind);
 }
 
 function setAnalysisPanelHtml(
@@ -312,17 +516,10 @@ function invalidateOpenAnalysisPanels(
   refreshPending = false,
 ): void {
   ++memoryLayoutGeneration;
-  const states: AnalysisPanelViewState[] = [];
-  if (memoryLayoutState !== undefined) states.push(memoryLayoutState);
-  if (compilationInfoState !== undefined) states.push(compilationInfoState);
-  if (resourceBindingsState !== undefined) states.push(resourceBindingsState);
-  if (preprocessorExplorerState !== undefined)
-    states.push(preprocessorExplorerState);
-  if (entryPointDataFlowState !== undefined)
-    states.push(entryPointDataFlowState);
-  if (computeVisualizationState !== undefined)
-    states.push(computeVisualizationState);
-  for (const state of states) {
+  for (const state of openAnalysisPanelStates()) {
+    if (!state.targetAvailable) {
+      continue;
+    }
     state.freshness.invalidate(cause, refreshPending);
     renderAnalysisPanel(state);
   }
@@ -351,6 +548,48 @@ function cancelPendingAnalysisRefreshes(): void {
   watchedFileRefreshCause = "Unknown";
 }
 
+function markAnalysisTargetUnavailable(
+  state: AnalysisPanelViewState,
+  cause: "Active shader unavailable" | "Tracked shader closed",
+): void {
+  state.targetAvailable = false;
+  switch (state.kind) {
+    case "memoryLayout":
+      ++memoryLayoutGeneration;
+      if (memoryLayoutDebounce !== undefined) {
+        clearTimeout(memoryLayoutDebounce);
+        memoryLayoutDebounce = undefined;
+      }
+      break;
+    case "compilationInfo":
+      if (compilationInfoDebounce !== undefined) {
+        clearTimeout(compilationInfoDebounce);
+        compilationInfoDebounce = undefined;
+      }
+      break;
+    case "resourceBindings":
+      if (resourceBindingsDebounce !== undefined) {
+        clearTimeout(resourceBindingsDebounce);
+        resourceBindingsDebounce = undefined;
+      }
+      break;
+    case "preprocessorExplorer":
+      if (preprocessorExplorerDebounce !== undefined) {
+        clearTimeout(preprocessorExplorerDebounce);
+        preprocessorExplorerDebounce = undefined;
+      }
+      break;
+    case "entryPointDataFlow":
+      entryPointDataFlowState?.controller.cancelScheduledRefresh();
+      break;
+    case "computeVisualization":
+      computeVisualizationState?.controller.cancelScheduledRefresh();
+      break;
+  }
+  state.freshness.invalidate(cause);
+  renderAnalysisPanel(state);
+}
+
 function compilationInfoLoadingHtml(): string {
   return `<!doctype html><html><body style="color:var(--vscode-foreground);background:var(--vscode-editor-background);font-family:var(--vscode-font-family);padding:1rem 1.5rem;"><p>Compiling…</p></body></html>`;
 }
@@ -366,7 +605,7 @@ async function refreshMemoryLayout(
   cause: AnalysisFreshnessCause = "Manual refresh",
 ): Promise<void> {
   const state = memoryLayoutState;
-  if (state === undefined) {
+  if (state?.targetAvailable !== true) {
     return;
   }
   const generation = state.freshness.beginRefresh(cause);
@@ -579,7 +818,7 @@ async function refreshCompilationInfo(
   cause: AnalysisFreshnessCause = "Manual refresh",
 ): Promise<void> {
   const state = compilationInfoState;
-  if (state === undefined) return;
+  if (state?.targetAvailable !== true) return;
   const generation = state.freshness.beginRefresh(cause);
   renderAnalysisPanel(state);
   let info: CompilationInfo | null | undefined;
@@ -632,7 +871,7 @@ async function refreshResourceBindings(
   cause: AnalysisFreshnessCause = "Manual refresh",
 ): Promise<void> {
   const state = resourceBindingsState;
-  if (state === undefined) return;
+  if (state?.targetAvailable !== true) return;
   const generation = state.freshness.beginRefresh(cause);
   renderAnalysisPanel(state);
   let info: CompilationInfo | null | undefined;
@@ -680,7 +919,7 @@ async function refreshPreprocessorExplorer(
   cause: AnalysisFreshnessCause = "Manual refresh",
 ): Promise<void> {
   const state = preprocessorExplorerState;
-  if (state === undefined) return;
+  if (state?.targetAvailable !== true) return;
   const generation = state.freshness.beginRefresh(cause);
   renderAnalysisPanel(state);
   let report: PreprocessorExplorerReport | null | undefined;
@@ -738,7 +977,7 @@ async function refreshAllOpenAnalysisPanels(
   cause: AnalysisFreshnessCause,
 ): Promise<void> {
   const tasks: Promise<void>[] = [];
-  if (memoryLayoutState !== undefined) {
+  if (memoryLayoutState?.targetAvailable) {
     if (memoryLayoutState.position !== undefined) {
       tasks.push(
         refreshMemoryLayout(
@@ -750,17 +989,17 @@ async function refreshAllOpenAnalysisPanels(
       );
     }
   }
-  if (compilationInfoState !== undefined) {
+  if (compilationInfoState?.targetAvailable) {
     tasks.push(
       refreshCompilationInfo(lifecycle, compilationInfoState.uri, cause),
     );
   }
-  if (resourceBindingsState !== undefined) {
+  if (resourceBindingsState?.targetAvailable) {
     tasks.push(
       refreshResourceBindings(lifecycle, resourceBindingsState.uri, cause),
     );
   }
-  if (preprocessorExplorerState !== undefined) {
+  if (preprocessorExplorerState?.targetAvailable) {
     tasks.push(
       refreshPreprocessorExplorer(
         lifecycle,
@@ -769,17 +1008,348 @@ async function refreshAllOpenAnalysisPanels(
       ),
     );
   }
-  const entryPointRefresh =
-    entryPointDataFlowState?.controller.refreshTracked(cause);
+  const entryPointRefresh = entryPointDataFlowState?.targetAvailable
+    ? entryPointDataFlowState.controller.refreshTracked(cause)
+    : undefined;
   if (entryPointRefresh !== undefined) {
     tasks.push(entryPointRefresh);
   }
-  const computeRefresh =
-    computeVisualizationState?.controller.refreshTracked(cause);
+  const computeRefresh = computeVisualizationState?.targetAvailable
+    ? computeVisualizationState.controller.refreshTracked(cause)
+    : undefined;
   if (computeRefresh !== undefined) {
     tasks.push(computeRefresh);
   }
   await Promise.all(tasks);
+}
+
+async function restoreOpenedAnalysisTargets(
+  context: vscode.ExtensionContext,
+  lifecycle: ClientLifecycle<ManagedClient>,
+  document: vscode.TextDocument,
+): Promise<void> {
+  const openedUri = document.uri.toString();
+  const tasks: Promise<void>[] = [];
+  for (const state of openAnalysisPanelStates()) {
+    if (
+      !isReopenedAnalysisTarget(
+        state.trackingMode,
+        state.uri.toString(),
+        openedUri,
+        state.targetAvailable,
+      )
+    ) {
+      continue;
+    }
+    state.targetAvailable = true;
+    persistAnalysisPanel(context, state);
+    renderAnalysisPanel(state);
+    switch (state.kind) {
+      case "memoryLayout": {
+        const current = memoryLayoutState;
+        if (current === state && current.position !== undefined) {
+          tasks.push(
+            refreshMemoryLayout(
+              lifecycle,
+              current.uri,
+              current.position,
+              "Active shader change",
+            ),
+          );
+        }
+        break;
+      }
+      case "compilationInfo":
+        tasks.push(
+          refreshCompilationInfo(lifecycle, state.uri, "Active shader change"),
+        );
+        break;
+      case "resourceBindings":
+        tasks.push(
+          refreshResourceBindings(lifecycle, state.uri, "Active shader change"),
+        );
+        break;
+      case "preprocessorExplorer":
+        tasks.push(
+          refreshPreprocessorExplorer(
+            lifecycle,
+            state.uri,
+            "Active shader change",
+          ),
+        );
+        break;
+      case "entryPointDataFlow": {
+        const refresh =
+          entryPointDataFlowState === state
+            ? entryPointDataFlowState.controller.refreshTracked(
+                "Active shader change",
+              )
+            : undefined;
+        if (refresh !== undefined) tasks.push(refresh);
+        break;
+      }
+      case "computeVisualization": {
+        const refresh =
+          computeVisualizationState === state
+            ? computeVisualizationState.controller.refreshTracked(
+                "Active shader change",
+              )
+            : undefined;
+        if (refresh !== undefined) tasks.push(refresh);
+        break;
+      }
+    }
+  }
+  await Promise.all(tasks);
+}
+
+function isAnalysisPanelKind(value: string): value is AnalysisPanelKind {
+  return (
+    value === "memoryLayout" ||
+    value === "compilationInfo" ||
+    value === "resourceBindings" ||
+    value === "preprocessorExplorer" ||
+    value === "entryPointDataFlow" ||
+    value === "computeVisualization"
+  );
+}
+
+function targetRequiresRefresh(state: AnalysisPanelViewState): boolean {
+  return !state.targetAvailable;
+}
+
+async function retargetFollowingPanel(
+  context: vscode.ExtensionContext,
+  lifecycle: ClientLifecycle<ManagedClient>,
+  kind: AnalysisPanelKind,
+  editor: vscode.TextEditor,
+): Promise<void> {
+  const uri = editor.document.uri;
+  switch (kind) {
+    case "memoryLayout": {
+      const state = memoryLayoutState;
+      if (state?.trackingMode !== "follow") return;
+      const position = editor.selection.active;
+      if (
+        state.uri.toString() === uri.toString() &&
+        state.position?.line === position.line &&
+        state.position.character === position.character &&
+        !targetRequiresRefresh(state)
+      ) {
+        return;
+      }
+      ++memoryLayoutGeneration;
+      if (memoryLayoutDebounce !== undefined) {
+        clearTimeout(memoryLayoutDebounce);
+        memoryLayoutDebounce = undefined;
+      }
+      state.uri = uri;
+      state.position = position;
+      state.targetAvailable = true;
+      persistAnalysisPanel(context, state);
+      await refreshMemoryLayout(
+        lifecycle,
+        uri,
+        position,
+        "Active shader change",
+      );
+      return;
+    }
+    case "compilationInfo": {
+      const state = compilationInfoState;
+      if (
+        state?.trackingMode !== "follow" ||
+        (state.uri.toString() === uri.toString() &&
+          !targetRequiresRefresh(state))
+      ) {
+        return;
+      }
+      if (compilationInfoDebounce !== undefined) {
+        clearTimeout(compilationInfoDebounce);
+        compilationInfoDebounce = undefined;
+      }
+      state.uri = uri;
+      state.targetAvailable = true;
+      persistAnalysisPanel(context, state);
+      await refreshCompilationInfo(lifecycle, uri, "Active shader change");
+      return;
+    }
+    case "resourceBindings": {
+      const state = resourceBindingsState;
+      if (
+        state?.trackingMode !== "follow" ||
+        (state.uri.toString() === uri.toString() &&
+          !targetRequiresRefresh(state))
+      ) {
+        return;
+      }
+      if (resourceBindingsDebounce !== undefined) {
+        clearTimeout(resourceBindingsDebounce);
+        resourceBindingsDebounce = undefined;
+      }
+      state.uri = uri;
+      state.targetAvailable = true;
+      persistAnalysisPanel(context, state);
+      await refreshResourceBindings(lifecycle, uri, "Active shader change");
+      return;
+    }
+    case "preprocessorExplorer": {
+      const state = preprocessorExplorerState;
+      if (
+        state?.trackingMode !== "follow" ||
+        (state.uri.toString() === uri.toString() &&
+          !targetRequiresRefresh(state))
+      ) {
+        return;
+      }
+      if (preprocessorExplorerDebounce !== undefined) {
+        clearTimeout(preprocessorExplorerDebounce);
+        preprocessorExplorerDebounce = undefined;
+      }
+      state.uri = uri;
+      state.targetAvailable = true;
+      persistAnalysisPanel(context, state);
+      await refreshPreprocessorExplorer(lifecycle, uri, "Active shader change");
+      return;
+    }
+    case "entryPointDataFlow": {
+      const state = entryPointDataFlowState;
+      if (
+        state?.trackingMode !== "follow" ||
+        (state.uri.toString() === uri.toString() &&
+          !targetRequiresRefresh(state))
+      ) {
+        return;
+      }
+      state.controller.cancelScheduledRefresh();
+      state.uri = uri;
+      state.targetAvailable = true;
+      state.controller.open(uri.toString());
+      persistAnalysisPanel(context, state);
+      await state.controller.refresh(uri.toString(), "Active shader change");
+      return;
+    }
+    case "computeVisualization": {
+      const state = computeVisualizationState;
+      if (
+        state?.trackingMode !== "follow" ||
+        (state.uri.toString() === uri.toString() &&
+          !targetRequiresRefresh(state))
+      ) {
+        return;
+      }
+      state.controller.cancelScheduledRefresh();
+      state.uri = uri;
+      state.targetAvailable = true;
+      state.controller.open(uri.toString());
+      persistAnalysisPanel(context, state);
+      await state.controller.refresh(uri.toString(), "Active shader change");
+    }
+  }
+}
+
+async function followActiveShader(
+  context: vscode.ExtensionContext,
+  lifecycle: ClientLifecycle<ManagedClient>,
+  editor: vscode.TextEditor | undefined,
+  kind?: AnalysisPanelKind,
+): Promise<void> {
+  const states =
+    kind === undefined
+      ? openAnalysisPanelStates().filter(
+          (state) => state.trackingMode === "follow",
+        )
+      : [analysisPanelState(kind)].filter(
+          (state): state is AnalysisPanelViewState =>
+            state?.trackingMode === "follow",
+        );
+  if (editor?.document.languageId !== "hlsl") {
+    for (const state of states) {
+      if (
+        analysisTargetTransition(
+          state.trackingMode,
+          state.uri.toString(),
+          undefined,
+          state.targetAvailable,
+        ) === "unavailable"
+      ) {
+        markAnalysisTargetUnavailable(state, "Active shader unavailable");
+      }
+    }
+    return;
+  }
+  await Promise.all(
+    states.map((state) =>
+      retargetFollowingPanel(context, lifecycle, state.kind, editor),
+    ),
+  );
+}
+
+function createEntryPointDataFlowController(
+  lifecycle: ClientLifecycle<ManagedClient>,
+  panel: vscode.WebviewPanel,
+  freshness: AnalysisFreshness,
+): PanelController<EntryPointDataFlow> {
+  return new PanelController<EntryPointDataFlow>(
+    {
+      setHtml: (html) => {
+        if (entryPointDataFlowState?.panel === panel) {
+          setAnalysisPanelHtml(entryPointDataFlowState, html);
+        }
+      },
+      setTitle: (title) => {
+        panel.title = title;
+      },
+      setFreshness: (state) => {
+        if (entryPointDataFlowState?.panel === panel) {
+          setAnalysisPanelFreshness(entryPointDataFlowState, state);
+        }
+      },
+    },
+    (uriString) =>
+      lifecycle.withClient((client) =>
+        client.entryPointDataFlow(vscode.Uri.parse(uriString)),
+      ),
+    resolveEntryPointDataFlowRefresh,
+    nodeScheduler,
+    500,
+    freshness,
+  );
+}
+
+function createComputeVisualizationController(
+  lifecycle: ClientLifecycle<ManagedClient>,
+  panel: vscode.WebviewPanel,
+  freshness: AnalysisFreshness,
+): PanelController<ComputeVisualization> {
+  return new PanelController<ComputeVisualization>(
+    {
+      setHtml: (html) => {
+        if (computeVisualizationState?.panel === panel) {
+          setAnalysisPanelHtml(computeVisualizationState, html);
+        }
+      },
+      setTitle: (title) => {
+        panel.title = title;
+      },
+      setFreshness: (state) => {
+        if (computeVisualizationState?.panel === panel) {
+          setAnalysisPanelFreshness(computeVisualizationState, state);
+        }
+      },
+    },
+    (uriString) =>
+      lifecycle.withClient((client) =>
+        client.computeVisualization(
+          vscode.Uri.parse(uriString),
+          computeVisualizationState?.options ?? {},
+        ),
+      ),
+    resolveComputeVisualizationRefresh,
+    nodeScheduler,
+    500,
+    freshness,
+  );
 }
 
 // Editor settings that become higher-precedence overrides affecting what
@@ -1425,6 +1995,271 @@ export async function activate(
     void restart();
   };
 
+  const restoreAnalysisPanel = async (
+    kind: AnalysisPanelKind,
+    panel: vscode.WebviewPanel,
+  ): Promise<void> => {
+    const persisted = persistedAnalysisPanel(context, kind);
+    if (persisted === undefined) {
+      panel.dispose();
+      return;
+    }
+    let uri: vscode.Uri;
+    try {
+      uri = vscode.Uri.parse(persisted.uri, true);
+    } catch {
+      panel.dispose();
+      return;
+    }
+    const activeEditor = vscode.window.activeTextEditor;
+    if (
+      persisted.mode === "follow" &&
+      activeEditor?.document.languageId === "hlsl"
+    ) {
+      uri = activeEditor.document.uri;
+    }
+    const targetAvailable =
+      persisted.mode === "follow"
+        ? activeEditor?.document.languageId === "hlsl"
+        : vscode.workspace.textDocuments.some(
+            (document) => document.uri.toString() === uri.toString(),
+          );
+    panel.webview.options = {
+      enableScripts: false,
+      enableCommandUris: analysisPanelCommandUris(kind),
+    };
+
+    switch (kind) {
+      case "memoryLayout": {
+        const position =
+          persisted.mode === "follow" &&
+          activeEditor?.document.languageId === "hlsl"
+            ? activeEditor.selection.active
+            : new vscode.Position(
+                persisted.line ?? 0,
+                persisted.character ?? 0,
+              );
+        memoryLayoutState = {
+          kind,
+          trackingMode: persisted.mode,
+          targetAvailable,
+          panel,
+          freshness: new AnalysisFreshness(),
+          refreshCommand: refreshMemoryLayoutCommand,
+          html: memoryLayoutErrorHtml(
+            "Restoring the tracked memory-layout position…",
+          ),
+          uri,
+          position,
+          hasContent: false,
+        };
+        renderAnalysisPanel(memoryLayoutState);
+        panel.onDidDispose(() => {
+          if (memoryLayoutState?.panel === panel) {
+            ++memoryLayoutGeneration;
+            memoryLayoutState = undefined;
+          }
+        });
+        persistAnalysisPanel(context, memoryLayoutState);
+        if (targetAvailable) {
+          await refreshMemoryLayout(lifecycle, uri, position);
+        } else {
+          memoryLayoutState.freshness.invalidate(
+            persisted.mode === "follow"
+              ? "Active shader unavailable"
+              : "Tracked shader closed",
+          );
+          renderAnalysisPanel(memoryLayoutState);
+        }
+        return;
+      }
+      case "compilationInfo":
+        compilationInfoState = {
+          kind,
+          trackingMode: persisted.mode,
+          targetAvailable,
+          panel,
+          freshness: new AnalysisFreshness(),
+          refreshCommand: refreshCompilationInfoCommand,
+          html: compilationInfoLoadingHtml(),
+          uri,
+          hasContent: false,
+          lastInfo: undefined,
+          lastInfoUri: undefined,
+        };
+        renderAnalysisPanel(compilationInfoState);
+        panel.onDidDispose(() => {
+          if (compilationInfoState?.panel === panel) {
+            compilationInfoState = undefined;
+          }
+        });
+        persistAnalysisPanel(context, compilationInfoState);
+        if (targetAvailable) {
+          await refreshCompilationInfo(lifecycle, uri);
+        } else {
+          compilationInfoState.freshness.invalidate(
+            persisted.mode === "follow"
+              ? "Active shader unavailable"
+              : "Tracked shader closed",
+          );
+          renderAnalysisPanel(compilationInfoState);
+        }
+        return;
+      case "resourceBindings":
+        resourceBindingsState = {
+          kind,
+          trackingMode: persisted.mode,
+          targetAvailable,
+          panel,
+          freshness: new AnalysisFreshness(),
+          refreshCommand: refreshResourceBindingsCommand,
+          html: resourceBindingsLoadingHtml(),
+          uri,
+          hasContent: false,
+        };
+        renderAnalysisPanel(resourceBindingsState);
+        panel.onDidDispose(() => {
+          if (resourceBindingsState?.panel === panel) {
+            resourceBindingsState = undefined;
+          }
+        });
+        persistAnalysisPanel(context, resourceBindingsState);
+        if (targetAvailable) {
+          await refreshResourceBindings(lifecycle, uri);
+        } else {
+          resourceBindingsState.freshness.invalidate(
+            persisted.mode === "follow"
+              ? "Active shader unavailable"
+              : "Tracked shader closed",
+          );
+          renderAnalysisPanel(resourceBindingsState);
+        }
+        return;
+      case "preprocessorExplorer":
+        preprocessorExplorerState = {
+          kind,
+          trackingMode: persisted.mode,
+          targetAvailable,
+          panel,
+          freshness: new AnalysisFreshness(),
+          refreshCommand: refreshPreprocessorExplorerCommand,
+          html: preprocessorExplorerLoadingHtml(),
+          uri,
+          hasContent: false,
+        };
+        renderAnalysisPanel(preprocessorExplorerState);
+        panel.onDidDispose(() => {
+          if (preprocessorExplorerState?.panel === panel) {
+            preprocessorExplorerState = undefined;
+          }
+        });
+        persistAnalysisPanel(context, preprocessorExplorerState);
+        if (targetAvailable) {
+          await refreshPreprocessorExplorer(lifecycle, uri);
+        } else {
+          preprocessorExplorerState.freshness.invalidate(
+            persisted.mode === "follow"
+              ? "Active shader unavailable"
+              : "Tracked shader closed",
+          );
+          renderAnalysisPanel(preprocessorExplorerState);
+        }
+        return;
+      case "entryPointDataFlow": {
+        const freshness = new AnalysisFreshness();
+        const controller = createEntryPointDataFlowController(
+          lifecycle,
+          panel,
+          freshness,
+        );
+        entryPointDataFlowState = {
+          kind,
+          trackingMode: persisted.mode,
+          targetAvailable,
+          uri,
+          panel,
+          controller,
+          freshness,
+          refreshCommand: refreshEntryPointDataFlowCommand,
+          html: entryPointDataFlowLoadingHtml(),
+        };
+        controller.open(uri.toString());
+        renderAnalysisPanel(entryPointDataFlowState);
+        panel.onDidDispose(() => {
+          if (entryPointDataFlowState?.panel === panel) {
+            entryPointDataFlowState.controller.dispose();
+            entryPointDataFlowState = undefined;
+          }
+        });
+        persistAnalysisPanel(context, entryPointDataFlowState);
+        if (targetAvailable) {
+          await controller.refresh(uri.toString());
+        } else {
+          controller.markStale(
+            persisted.mode === "follow"
+              ? "Active shader unavailable"
+              : "Tracked shader closed",
+          );
+        }
+        return;
+      }
+      case "computeVisualization": {
+        const freshness = new AnalysisFreshness();
+        const controller = createComputeVisualizationController(
+          lifecycle,
+          panel,
+          freshness,
+        );
+        computeVisualizationState = {
+          kind,
+          trackingMode: persisted.mode,
+          targetAvailable,
+          uri,
+          panel,
+          controller,
+          freshness,
+          refreshCommand: refreshComputeVisualizationCommand,
+          html: computeVisualizationLoadingHtml(),
+          options: persisted.options ?? {},
+        };
+        controller.open(uri.toString());
+        renderAnalysisPanel(computeVisualizationState);
+        panel.onDidDispose(() => {
+          if (computeVisualizationState?.panel === panel) {
+            computeVisualizationState.controller.dispose();
+            computeVisualizationState = undefined;
+          }
+        });
+        persistAnalysisPanel(context, computeVisualizationState);
+        if (targetAvailable) {
+          await controller.refresh(uri.toString());
+        } else {
+          controller.markStale(
+            persisted.mode === "follow"
+              ? "Active shader unavailable"
+              : "Tracked shader closed",
+          );
+        }
+      }
+    }
+  };
+
+  const serializerKinds: readonly (readonly [string, AnalysisPanelKind])[] = [
+    ["hlslMemoryLayout", "memoryLayout"],
+    ["hlslCompilationInfo", "compilationInfo"],
+    ["hlslResourceBindings", "resourceBindings"],
+    ["hlslPreprocessorExplorer", "preprocessorExplorer"],
+    ["hlslEntryPointDataFlow", "entryPointDataFlow"],
+    ["hlslComputeVisualization", "computeVisualization"],
+  ];
+  for (const [viewType, kind] of serializerKinds) {
+    context.subscriptions.push(
+      vscode.window.registerWebviewPanelSerializer(viewType, {
+        deserializeWebviewPanel: (panel) => restoreAnalysisPanel(kind, panel),
+      }),
+    );
+  }
+
   context.subscriptions.push(
     vscode.commands.registerCommand("hlsl.restartServer", restart),
     vscode.commands.registerCommand("hlsl.stopServer", async () => {
@@ -1497,6 +2332,30 @@ export async function activate(
       outputChannel.show(true);
     }),
     vscode.commands.registerCommand(
+      setAnalysisTrackingModeCommand,
+      async (rawArgument: unknown) => {
+        const command = parseAnalysisTrackingCommand(rawArgument);
+        if (command === undefined || !isAnalysisPanelKind(command.panel)) {
+          return;
+        }
+        const state = analysisPanelState(command.panel);
+        if (state === undefined) {
+          return;
+        }
+        state.trackingMode = command.mode;
+        persistAnalysisPanel(context, state);
+        renderAnalysisPanel(state);
+        if (command.mode === "follow") {
+          await followActiveShader(
+            context,
+            lifecycle,
+            vscode.window.activeTextEditor,
+            command.panel,
+          );
+        }
+      },
+    ),
+    vscode.commands.registerCommand(
       "hlsl.showMemoryLayout",
       async (commandArgument: unknown) => {
         const editor = vscode.window.activeTextEditor;
@@ -1539,10 +2398,13 @@ export async function activate(
             vscode.ViewColumn.Beside,
             {
               enableScripts: false,
-              enableCommandUris: [refreshMemoryLayoutCommand],
+              enableCommandUris: analysisPanelCommandUris("memoryLayout"),
             },
           );
           memoryLayoutState = {
+            kind: "memoryLayout",
+            trackingMode: defaultAnalysisTrackingMode,
+            targetAvailable: true,
             panel,
             freshness: new AnalysisFreshness(),
             refreshCommand: refreshMemoryLayoutCommand,
@@ -1554,6 +2416,7 @@ export async function activate(
           const initialGeneration =
             memoryLayoutState.freshness.beginRefresh("Manual refresh");
           memoryLayoutState.freshness.succeed(initialGeneration);
+          persistAnalysisPanel(context, memoryLayoutState);
           renderAnalysisPanel(memoryLayoutState);
           panel.onDidDispose(() => {
             if (memoryLayoutState?.panel === panel) {
@@ -1569,6 +2432,8 @@ export async function activate(
         } else {
           memoryLayoutState.uri = uri;
           memoryLayoutState.position = position;
+          memoryLayoutState.targetAvailable = true;
+          persistAnalysisPanel(context, memoryLayoutState);
           memoryLayoutState.panel.reveal(vscode.ViewColumn.Beside);
         }
         if (memoryLayoutState.uri.toString() === uri.toString()) {
@@ -1587,6 +2452,8 @@ export async function activate(
       const uri = editor.document.uri;
       if (compilationInfoState !== undefined) {
         compilationInfoState.uri = uri;
+        compilationInfoState.targetAvailable = true;
+        persistAnalysisPanel(context, compilationInfoState);
         compilationInfoState.panel.reveal(vscode.ViewColumn.Beside);
       } else {
         const panel = vscode.window.createWebviewPanel(
@@ -1600,11 +2467,7 @@ export async function activate(
             // allowlists only Copy, Save, and this panel's Refresh -- never
             // `true` (which would let static HTML trigger arbitrary
             // commands).
-            enableCommandUris: [
-              copyDisassemblyCommand,
-              saveDisassemblyCommand,
-              refreshCompilationInfoCommand,
-            ],
+            enableCommandUris: analysisPanelCommandUris("compilationInfo"),
           },
         );
         panel.onDidDispose(() => {
@@ -1613,6 +2476,9 @@ export async function activate(
           }
         });
         compilationInfoState = {
+          kind: "compilationInfo",
+          trackingMode: defaultAnalysisTrackingMode,
+          targetAvailable: true,
           panel,
           freshness: new AnalysisFreshness(),
           refreshCommand: refreshCompilationInfoCommand,
@@ -1622,6 +2488,7 @@ export async function activate(
           lastInfo: undefined,
           lastInfoUri: undefined,
         };
+        persistAnalysisPanel(context, compilationInfoState);
         renderAnalysisPanel(compilationInfoState);
       }
       await refreshCompilationInfo(lifecycle, uri);
@@ -1701,6 +2568,8 @@ export async function activate(
       const uri = editor.document.uri;
       if (resourceBindingsState !== undefined) {
         resourceBindingsState.uri = uri;
+        resourceBindingsState.targetAvailable = true;
+        persistAnalysisPanel(context, resourceBindingsState);
         resourceBindingsState.panel.reveal(vscode.ViewColumn.Beside);
       } else {
         const panel = vscode.window.createWebviewPanel(
@@ -1713,10 +2582,7 @@ export async function activate(
             // labels link through plain `command:` URIs, and this allowlists
             // only navigation and this panel's Refresh -- never `true` (which
             // would let static HTML trigger arbitrary commands).
-            enableCommandUris: [
-              openResourceLocationCommand,
-              refreshResourceBindingsCommand,
-            ],
+            enableCommandUris: analysisPanelCommandUris("resourceBindings"),
           },
         );
         panel.onDidDispose(() => {
@@ -1725,6 +2591,9 @@ export async function activate(
           }
         });
         resourceBindingsState = {
+          kind: "resourceBindings",
+          trackingMode: defaultAnalysisTrackingMode,
+          targetAvailable: true,
           panel,
           freshness: new AnalysisFreshness(),
           refreshCommand: refreshResourceBindingsCommand,
@@ -1732,6 +2601,7 @@ export async function activate(
           uri,
           hasContent: false,
         };
+        persistAnalysisPanel(context, resourceBindingsState);
         renderAnalysisPanel(resourceBindingsState);
       }
       await refreshResourceBindings(lifecycle, uri);
@@ -1797,6 +2667,8 @@ export async function activate(
         const uri = editor.document.uri;
         if (preprocessorExplorerState !== undefined) {
           preprocessorExplorerState.uri = uri;
+          preprocessorExplorerState.targetAvailable = true;
+          persistAnalysisPanel(context, preprocessorExplorerState);
           preprocessorExplorerState.panel.reveal(vscode.ViewColumn.Beside);
         } else {
           const panel = vscode.window.createWebviewPanel(
@@ -1810,10 +2682,9 @@ export async function activate(
               // URIs, and this allowlists only navigation and this panel's
               // Refresh -- never `true` (which would let static HTML trigger
               // arbitrary commands).
-              enableCommandUris: [
-                openPreprocessorLocationCommand,
-                refreshPreprocessorExplorerCommand,
-              ],
+              enableCommandUris: analysisPanelCommandUris(
+                "preprocessorExplorer",
+              ),
             },
           );
           panel.onDidDispose(() => {
@@ -1822,6 +2693,9 @@ export async function activate(
             }
           });
           preprocessorExplorerState = {
+            kind: "preprocessorExplorer",
+            trackingMode: defaultAnalysisTrackingMode,
+            targetAvailable: true,
             panel,
             freshness: new AnalysisFreshness(),
             refreshCommand: refreshPreprocessorExplorerCommand,
@@ -1829,6 +2703,7 @@ export async function activate(
             uri,
             hasContent: false,
           };
+          persistAnalysisPanel(context, preprocessorExplorerState);
           renderAnalysisPanel(preprocessorExplorerState);
         }
         await refreshPreprocessorExplorer(lifecycle, uri);
@@ -1894,6 +2769,9 @@ export async function activate(
       if (entryPointDataFlowState !== undefined) {
         const { panel, controller } = entryPointDataFlowState;
         controller.open(uri.toString());
+        entryPointDataFlowState.uri = uri;
+        entryPointDataFlowState.targetAvailable = true;
+        persistAnalysisPanel(context, entryPointDataFlowState);
         panel.reveal(vscode.ViewColumn.Beside);
       } else {
         const panel = vscode.window.createWebviewPanel(
@@ -1907,45 +2785,27 @@ export async function activate(
             // `command:` URIs, and this allowlists only navigation and this
             // panel's Refresh -- never `true` (which would let static
             // HTML trigger arbitrary commands).
-            enableCommandUris: [
-              openEntryPointDataFlowLocationCommand,
-              refreshEntryPointDataFlowCommand,
-            ],
+            enableCommandUris: analysisPanelCommandUris("entryPointDataFlow"),
           },
         );
         const freshness = new AnalysisFreshness();
-        const controller = new PanelController<EntryPointDataFlow>(
-          {
-            setHtml: (html) => {
-              if (entryPointDataFlowState?.panel === panel) {
-                setAnalysisPanelHtml(entryPointDataFlowState, html);
-              }
-            },
-            setTitle: (title) => {
-              panel.title = title;
-            },
-            setFreshness: (state) => {
-              if (entryPointDataFlowState?.panel === panel) {
-                setAnalysisPanelFreshness(entryPointDataFlowState, state);
-              }
-            },
-          },
-          (uriString) =>
-            lifecycle.withClient((client) =>
-              client.entryPointDataFlow(vscode.Uri.parse(uriString)),
-            ),
-          resolveEntryPointDataFlowRefresh,
-          nodeScheduler,
-          500,
+        const controller = createEntryPointDataFlowController(
+          lifecycle,
+          panel,
           freshness,
         );
         const viewState: EntryPointDataFlowViewState = {
+          kind: "entryPointDataFlow",
+          trackingMode: defaultAnalysisTrackingMode,
+          targetAvailable: true,
+          uri,
           panel,
           controller,
           freshness,
           refreshCommand: refreshEntryPointDataFlowCommand,
           html: entryPointDataFlowLoadingHtml(),
         };
+        persistAnalysisPanel(context, viewState);
         renderAnalysisPanel(viewState);
         controller.open(uri.toString());
         panel.onDidDispose(() => {
@@ -2008,6 +2868,9 @@ export async function activate(
         if (computeVisualizationState !== undefined) {
           const { panel, controller } = computeVisualizationState;
           controller.open(uri.toString());
+          computeVisualizationState.uri = uri;
+          computeVisualizationState.targetAvailable = true;
+          persistAnalysisPanel(context, computeVisualizationState);
           panel.reveal(vscode.ViewColumn.Beside);
         } else {
           const panel = vscode.window.createWebviewPanel(
@@ -2016,43 +2879,22 @@ export async function activate(
             vscode.ViewColumn.Beside,
             {
               enableScripts: false,
-              enableCommandUris: [
-                configureComputeVisualizationCommand,
-                openComputeVisualizationLocationCommand,
-                refreshComputeVisualizationCommand,
-              ],
+              enableCommandUris: analysisPanelCommandUris(
+                "computeVisualization",
+              ),
             },
           );
           const freshness = new AnalysisFreshness();
-          const controller = new PanelController<ComputeVisualization>(
-            {
-              setHtml: (html) => {
-                if (computeVisualizationState?.panel === panel) {
-                  setAnalysisPanelHtml(computeVisualizationState, html);
-                }
-              },
-              setTitle: (title) => {
-                panel.title = title;
-              },
-              setFreshness: (state) => {
-                if (computeVisualizationState?.panel === panel) {
-                  setAnalysisPanelFreshness(computeVisualizationState, state);
-                }
-              },
-            },
-            (uriString) =>
-              lifecycle.withClient((client) =>
-                client.computeVisualization(
-                  vscode.Uri.parse(uriString),
-                  computeVisualizationState?.options ?? {},
-                ),
-              ),
-            resolveComputeVisualizationRefresh,
-            nodeScheduler,
-            500,
+          const controller = createComputeVisualizationController(
+            lifecycle,
+            panel,
             freshness,
           );
           const viewState: ComputeVisualizationViewState = {
+            kind: "computeVisualization",
+            trackingMode: defaultAnalysisTrackingMode,
+            targetAvailable: true,
+            uri,
             panel,
             controller,
             freshness,
@@ -2060,6 +2902,7 @@ export async function activate(
             html: computeVisualizationLoadingHtml(),
             options: {},
           };
+          persistAnalysisPanel(context, viewState);
           renderAnalysisPanel(viewState);
           controller.open(uri.toString());
           panel.onDidDispose(() => {
@@ -2085,7 +2928,10 @@ export async function activate(
           return;
         }
         state.options = options;
-        await state.controller.refreshTracked("Configuration change");
+        persistAnalysisPanel(context, state);
+        if (state.targetAvailable) {
+          await state.controller.refreshTracked("Configuration change");
+        }
       },
     ),
     vscode.commands.registerCommand(
@@ -2170,17 +3016,21 @@ export async function activate(
     vscode.commands.registerCommand(
       refreshEntryPointDataFlowCommand,
       async () => {
-        await entryPointDataFlowState?.controller.refreshTracked(
-          "Manual refresh",
-        );
+        if (entryPointDataFlowState?.targetAvailable) {
+          await entryPointDataFlowState.controller.refreshTracked(
+            "Manual refresh",
+          );
+        }
       },
     ),
     vscode.commands.registerCommand(
       refreshComputeVisualizationCommand,
       async () => {
-        await computeVisualizationState?.controller.refreshTracked(
-          "Manual refresh",
-        );
+        if (computeVisualizationState?.targetAvailable) {
+          await computeVisualizationState.controller.refreshTracked(
+            "Manual refresh",
+          );
+        }
       },
     ),
     vscode.commands.registerCommand("hlsl.selectVariant", async () => {
@@ -2273,8 +3123,9 @@ export async function activate(
         );
       }
     }),
-    vscode.window.onDidChangeActiveTextEditor(() => {
+    vscode.window.onDidChangeActiveTextEditor((editor) => {
       void updateVariantStatus();
+      void followActiveShader(context, lifecycle, editor);
     }),
     vscode.workspace.onDidChangeConfiguration(async (event) => {
       const resource = configurationResource();
@@ -2328,6 +3179,20 @@ export async function activate(
       void refreshAllOpenAnalysisPanels(lifecycle, "Source edit");
       effectiveContextStatusDebouncer?.schedule();
     }),
+    vscode.workspace.onDidOpenTextDocument((document) => {
+      if (document.languageId === "hlsl") {
+        void restoreOpenedAnalysisTargets(context, lifecycle, document);
+      }
+    }),
+    vscode.workspace.onDidCloseTextDocument((document) => {
+      const closedUri = document.uri.toString();
+      for (const state of openAnalysisPanelStates()) {
+        if (state.uri.toString() !== closedUri) {
+          continue;
+        }
+        markAnalysisTargetUnavailable(state, "Tracked shader closed");
+      }
+    }),
     vscode.workspace.onDidChangeTextDocument((event) => {
       // Same conservative "any open HLSL document" trigger as the save
       // handler above, but debounced per panel so a burst of keystrokes
@@ -2342,7 +3207,7 @@ export async function activate(
       ) {
         effectiveContextStatusDebouncer?.schedule();
       }
-      if (memoryLayoutState !== undefined) {
+      if (memoryLayoutState?.targetAvailable) {
         if (memoryLayoutDebounce !== undefined) {
           clearTimeout(memoryLayoutDebounce);
         }
@@ -2361,6 +3226,7 @@ export async function activate(
             update.position.line,
             update.position.character,
           );
+          persistAnalysisPanel(context, memoryLayoutState);
           if (update.shouldRefresh) {
             memoryLayoutState.freshness.invalidate("Source edit", true);
             renderAnalysisPanel(memoryLayoutState);
@@ -2377,7 +3243,7 @@ export async function activate(
           }
         }
       }
-      if (compilationInfoState !== undefined) {
+      if (compilationInfoState?.targetAvailable) {
         compilationInfoState.freshness.invalidate("Source edit", true);
         renderAnalysisPanel(compilationInfoState);
         if (compilationInfoDebounce !== undefined) {
@@ -2393,7 +3259,7 @@ export async function activate(
           }
         }, 500);
       }
-      if (resourceBindingsState !== undefined) {
+      if (resourceBindingsState?.targetAvailable) {
         resourceBindingsState.freshness.invalidate("Source edit", true);
         renderAnalysisPanel(resourceBindingsState);
         if (resourceBindingsDebounce !== undefined) {
@@ -2409,7 +3275,7 @@ export async function activate(
           }
         }, 500);
       }
-      if (preprocessorExplorerState !== undefined) {
+      if (preprocessorExplorerState?.targetAvailable) {
         preprocessorExplorerState.freshness.invalidate("Source edit", true);
         renderAnalysisPanel(preprocessorExplorerState);
         if (preprocessorExplorerDebounce !== undefined) {
@@ -2425,8 +3291,12 @@ export async function activate(
           }
         }, 500);
       }
-      entryPointDataFlowState?.controller.scheduleDebouncedRefresh();
-      computeVisualizationState?.controller.scheduleDebouncedRefresh();
+      if (entryPointDataFlowState?.targetAvailable) {
+        entryPointDataFlowState.controller.scheduleDebouncedRefresh();
+      }
+      if (computeVisualizationState?.targetAvailable) {
+        computeVisualizationState.controller.scheduleDebouncedRefresh();
+      }
     }),
     {
       dispose(): void {
