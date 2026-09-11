@@ -3,10 +3,12 @@ import test from "node:test";
 
 import {
   AnalysisFreshness,
+  analysisTrackingCommandUri,
   analysisConfigurationChange,
   analysisFreshnessText,
   initialAnalysisFreshness,
   reduceAnalysisFreshness,
+  parseAnalysisTrackingCommand,
   withAnalysisFreshness,
 } from "../../src/analysisFreshness";
 
@@ -122,4 +124,50 @@ void test("status renderer is script-free, escaped, replaceable, and exposes onl
     analysisFreshnessText({ status: "Current", cause: "Unknown" }),
     "Current",
   );
+});
+
+void test("status renderer exposes explicit pinned and follow controls without scripts", () => {
+  const original =
+    "<!doctype html><html><head></head><body><h1>Result</h1></body></html>";
+  const pinned = withAnalysisFreshness(
+    original,
+    { status: "Current", cause: "Unknown" },
+    "hlsl.refreshMemoryLayout",
+    {
+      mode: "pinned",
+      target: "shaders/<main>.hlsl",
+      command: "hlsl.setAnalysisTrackingMode",
+      panel: "memoryLayout",
+    },
+  );
+  assert.match(pinned, /Pinned: shaders\/&lt;main&gt;\.hlsl/);
+  assert.match(pinned, />Follow active shader</);
+  assert.doesNotMatch(pinned, /<script/i);
+
+  const followUri = analysisTrackingCommandUri({
+    mode: "follow",
+    target: "main.hlsl",
+    command: "hlsl.setAnalysisTrackingMode",
+    panel: "compilationInfo",
+  });
+  assert.match(followUri, /^command:hlsl\.setAnalysisTrackingMode\?/);
+  const encodedArgs = followUri.slice(followUri.indexOf("?") + 1);
+  assert.deepEqual(JSON.parse(decodeURIComponent(encodedArgs)), [
+    { panel: "compilationInfo", mode: "pinned" },
+  ]);
+});
+
+void test("tracking command parser accepts only explicit panel and mode values", () => {
+  assert.deepEqual(
+    parseAnalysisTrackingCommand({
+      panel: "resourceBindings",
+      mode: "follow",
+    }),
+    { panel: "resourceBindings", mode: "follow" },
+  );
+  assert.equal(
+    parseAnalysisTrackingCommand({ panel: "resourceBindings", mode: "other" }),
+    undefined,
+  );
+  assert.equal(parseAnalysisTrackingCommand("follow"), undefined);
 });

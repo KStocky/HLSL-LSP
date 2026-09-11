@@ -14,7 +14,7 @@ using Microsoft.VisualStudio.TextManager.Interop;
 namespace HlslLsp.VisualStudio.Bootstrap;
 
 [Guid("495a0395-bc57-4591-a201-b278475d516e")]
-public sealed class ComputeVisualizationToolWindow : ToolWindowPane, IAnalysisFreshnessView
+public sealed class ComputeVisualizationToolWindow : ToolWindowPane, IAnalysisTrackingView
 {
     private readonly ComputeVisualizationControl control = new();
     private readonly ComputeVisualizationInteractionState interactionState = new();
@@ -46,6 +46,13 @@ public sealed class ComputeVisualizationToolWindow : ToolWindowPane, IAnalysisFr
 
     internal Uri DocumentUri => interactionState.RequestedDocumentUri;
 
+    internal AnalysisTrackingMode TrackingMode { get; private set; } =
+        AnalysisTrackingPolicy.DefaultMode;
+
+    AnalysisTrackingMode IAnalysisTrackingView.TrackingMode => TrackingMode;
+
+    Uri IAnalysisTrackingView.TrackingDocumentUri => DocumentUri;
+
     internal Uri DisplayedDocumentUri => interactionState.DisplayedDocumentUri;
 
     internal ComputeVisualizationOptions SubmittedOptions =>
@@ -55,6 +62,7 @@ public sealed class ComputeVisualizationToolWindow : ToolWindowPane, IAnalysisFr
     {
         ThreadHelper.ThrowIfNotOnUIThread();
         interactionState.TrackRequest(uri);
+        freshnessHeader.UpdateTracking(TrackingMode, DocumentUri);
     }
 
     internal void SetReport(
@@ -66,6 +74,7 @@ public sealed class ComputeVisualizationToolWindow : ToolWindowPane, IAnalysisFr
         interactionState.MarkDisplayed(uri);
         freshness.Succeed();
         freshnessHeader.Update(freshness.State);
+        freshnessHeader.UpdateTracking(TrackingMode, DocumentUri);
         control.SetOptionsIfDocumentChanged(options);
         control.SetReport(report, options?.HardwareProfile);
     }
@@ -80,6 +89,7 @@ public sealed class ComputeVisualizationToolWindow : ToolWindowPane, IAnalysisFr
         interactionState.TrackRequest(uri);
         freshness.Fail();
         freshnessHeader.Update(freshness.State);
+        freshnessHeader.UpdateTracking(TrackingMode, DocumentUri);
         control.SetOptionsIfDocumentChanged(options);
         control.SetError(message, true);
     }
@@ -88,6 +98,21 @@ public sealed class ComputeVisualizationToolWindow : ToolWindowPane, IAnalysisFr
     {
         ThreadHelper.ThrowIfNotOnUIThread();
         control.SetInputError(message);
+    }
+
+    void IAnalysisTrackingView.SetTrackingMode(AnalysisTrackingMode mode)
+        => SetTrackingMode(mode);
+
+    void IAnalysisTrackingView.CancelTrackingRefresh()
+    {
+        freshness.CancelRefresh(AnalysisFreshnessCause.ActiveShaderChange);
+        freshnessHeader.Update(freshness.State);
+    }
+
+    internal void SetTrackingMode(AnalysisTrackingMode mode)
+    {
+        TrackingMode = mode;
+        freshnessHeader.UpdateTracking(mode, DocumentUri);
     }
 
     public void BeginRefresh(AnalysisFreshnessCause cause)

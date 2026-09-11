@@ -29,7 +29,7 @@ namespace HlslLsp.VisualStudio.Bootstrap;
 // mirroring EntryPointDataFlowToolWindow's/PreprocessorExplorerToolWindow's
 // structure against distinct protocol requests.
 [Guid("6f2e6f36-9a3d-4e6a-9f0b-2f7f8f0b9a1c")]
-public sealed class CallHierarchyExplorerToolWindow : ToolWindowPane, IAnalysisFreshnessView
+public sealed class CallHierarchyExplorerToolWindow : ToolWindowPane, IAnalysisTrackingView
 {
     private readonly CallHierarchyExplorerControl control = new();
     private readonly CallHierarchyExplorerState state = new();
@@ -71,6 +71,13 @@ public sealed class CallHierarchyExplorerToolWindow : ToolWindowPane, IAnalysisF
     // refresh from.
     internal Uri RootDocumentUri { get; private set; }
 
+    internal AnalysisTrackingMode TrackingMode { get; private set; } =
+        AnalysisTrackingPolicy.DefaultMode;
+
+    AnalysisTrackingMode IAnalysisTrackingView.TrackingMode => TrackingMode;
+
+    Uri IAnalysisTrackingView.TrackingDocumentUri => RootDocumentUri;
+
     internal int RootLine { get; private set; }
 
     internal int RootCharacter { get; private set; }
@@ -86,6 +93,8 @@ public sealed class CallHierarchyExplorerToolWindow : ToolWindowPane, IAnalysisF
     // or clears the root (SetRoot/UpdateRootAnchor/SetNotCallable/
     // SetGlobalError) already does by overwriting or nulling this property.
     internal ITrackingPoint RootTrackingPoint { get; private set; }
+
+    internal bool RetargetPending { get; private set; }
 
     // The root frame's own item (bottom of the drill-in stack), distinct
     // from CurrentItem (the top of the stack): used as the compiler-
@@ -108,6 +117,21 @@ public sealed class CallHierarchyExplorerToolWindow : ToolWindowPane, IAnalysisF
     // underneath a freshly re-resolved root (see CallHierarchyItemIdentity).
     internal IReadOnlyList<CallHierarchyPathStep> CapturePathSteps()
         => state.CapturePath();
+
+    internal void BeginRetarget(
+        Uri documentUri,
+        int line,
+        int character,
+        ITrackingPoint trackingPoint)
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        RootDocumentUri = documentUri;
+        RootLine = line;
+        RootCharacter = character;
+        RootTrackingPoint = trackingPoint;
+        RetargetPending = true;
+        freshnessHeader.UpdateTracking(TrackingMode, RootDocumentUri);
+    }
 
     // Wires the control's Back/drill-in interactions to package-owned
     // callbacks exactly once per window instance: ShowToolWindowAsync/
@@ -168,6 +192,7 @@ public sealed class CallHierarchyExplorerToolWindow : ToolWindowPane, IAnalysisF
         RootLine = line;
         RootCharacter = character;
         RootTrackingPoint = trackingPoint;
+        RetargetPending = false;
         placeholderMessage = CallHierarchyExplorerDisplay.NoCallableMessage();
         freshness.Succeed();
         freshnessHeader.Update(freshness.State);
@@ -196,6 +221,7 @@ public sealed class CallHierarchyExplorerToolWindow : ToolWindowPane, IAnalysisF
         RootLine = line;
         RootCharacter = character;
         RootTrackingPoint = trackingPoint;
+        RetargetPending = false;
         freshness.Succeed();
         freshnessHeader.Update(freshness.State);
         Render();
@@ -220,6 +246,26 @@ public sealed class CallHierarchyExplorerToolWindow : ToolWindowPane, IAnalysisF
         RootLine = line;
         RootCharacter = character;
         RootTrackingPoint = trackingPoint;
+        RetargetPending = false;
+    }
+
+    internal void SetFailedRetarget(
+        Uri documentUri,
+        int line,
+        int character,
+        ITrackingPoint trackingPoint,
+        string message)
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        RootDocumentUri = documentUri;
+        RootLine = line;
+        RootCharacter = character;
+        RootTrackingPoint = trackingPoint;
+        RetargetPending = true;
+        banner = message;
+        freshness.Fail();
+        freshnessHeader.Update(freshness.State);
+        Render();
     }
 
     internal void PreserveTrackedRootAfterFailedReplacement(
@@ -319,6 +365,7 @@ public sealed class CallHierarchyExplorerToolWindow : ToolWindowPane, IAnalysisF
         RootLine = line;
         RootCharacter = character;
         RootTrackingPoint = trackingPoint;
+        RetargetPending = false;
         placeholderMessage = message;
         freshness.Fail();
         freshnessHeader.Update(freshness.State);
@@ -337,6 +384,21 @@ public sealed class CallHierarchyExplorerToolWindow : ToolWindowPane, IAnalysisF
         freshnessHeader.Update(freshness.State);
     }
 
+    void IAnalysisTrackingView.SetTrackingMode(AnalysisTrackingMode mode)
+        => SetTrackingMode(mode);
+
+    void IAnalysisTrackingView.CancelTrackingRefresh()
+    {
+        freshness.CancelRefresh(AnalysisFreshnessCause.ActiveShaderChange);
+        freshnessHeader.Update(freshness.State);
+    }
+
+    internal void SetTrackingMode(AnalysisTrackingMode mode)
+    {
+        TrackingMode = mode;
+        freshnessHeader.UpdateTracking(mode, RootDocumentUri);
+    }
+
     internal void DiscardRefreshAfterNavigation(
         AnalysisFreshnessCause cause)
     {
@@ -350,6 +412,7 @@ public sealed class CallHierarchyExplorerToolWindow : ToolWindowPane, IAnalysisF
     private void Render()
     {
         ThreadHelper.ThrowIfNotOnUIThread();
+        freshnessHeader.UpdateTracking(TrackingMode, RootDocumentUri);
         control.Render(state.Current, state.CanGoBack, banner, placeholderMessage);
     }
 }

@@ -5,9 +5,42 @@ export type AnalysisFreshnessCause =
   | "Source edit"
   | "Variant change"
   | "Configuration change"
+  | "Active shader change"
+  | "Active shader unavailable"
+  | "Tracked shader closed"
   | "Disconnected server"
   | "Manual refresh"
   | "Unknown";
+
+export type AnalysisTrackingMode = "follow" | "pinned";
+
+export interface AnalysisTrackingDisplay {
+  readonly mode: AnalysisTrackingMode;
+  readonly target: string;
+  readonly command: string;
+  readonly panel: string;
+}
+
+export interface AnalysisTrackingCommand {
+  readonly panel: string;
+  readonly mode: AnalysisTrackingMode;
+}
+
+export function parseAnalysisTrackingCommand(
+  value: unknown,
+): AnalysisTrackingCommand | undefined {
+  if (typeof value !== "object" || value === null) {
+    return undefined;
+  }
+  const candidate = value as { panel?: unknown; mode?: unknown };
+  if (
+    typeof candidate.panel !== "string" ||
+    (candidate.mode !== "follow" && candidate.mode !== "pinned")
+  ) {
+    return undefined;
+  }
+  return { panel: candidate.panel, mode: candidate.mode };
+}
 
 export interface AnalysisFreshnessState {
   readonly status: AnalysisFreshnessStatus;
@@ -169,6 +202,7 @@ export function withAnalysisFreshness(
   html: string,
   state: AnalysisFreshnessState,
   refreshCommand: string,
+  tracking?: AnalysisTrackingDisplay,
 ): string {
   const start = html.indexOf(freshnessStart);
   const end = html.indexOf(freshnessEnd);
@@ -177,10 +211,26 @@ export function withAnalysisFreshness(
       ? html.slice(0, start) + html.slice(end + freshnessEnd.length)
       : html;
   const style = `<style>
-.hlsl-analysis-freshness { display:flex; align-items:center; gap:.6rem; margin:0 0 .8rem; color:var(--vscode-descriptionForeground); font-size:.9em; }
+.hlsl-analysis-freshness { display:flex; flex-wrap:wrap; align-items:center; gap:.6rem; margin:0 0 .8rem; color:var(--vscode-descriptionForeground); font-size:.9em; }
 .hlsl-analysis-freshness .state { white-space:nowrap; }
+.hlsl-analysis-freshness .target { color:var(--vscode-foreground); font-weight:600; }
 .hlsl-analysis-freshness a { color:var(--vscode-textLink-foreground); }
 </style>`;
-  const indicator = `${freshnessStart}${style}<div class="hlsl-analysis-freshness" role="status"><span class="state">${escapeHtml(analysisFreshnessText(state))}</span><span aria-hidden="true">·</span><a href="command:${encodeURIComponent(refreshCommand)}">Refresh</a></div>${freshnessEnd}`;
+  const trackingHtml =
+    tracking === undefined
+      ? ""
+      : `<span aria-hidden="true">·</span><span class="target">${tracking.mode === "pinned" ? "Pinned" : "Following"}: ${escapeHtml(tracking.target)}</span><span aria-hidden="true">·</span><a href="${analysisTrackingCommandUri(tracking)}">${tracking.mode === "pinned" ? "Follow active shader" : "Pin this shader"}</a>`;
+  const indicator = `${freshnessStart}${style}<div class="hlsl-analysis-freshness" role="status"><span class="state">${escapeHtml(analysisFreshnessText(state))}</span><span aria-hidden="true">·</span><a href="command:${encodeURIComponent(refreshCommand)}">Refresh</a>${trackingHtml}</div>${freshnessEnd}`;
   return clean.replace(/<body([^>]*)>/i, `<body$1>${indicator}`);
+}
+
+export function analysisTrackingCommandUri(
+  tracking: AnalysisTrackingDisplay,
+): string {
+  const nextMode: AnalysisTrackingMode =
+    tracking.mode === "pinned" ? "follow" : "pinned";
+  const args = encodeURIComponent(
+    JSON.stringify([{ panel: tracking.panel, mode: nextMode }]),
+  );
+  return `command:${encodeURIComponent(tracking.command)}?${args}`;
 }

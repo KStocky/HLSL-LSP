@@ -137,6 +137,13 @@ In Visual Studio, right-click the shader and choose
 **HLSL > Shader Compilation**. In Visual Studio Code, run
 **HLSL: Show Shader Compilation** from the Command Palette.
 
+Reusable analysis views start pinned to the shader or symbol that opened them.
+Their header identifies that target and can switch to **Follow active shader**
+to reuse the same view as HLSL editor tabs change, then back to **Pin this
+shader** without creating duplicate views. See
+[`docs/analysis-freshness.md`](docs/analysis-freshness.md) for target,
+refresh, stale-result, and restoration behavior.
+
 | Visual Studio | Visual Studio Code |
 | --- | --- |
 | ![Shader compilation, reflection, and disassembly in Visual Studio](art/shader-compilation.png) | ![Effective shader configuration and compilation result in Visual Studio Code](art/vscode-shader-compilation.png) |

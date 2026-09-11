@@ -1,4 +1,5 @@
 import "./analysisFreshness.test";
+import "./analysisTracking.test";
 import "./compilationInfo.test";
 import "./computeVisualization.test";
 import "./configuration.test";

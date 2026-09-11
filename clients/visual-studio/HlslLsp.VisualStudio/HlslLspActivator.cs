@@ -763,13 +763,61 @@ public sealed class HlslLspActivator :
         uint docCookie,
         uint lockType,
         uint readLocksRemaining,
-        uint editLocksRemaining) => VSConstants.S_OK;
+        uint editLocksRemaining)
+    {
+        NotifyAnalysisTargetDocumentState(docCookie, true);
+        return VSConstants.S_OK;
+    }
 
     public int OnBeforeLastDocumentUnlock(
         uint docCookie,
         uint lockType,
         uint readLocksRemaining,
-        uint editLocksRemaining) => VSConstants.S_OK;
+        uint editLocksRemaining)
+    {
+        if (readLocksRemaining != 0 || editLocksRemaining != 0)
+        {
+            return VSConstants.S_OK;
+        }
+        NotifyAnalysisTargetDocumentState(docCookie, false);
+        return VSConstants.S_OK;
+    }
+
+    private void NotifyAnalysisTargetDocumentState(uint docCookie, bool opened)
+    {
+        if (runningDocuments == null ||
+            ErrorHandler.Failed(
+                runningDocuments.GetDocumentInfo(
+                    docCookie,
+                    out _,
+                    out _,
+                    out _,
+                    out var moniker,
+                    out _,
+                    out _,
+                    out var documentData)))
+        {
+            return;
+        }
+        try
+        {
+            if (opened)
+            {
+                host.ScheduleAnalysisTargetOpened(moniker);
+            }
+            else
+            {
+                host.ScheduleAnalysisTargetClosed(moniker);
+            }
+        }
+        finally
+        {
+            if (documentData != IntPtr.Zero)
+            {
+                Marshal.Release(documentData);
+            }
+        }
+    }
 
     public int OnAfterAttributeChange(uint docCookie, uint grfAttribs) => VSConstants.S_OK;
 
@@ -1122,6 +1170,7 @@ public sealed class HlslLspActivator :
         {
             ScheduleNavigationBarAttachment();
             host.ScheduleEffectiveContextIndicatorRefresh();
+            host.ScheduleFollowingAnalysisRefresh();
         }
         return VSConstants.S_OK;
     }

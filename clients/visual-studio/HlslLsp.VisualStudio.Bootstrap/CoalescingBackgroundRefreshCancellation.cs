@@ -3,20 +3,12 @@ using System.Threading;
 
 namespace HlslLsp.VisualStudio.Bootstrap;
 
-// Bounds each background refresh (variant change, save, or debounced
-// unsaved-edit trigger) to a fixed timeout and ensures at most one is
-// meaningfully in flight per refreshable window at a time: starting a new
-// background refresh cancels and disposes whatever earlier one this same
-// instance produced, so a burst of overlapping triggers (for example a
-// save arriving while a debounced-edit refresh for the same window is
-// still in flight) coalesces into just the most recent request rather than
-// letting superseded requests accumulate and keep running to completion
-// for no benefit -- their result would be discarded by the generation
-// guard on completion anyway, so cancelling them promptly only saves
-// wasted server work and avoids an unbounded pile-up of in-flight
-// requests. Kept free of any VS/StreamJsonRpc dependency so it is directly
-// unit testable; HlslBootstrapPackage owns one instance per refreshable
-// window (Entry-Point Data Flow, Call Hierarchy).
+// Bounds each analysis request to a fixed timeout and ensures at most one is
+// meaningfully in flight per reusable window. Starting a new explicit,
+// background, or follow-mode retarget cancels and disposes the previous
+// request token, while each view's generation guard prevents a superseded
+// response from being applied even if cancellation races with completion.
+// Kept free of VS/StreamJsonRpc dependencies so it is directly unit testable.
 internal sealed class CoalescingBackgroundRefreshCancellation
 {
     private readonly TimeSpan timeout;
@@ -47,5 +39,15 @@ internal sealed class CoalescingBackgroundRefreshCancellation
             previous.Dispose();
         }
         return next;
+    }
+
+    internal void CancelCurrent()
+    {
+        var previous = Interlocked.Exchange(ref current, null);
+        if (previous != null)
+        {
+            previous.Cancel();
+            previous.Dispose();
+        }
     }
 }

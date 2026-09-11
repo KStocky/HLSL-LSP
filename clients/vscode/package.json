@@ -41,7 +41,13 @@
     "onCommand:hlsl.showPreprocessorExplorer",
     "onCommand:hlsl.showEntryPointDataFlow",
     "onCommand:hlsl.showComputeVisualization",
-    "onCommand:hlsl.selectVariant"
+    "onCommand:hlsl.selectVariant",
+    "onWebviewPanel:hlslMemoryLayout",
+    "onWebviewPanel:hlslCompilationInfo",
+    "onWebviewPanel:hlslResourceBindings",
+    "onWebviewPanel:hlslPreprocessorExplorer",
+    "onWebviewPanel:hlslEntryPointDataFlow",
+    "onWebviewPanel:hlslComputeVisualization"
   ],
   "capabilities": {
     "untrustedWorkspaces": {

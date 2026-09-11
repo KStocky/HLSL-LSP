@@ -115,8 +115,13 @@ Every custom HLSL analysis panel uses the same context labels and terminology.
 The reusable Memory Layout, Shader Compilation, Resource Bindings,
 Preprocessor Explorer, Entry-Point Data Flow, and Compute Visualization panels
 also share a **Current**, **Refreshing**, **Stale**, or **Refresh failed**
-indicator and a tracked-target **Refresh** link. Last good content stays
-visible during refresh/failure; see
+indicator, a tracked-target **Refresh** link, and explicit **Pinned** or
+**Following** state. Panels start pinned to preserve the shader or symbol that
+opened them. Select **Follow active shader** in a panel header to reuse that
+panel as HLSL editor tabs change, or **Pin this shader** to freeze its current
+target. The selected mode and target are retained for VS Code webview
+restoration. Last good content stays visible during refresh/failure or when a
+tracked document closes; see
 [analysis result freshness](../../docs/analysis-freshness.md).
 
 ## Shader compilation
