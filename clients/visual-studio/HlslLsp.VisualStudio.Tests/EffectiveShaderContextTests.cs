@@ -47,6 +47,50 @@ public sealed class EffectiveShaderContextTests
     }
 
     [Fact]
+    public void ConfigurationOrigin_SkipsOriginsWithoutAFileUri()
+    {
+        var context = new EffectiveShaderContextModel
+        {
+            Origins = new EffectiveContextOriginsModel
+            {
+                Variant = new EffectiveContextOriginModel
+                {
+                    Label = "editor settings",
+                },
+                EntryPoint = new EffectiveContextOriginModel
+                {
+                    Label = "project configuration",
+                    Uri = "file:///C:/shaders/shadertoolsconfig.json",
+                },
+            },
+        };
+
+        Assert.Equal(
+            "file:///C:/shaders/shadertoolsconfig.json",
+            EffectiveShaderContextDisplay.ConfigurationOriginUri(context));
+    }
+
+    [Fact]
+    public void ConfigurationOrigin_PrefersNearestDiscoveredConfiguration()
+    {
+        var context = new EffectiveShaderContextModel
+        {
+            ConfigurationUri = "file:///C:/shaders/shadertoolsconfig.json",
+            Origins = new EffectiveContextOriginsModel
+            {
+                Variant = new EffectiveContextOriginModel
+                {
+                    Uri = "file:///C:/root/shadertoolsconfig.json",
+                },
+            },
+        };
+
+        Assert.Equal(
+            "file:///C:/shaders/shadertoolsconfig.json",
+            EffectiveShaderContextDisplay.ConfigurationOriginUri(context));
+    }
+
+    [Fact]
     public void IndicatorDisplay_IsCompactAndProvidesFullTooltipContext()
     {
         var context = new EffectiveShaderContextModel
@@ -77,6 +121,7 @@ public sealed class EffectiveShaderContextTests
             @"{
                 ""documentUri"": ""file:///C:/shaders/main.hlsl"",
                 ""file"": ""main.hlsl"",
+                ""configurationUri"": ""file:///C:/shaders/shadertoolsconfig.json"",
                 ""activeVariant"": ""Prod"",
                 ""entryPoint"": ""PSMain"",
                 ""targetProfile"": ""ps_6_6"",
@@ -90,6 +135,9 @@ public sealed class EffectiveShaderContextTests
             }");
 
         Assert.Equal("main.hlsl", context.File);
+        Assert.Equal(
+            "file:///C:/shaders/shadertoolsconfig.json",
+            context.ConfigurationUri);
         Assert.Equal("Prod", context.ActiveVariant);
         Assert.Equal("PSMain", context.EntryPoint);
         Assert.Equal("ps_6_6", context.TargetProfile);

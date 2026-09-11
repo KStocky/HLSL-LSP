@@ -482,6 +482,8 @@ TEST_CASE("Server reports authoritative effective shader context from final comp
     const auto& context = result->result;
     CHECK(context["documentUri"] == document.uri());
     CHECK(context["file"] == "commands.hlsl");
+    CHECK(context["configurationUri"] ==
+          hlsl_intellisense::workspace::DocumentUri::from_path(config_path.string()).uri());
     CHECK(context["activeVariant"].is_null());
     CHECK(context["entryPoint"] == "CSMain");
     CHECK(context["targetProfile"] == "cs_6_6");

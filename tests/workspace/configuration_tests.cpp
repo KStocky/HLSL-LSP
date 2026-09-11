@@ -859,6 +859,20 @@ TEST_CASE("Variants require a supported schema version", "[configuration][varian
     CHECK(unsupported.message.find("Unsupported") != std::string::npos);
 }
 
+TEST_CASE("Variant inheritance arrays must not be empty", "[configuration][variants]") {
+    const TestTree tree;
+    tree.file("shadertoolsconfig.json", R"({
+        "root": true,
+        "hlsl.variantsVersion": 1,
+        "hlsl.variants": [ { "name": "A", "inherits": [] } ]
+    })");
+    tree.file("shader.hlsl", "");
+
+    const auto failure = configuration_failure(tree.path("shader.hlsl"));
+    CHECK(failure.code == workspace::ConfigurationErrorCode::invalid_variant);
+    CHECK(failure.key == "hlsl.variants[0].inherits");
+}
+
 TEST_CASE("Duplicate variant names are rejected", "[configuration][variants]") {
     const TestTree tree;
     tree.file("shadertoolsconfig.json", R"({

@@ -6,6 +6,7 @@ using System.Reflection;
 using System.Resources;
 using System.Text;
 using System.Xml.Linq;
+using HlslLsp.VisualStudio.Bootstrap;
 using Xunit;
 
 namespace HlslLsp.VisualStudio.Tests;
@@ -72,6 +73,10 @@ public sealed class CommandTablePackagingTests
         }
 
         AssertContextCommand(
+            "OpenEffectiveConfiguration",
+            "HlslContextGroup",
+            "Open Effective Configuration");
+        AssertContextCommand(
             "ShowResourceBindings",
             "HlslContextInspectionGroup",
             "Resource Bindings");
@@ -86,5 +91,50 @@ public sealed class CommandTablePackagingTests
         Assert.DoesNotContain(
             commandTable.Descendants(ns + "Parent"),
             element => (string)element.Attribute("id") == "IDM_VS_MENU_TOOLS");
+    }
+
+
+    [Fact]
+    public void VsixPackagesShaderToolsSchema()
+    {
+        var projectPath = Path.GetFullPath(
+            Path.Combine(
+                AppContext.BaseDirectory,
+                @"..\..\..\..\HlslLsp.VisualStudio\HlslLsp.VisualStudio.csproj"));
+        var project = XDocument.Load(projectPath);
+        XNamespace ns = project.Root.Name.Namespace;
+        Assert.Contains(
+            project.Descendants(ns + "Content"),
+            element => (string)element.Attribute("Include") == @"..\..\..\schemas\v1\shadertoolsconfig.schema.json" &&
+                       (string)element.Attribute("Link") == @"schemas\v1\shadertoolsconfig.schema.json");
+    }
+
+    [Theory]
+    [InlineData(0x0100, "ShowMemoryLayout", "MemoryLayout")]
+    [InlineData(0x0101, "SelectVariant", "SelectVariant")]
+    [InlineData(0x0102, "ShowCompilationInfo", "Compilation")]
+    [InlineData(0x0103, "ShowResourceBindings", "ResourceBindings")]
+    [InlineData(0x0104, "ShowPreprocessorExplorer", "PreprocessorExplorer")]
+    [InlineData(0x0105, "ShowEntryPointDataFlow", "EntryPointDataFlow")]
+    [InlineData(0x0106, "ShowCallHierarchy", "CallHierarchy")]
+    [InlineData(0x0107, "ShowComputeVisualization", "ComputeVisualization")]
+    [InlineData(0x0108, "OpenEffectiveConfiguration", "OpenEffectiveConfiguration")]
+    public void RuntimeCommandIds_PreserveExistingBindings(
+        int commandId,
+        string commandName,
+        string expected)
+    {
+        Assert.Equal(expected, HlslCommandIds.CommandKind(commandId).ToString());
+
+        var commandTablePath = Path.GetFullPath(
+            Path.Combine(
+                AppContext.BaseDirectory,
+                @"..\..\..\..\HlslLsp.VisualStudio.Bootstrap\Menus.vsct"));
+        var commandTable = XDocument.Load(commandTablePath);
+        XNamespace ns = "http://schemas.microsoft.com/VisualStudio/2005-10-18/CommandTable";
+        var symbol = Assert.Single(
+            commandTable.Descendants(ns + "IDSymbol"),
+            element => (string)element.Attribute("name") == commandName);
+        Assert.Equal($"0x{commandId:x4}", (string)symbol.Attribute("value"));
     }
 }

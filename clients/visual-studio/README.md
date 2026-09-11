@@ -80,11 +80,13 @@ server-authoritative active variant, effective entry point, and effective
 target profile. Hover it for the full file and configuration-origin context;
 click it to invoke **HLSL > Select Shader Variant**. The indicator updates
 asynchronously, is removed with its editor view, and never overwrites Visual
-Studio's shared status text or performs RPC from `BeforeQueryStatus`. Every
-custom HLSL tool window uses the same
-**File**, **Variant**, **Entry point**, **Target profile**, and available
-**Configuration origins** header (`Default` and `Not configured` are used
-consistently).
+Studio's shared status text or performs RPC from `BeforeQueryStatus`. The
+same provenance also powers **HLSL > Open Effective Configuration**, which
+opens the file-backed `shadertoolsconfig.json` origin for the active shader
+when one exists and shows an explicit message otherwise. Every custom HLSL
+tool window uses the same **File**, **Variant**, **Entry point**, **Target
+profile**, and available **Configuration origins** header (`Default` and
+`Not configured` are used consistently).
 
 Memory Layout, Shader Compilation, Resource Bindings, Preprocessor Explorer,
 Entry-Point Data Flow, Compute Visualization, and the custom Call Hierarchy

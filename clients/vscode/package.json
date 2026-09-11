@@ -33,6 +33,7 @@
     "onLanguage:hlsl",
     "onCommand:hlsl.restartServer",
     "onCommand:hlsl.stopServer",
+    "onCommand:hlsl.openEffectiveConfigurationFile",
     "onCommand:hlsl.showOutput",
     "onCommand:hlsl.showDiagnostics",
     "onCommand:hlsl.showMemoryLayout",
@@ -86,6 +87,12 @@
       {
         "command": "hlsl.showOutput",
         "title": "HLSL: Show Language Server Output",
+        "category": "HLSL"
+      },
+      {
+        "command": "hlsl.openEffectiveConfigurationFile",
+        "title": "HLSL: Open Effective Configuration File",
+        "shortTitle": "Open Effective Configuration",
         "category": "HLSL"
       },
       {
@@ -151,6 +158,11 @@
         }
       ],
       "hlsl.editorContext": [
+        {
+          "command": "hlsl.openEffectiveConfigurationFile",
+          "when": "editorLangId == hlsl",
+          "group": "1_configuration@0"
+        },
         {
           "command": "hlsl.selectVariant",
           "when": "editorLangId == hlsl",
@@ -321,7 +333,15 @@
           "description": "Show the selected compilation variant where it affects the current shader."
         }
       }
-    }
+    },
+    "jsonValidation": [
+      {
+        "fileMatch": [
+          "**/shadertoolsconfig.json"
+        ],
+        "url": "./schemas/v1/shadertoolsconfig.schema.json"
+      }
+    ]
   },
   "scripts": {
     "clean": "node scripts/clean.mjs",
@@ -346,6 +366,7 @@
     "@types/vscode": "1.96.0",
     "@vscode/test-electron": "3.1.0",
     "@vscode/vsce": "3.9.2",
+    "ajv": "^8.17.1",
     "esbuild": "0.28.2",
     "eslint": "10.0.0",
     "prettier": "3.9.6",

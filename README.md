@@ -21,7 +21,7 @@ with:
 - Compiler-verified quick fixes for fixable DXC diagnostics, plus deterministic
   include/configuration recovery actions
 - Workspace symbol support for Visual Studio's All-In-One Search
-- Hierarchical `shadertoolsconfig.json` compiler configuration
+- Hierarchical `shadertoolsconfig.json` compiler configuration with a shared versioned JSON Schema
 - Named compilation variants selectable per document from either editor
 - Selectable DXC runtime: the bundled default or an explicit compatible runtime
 - Transitive, virtual, open-buffer, and dependency-aware include handling

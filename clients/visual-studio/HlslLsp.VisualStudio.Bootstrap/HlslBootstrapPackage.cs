@@ -208,56 +208,63 @@ public sealed class HlslBootstrapPackage : AsyncPackage
                 (_, _) => JoinableTaskFactory.RunAsync(
                         () => ShowMemoryLayoutAsync(DisposalToken))
                     .FileAndForget("HlslLsp/ShowMemoryLayout"),
-                new CommandID(commandSet, 0x0100));
+                new CommandID(commandSet, HlslCommandIds.MemoryLayout));
         memoryLayout.BeforeQueryStatus += OnHlslContextCommandBeforeQueryStatus;
         commands.AddCommand(memoryLayout);
         var selectVariant = new OleMenuCommand(
                 (_, _) => JoinableTaskFactory.RunAsync(
                         () => SelectVariantAsync(DisposalToken))
                     .FileAndForget("HlslLsp/SelectVariant"),
-                new CommandID(commandSet, 0x0101));
+                new CommandID(commandSet, HlslCommandIds.SelectVariant));
         selectVariant.BeforeQueryStatus += OnHlslContextCommandBeforeQueryStatus;
         commands.AddCommand(selectVariant);
+        var openEffectiveConfiguration = new OleMenuCommand(
+                (_, _) => JoinableTaskFactory.RunAsync(
+                        () => OpenEffectiveConfigurationAsync(DisposalToken))
+                    .FileAndForget("HlslLsp/OpenEffectiveConfiguration"),
+                new CommandID(commandSet, HlslCommandIds.OpenEffectiveConfiguration));
+        openEffectiveConfiguration.BeforeQueryStatus += OnHlslContextCommandBeforeQueryStatus;
+        commands.AddCommand(openEffectiveConfiguration);
         var compilationInfo = new OleMenuCommand(
                 (_, _) => JoinableTaskFactory.RunAsync(
                         () => ShowCompilationInfoAsync(DisposalToken))
                     .FileAndForget("HlslLsp/ShowCompilationInfo"),
-                new CommandID(commandSet, 0x0102));
+                new CommandID(commandSet, HlslCommandIds.Compilation));
         compilationInfo.BeforeQueryStatus += OnHlslContextCommandBeforeQueryStatus;
         commands.AddCommand(compilationInfo);
         var resourceBindings = new OleMenuCommand(
                 (_, _) => JoinableTaskFactory.RunAsync(
                         () => ShowResourceBindingsAsync(DisposalToken))
                     .FileAndForget("HlslLsp/ShowResourceBindings"),
-                new CommandID(commandSet, 0x0103));
+                new CommandID(commandSet, HlslCommandIds.ResourceBindings));
         resourceBindings.BeforeQueryStatus += OnHlslContextCommandBeforeQueryStatus;
         commands.AddCommand(resourceBindings);
         var preprocessorExplorer = new OleMenuCommand(
                 (_, _) => JoinableTaskFactory.RunAsync(
                         () => ShowPreprocessorExplorerAsync(DisposalToken))
                     .FileAndForget("HlslLsp/ShowPreprocessorExplorer"),
-                new CommandID(commandSet, 0x0104));
+                new CommandID(commandSet, HlslCommandIds.PreprocessorExplorer));
         preprocessorExplorer.BeforeQueryStatus += OnHlslContextCommandBeforeQueryStatus;
         commands.AddCommand(preprocessorExplorer);
         var entryPointDataFlow = new OleMenuCommand(
                 (_, _) => JoinableTaskFactory.RunAsync(
                         () => ShowEntryPointDataFlowAsync(DisposalToken))
                     .FileAndForget("HlslLsp/ShowEntryPointDataFlow"),
-                new CommandID(commandSet, 0x0105));
+                new CommandID(commandSet, HlslCommandIds.EntryPointDataFlow));
         entryPointDataFlow.BeforeQueryStatus += OnHlslContextCommandBeforeQueryStatus;
         commands.AddCommand(entryPointDataFlow);
         var callHierarchy = new OleMenuCommand(
                 (_, _) => JoinableTaskFactory.RunAsync(
                         () => ShowCallHierarchyAsync(DisposalToken))
                     .FileAndForget("HlslLsp/ShowCallHierarchy"),
-                new CommandID(commandSet, 0x0106));
+                new CommandID(commandSet, HlslCommandIds.CallHierarchy));
         callHierarchy.BeforeQueryStatus += OnHlslContextCommandBeforeQueryStatus;
         commands.AddCommand(callHierarchy);
         var computeVisualization = new OleMenuCommand(
                 (_, _) => JoinableTaskFactory.RunAsync(
                         () => ShowComputeVisualizationAsync(DisposalToken))
                     .FileAndForget("HlslLsp/ShowComputeVisualization"),
-                new CommandID(commandSet, 0x0107));
+                new CommandID(commandSet, HlslCommandIds.ComputeVisualization));
         computeVisualization.BeforeQueryStatus += OnHlslContextCommandBeforeQueryStatus;
         commands.AddCommand(computeVisualization);
     }
@@ -3050,6 +3057,62 @@ public sealed class HlslBootstrapPackage : AsyncPackage
                 .FileAndForget("HlslLsp/CallHierarchyDrillIn"));
     }
 
+    private async Task OpenEffectiveConfigurationAsync(CancellationToken cancellationToken)
+    {
+        await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+        if (!TryGetActiveHlslEditorContext(
+                out var uri,
+                out _,
+                out _,
+                out _))
+        {
+            await ShowInformationAsync(
+                "Open an HLSL document to open its effective configuration file.",
+                cancellationToken);
+            return;
+        }
+        EffectiveShaderContextModel context;
+        try
+        {
+            context = await EffectiveShaderContextBridge.RequestAsync(uri, cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception error)
+        {
+            await ShowInformationAsync(
+                "Could not retrieve effective configuration provenance: " + error.Message,
+                cancellationToken);
+            return;
+        }
+        var origin = EffectiveShaderContextDisplay.ConfigurationOriginUri(context);
+        if (string.IsNullOrEmpty(origin))
+        {
+            await ShowInformationAsync(
+                "No file-backed configuration origin is available for the active shader.",
+                cancellationToken);
+            return;
+        }
+        if (!Uri.TryCreate(origin, UriKind.Absolute, out var originUri) ||
+            !originUri.IsFile)
+        {
+            await ShowInformationAsync(
+                "The effective configuration origin is not a local file.",
+                cancellationToken);
+            return;
+        }
+        await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+        VsShellUtilities.OpenDocument(
+            this,
+            originUri.LocalPath,
+            Guid.Empty,
+            out _,
+            out _,
+            out _);
+    }
+
     private async Task SelectVariantAsync(CancellationToken cancellationToken)
     {
         await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
@@ -3150,41 +3213,13 @@ public sealed class HlslBootstrapPackage : AsyncPackage
                     character,
                     out context);
             var presentation = HlslCommandPresentation.Evaluate(
-                CommandKind(command.CommandID.ID),
+                HlslCommandIds.CommandKind(command.CommandID.ID),
                 hlslEditor,
                 contextKnown,
                 context);
             command.Visible = presentation.Visible;
             command.Enabled = presentation.Enabled;
             command.Text = presentation.Text;
-        }
-    }
-
-    private static HlslCommandKind CommandKind(int commandId)
-    {
-        switch (commandId)
-        {
-            case 0x0100:
-                return HlslCommandKind.MemoryLayout;
-            case 0x0101:
-                return HlslCommandKind.SelectVariant;
-            case 0x0102:
-                return HlslCommandKind.Compilation;
-            case 0x0103:
-                return HlslCommandKind.ResourceBindings;
-            case 0x0104:
-                return HlslCommandKind.PreprocessorExplorer;
-            case 0x0105:
-                return HlslCommandKind.EntryPointDataFlow;
-            case 0x0106:
-                return HlslCommandKind.CallHierarchy;
-            case 0x0107:
-                return HlslCommandKind.ComputeVisualization;
-            default:
-                throw new ArgumentOutOfRangeException(
-                    nameof(commandId),
-                    commandId,
-                    "Unknown HLSL command identifier.");
         }
     }
 

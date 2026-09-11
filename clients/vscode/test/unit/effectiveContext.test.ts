@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import {
   effectiveContextHeaderHtml,
+  effectiveConfigurationOriginUri,
   effectiveContextTooltip,
   EffectiveShaderContext,
 } from "../../src/effectiveContext";
@@ -40,4 +41,41 @@ void test("effective context tooltip includes useful compilation context", () =>
   assert.match(tooltip, /Entry point: Not configured/);
   assert.match(tooltip, /Target profile: ps_6_6/);
   assert.match(tooltip, /Click to select a shader variant/);
+});
+
+void test("effective configuration origin prefers the active variant when file-backed", () => {
+  assert.equal(
+    effectiveConfigurationOriginUri(context),
+    "file:///workspace/shadertoolsconfig.json",
+  );
+});
+
+void test("effective configuration origin skips origins without a file URI", () => {
+  assert.equal(
+    effectiveConfigurationOriginUri({
+      ...context,
+      origins: {
+        variant: {
+          label: "editor settings",
+          setting: "activeVariant",
+        },
+        entryPoint: {
+          label: "project configuration",
+          setting: "entryPoint",
+          uri: "file:///workspace/shadertoolsconfig.json",
+        },
+      },
+    }),
+    "file:///workspace/shadertoolsconfig.json",
+  );
+});
+
+void test("effective configuration origin prefers the nearest discovered configuration", () => {
+  assert.equal(
+    effectiveConfigurationOriginUri({
+      ...context,
+      configurationUri: "file:///workspace/nearest/shadertoolsconfig.json",
+    }),
+    "file:///workspace/nearest/shadertoolsconfig.json",
+  );
 });

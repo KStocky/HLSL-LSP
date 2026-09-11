@@ -31,6 +31,8 @@ public sealed class EffectiveShaderContextModel
 
     public string File { get; set; }
 
+    public string ConfigurationUri { get; set; }
+
     public string ActiveVariant { get; set; }
 
     public string EntryPoint { get; set; }
@@ -71,6 +73,26 @@ internal static class EffectiveShaderContextDisplay
         AddOrigin(values, "Entry point", context.Origins.EntryPoint);
         AddOrigin(values, "Target profile", context.Origins.TargetProfile);
         return string.Join("; ", values);
+    }
+
+    internal static string ConfigurationOriginUri(EffectiveShaderContextModel context)
+    {
+        if (!string.IsNullOrEmpty(context?.ConfigurationUri))
+        {
+            return context.ConfigurationUri;
+        }
+        var origins = context?.Origins;
+        if (!string.IsNullOrEmpty(origins?.Variant?.Uri))
+        {
+            return origins.Variant.Uri;
+        }
+        if (!string.IsNullOrEmpty(origins?.EntryPoint?.Uri))
+        {
+            return origins.EntryPoint.Uri;
+        }
+        return string.IsNullOrEmpty(origins?.TargetProfile?.Uri)
+            ? null
+            : origins.TargetProfile.Uri;
     }
 
     internal static void AddHeader(

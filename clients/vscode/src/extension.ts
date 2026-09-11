@@ -50,6 +50,7 @@ import {
 import { Debouncer } from "./debouncer";
 import {
   EffectiveShaderContext,
+  effectiveConfigurationOriginUri,
   effectiveContextTooltip,
   variantLabel,
 } from "./effectiveContext";
@@ -1779,6 +1780,52 @@ export async function activate(
   variantStatus.command = "hlsl.selectVariant";
   context.subscriptions.push(variantStatus);
 
+  async function openEffectiveConfigurationFile(): Promise<void> {
+    const editor = vscode.window.activeTextEditor;
+    if (editor?.document.languageId !== "hlsl") {
+      void vscode.window.showInformationMessage(
+        "Open an HLSL document to reveal its effective configuration file.",
+      );
+      return;
+    }
+    let shaderContext: EffectiveShaderContext | null | undefined;
+    try {
+      shaderContext = await lifecycle.withClient((client) =>
+        client.effectiveContext(editor.document.uri),
+      );
+    } catch (error) {
+      void vscode.window.showErrorMessage(
+        `Unable to read the active shader context: ${errorMessage(error)}`,
+      );
+      return;
+    }
+    if (shaderContext === null || shaderContext === undefined) {
+      void vscode.window.showInformationMessage(
+        "No file-backed effective configuration origin is available for the active shader.",
+      );
+      return;
+    }
+    const originUri = effectiveConfigurationOriginUri(shaderContext);
+    if (originUri === undefined) {
+      void vscode.window.showInformationMessage(
+        "No file-backed effective configuration origin is available for the active shader.",
+      );
+      return;
+    }
+    try {
+      const uri = vscode.Uri.parse(originUri, true);
+      if (uri.scheme !== "file") {
+        throw new Error("the server returned a non-file configuration URI");
+      }
+      const document = await vscode.workspace.openTextDocument(uri);
+      await vscode.window.showTextDocument(document, { preview: false });
+    } catch (error) {
+      void vscode.window.showErrorMessage(
+        `Unable to open the effective configuration file: ${errorMessage(error)}`,
+      );
+    }
+  }
+
   let workspaceRuntimeDirectory: string | undefined;
 
   const lifecycle = new ClientLifecycle<ManagedClient>(async () => {
@@ -2271,6 +2318,10 @@ export async function activate(
     vscode.commands.registerCommand("hlsl.showOutput", () => {
       outputChannel.show(true);
     }),
+    vscode.commands.registerCommand(
+      "hlsl.openEffectiveConfigurationFile",
+      openEffectiveConfigurationFile,
+    ),
     vscode.commands.registerCommand("hlsl.showDiagnostics", async () => {
       outputChannel.appendLine("--- HLSL-LSP client diagnostics ---");
       outputChannel.appendLine(
