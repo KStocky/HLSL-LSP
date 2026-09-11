@@ -99,6 +99,25 @@ void test("compilation info HTML renders the full successful result", () => {
   assert.match(html, /<td>xyzw<\/td>/);
 });
 
+void test("compilation info treats an explicit null effective variant as authoritative Default", () => {
+  const html = compilationInfoHtml(
+    baseInfo({
+      activeVariant: "GloballySelectedButInapplicable",
+      context: {
+        documentUri: "file:///workspace/shader.hlsl",
+        file: "shader.hlsl",
+        activeVariant: null,
+        entryPoint: "PSMain",
+        targetProfile: "ps_6_6",
+        origins: {},
+      },
+    }),
+  );
+
+  assert.match(html, /<th>Active variant<\/th><td>Default<\/td>/);
+  assert.doesNotMatch(html, /GloballySelectedButInapplicable/);
+});
+
 void test("compilation info HTML renders a compiler failure with diagnostics", () => {
   const html = compilationInfoHtml(
     baseInfo({

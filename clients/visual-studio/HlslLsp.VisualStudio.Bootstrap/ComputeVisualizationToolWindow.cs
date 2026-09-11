@@ -166,10 +166,10 @@ internal sealed class ComputeVisualizationControl : UserControl
                 Brushes.Gray);
             return;
         }
-        AddText(
-            $"Entry point: {report.EntryPoint ?? "(not resolved)"}   " +
-            $"Target: {report.TargetProfile ?? "(not configured)"}",
-            Brushes.Gray);
+        EffectiveShaderContextDisplay.AddHeader(
+            content,
+            "Compute Visualization",
+            report.Context);
         if (!report.Applicable)
         {
             AddText(

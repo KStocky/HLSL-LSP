@@ -44,6 +44,13 @@ On success the result is a one-element array containing a
       "rootIdentity": "...",
       "rootVersion": 1,
       "generation": 3,
+      "context": {
+        "documentUri": "file:///C:/shaders/example.hlsl",
+        "file": "example.hlsl",
+        "activeVariant": null,
+        "entryPoint": "main",
+        "targetProfile": "ps_6_6"
+      },
       "path": "C:/shaders/example.hlsl",
       "line": 4,
       "column": 7,
@@ -103,6 +110,7 @@ this name/position now" -- every `CallHierarchyItem` carries an opaque
 | `rootIdentity` | That document's canonical identity, used as the analysis cache key. |
 | `rootVersion` | That document's version at analysis time. |
 | `generation` | A process-wide monotonic counter bumped every time the root's translation unit is actually recompiled -- unlike `rootVersion`, this also changes when an `#include`d file the root depends on is edited, or when the active variant/compiler configuration changes, neither of which bumps the root document's own LSP version. |
+| `context` | The effective shader context captured from the exact server submission/root that produced the item. Clients round-trip it unchanged so expanded outgoing items retain the same context; incoming items carry the independently captured context of their own candidate root. |
 | `path` | The compiler-canonical (forward-slash) source path of the callable's own definition/declaration, as reported by DXC -- may differ from `rootUri`'s path when the callable lives in an `#include`d file. |
 | `line`, `column` | The 1-based DXC source position of the callable's definition/declaration cursor. |
 | `startOffset` | The UTF-8 byte offset of the callable's definition/declaration extent -- combined with `path` and `cursorKind`, this is the callable's identity key, matching how overloaded functions sharing one name are distinguished internally (`(location.path, start_offset, cursor_kind)`). |

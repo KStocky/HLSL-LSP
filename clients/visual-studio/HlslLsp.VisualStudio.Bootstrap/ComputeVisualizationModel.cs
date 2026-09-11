@@ -103,6 +103,8 @@ public sealed class ComputeOccupancyModel
 
 public sealed class ComputeVisualizationModel
 {
+    public EffectiveShaderContextModel Context { get; set; }
+
     public bool Applicable { get; set; }
     public string Explanation { get; set; }
     public string EntryPoint { get; set; }

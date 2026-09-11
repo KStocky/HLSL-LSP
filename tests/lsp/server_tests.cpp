@@ -254,7 +254,9 @@ TEST_CASE("Server exposes memory layouts through hover and the custom protocol",
     REQUIRE(layout_response != nullptr);
     const auto& layout = layout_response->result;
     INFO(layout.dump());
-    CHECK(layout.size() == 8);
+    CHECK(layout.size() == 9);
+    CHECK(layout["context"]["file"] == "template.hlsl");
+    CHECK(layout["context"]["activeVariant"].is_null());
     CHECK(layout["name"] == "Constants");
     CHECK(layout["mode"] == "constantBuffer");
     CHECK(layout["allocationSize"] == 80);
@@ -437,6 +439,56 @@ TEST_CASE("Server reports caret-specific HLSL command applicability",
         .method = "textDocument/didSave",
         .params = Json{{"textDocument", {{"uri", document.uri()}}}}}));
     CHECK(context_at("CSMain")["entryPointDataFlowAvailable"] == true);
+}
+
+TEST_CASE("Server reports authoritative effective shader context from final compiler arguments",
+          "[lsp][effective-context][integration]") {
+    TestDirectory directory;
+    const auto config_path = directory.path() / "shadertoolsconfig.json";
+    {
+        std::ofstream config{config_path};
+        REQUIRE(config);
+        config << R"({
+            "root": true,
+            "hlsl.targetProfile": "ps_6_6",
+            "hlsl.entryPoint": "WrongMain",
+            "hlsl.additionalArguments": ["-ECSMain", "-T", "cs_6_6"]
+        })";
+    }
+    const auto document = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "commands.hlsl").string());
+    const std::string source =
+        "[numthreads(1, 1, 1)] void CSMain(uint3 id : SV_DispatchThreadID) {}\n";
+    hlsl_intellisense::lsp::Server server{[](const auto&) {}};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(
+        hlsl_intellisense::json_rpc::Notification{.method = "textDocument/didOpen",
+                                                  .params = Json{{"textDocument",
+                                                                  {{"uri", document.uri()},
+                                                                   {"languageId", "hlsl"},
+                                                                   {"version", 1},
+                                                                   {"text", source}}}}}));
+
+    const auto response = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{2},
+        .method = "hlsl/effectiveContext",
+        .params = Json{{"textDocument", {{"uri", document.uri()}}}}});
+    REQUIRE(response.has_value());
+    const auto* result = std::get_if<hlsl_intellisense::json_rpc::Response>(&*response);
+    REQUIRE(result != nullptr);
+    const auto& context = result->result;
+    CHECK(context["documentUri"] == document.uri());
+    CHECK(context["file"] == "commands.hlsl");
+    CHECK(context["activeVariant"].is_null());
+    CHECK(context["entryPoint"] == "CSMain");
+    CHECK(context["targetProfile"] == "cs_6_6");
+    CHECK(context["origins"]["entryPoint"]["setting"] == "additionalArguments");
+    CHECK(context["origins"]["targetProfile"]["setting"] == "additionalArguments");
+    CHECK(context["origins"]["entryPoint"]["uri"] ==
+          hlsl_intellisense::workspace::DocumentUri::from_path(config_path.string()).uri());
 }
 
 TEST_CASE("Server exposes compiler-backed preprocessor exploration",
@@ -3835,6 +3887,12 @@ TEST_CASE("Server compiles hlsl/compilationInfo using DXC and honors the active 
     const auto& info = result->result;
     INFO(info.dump());
     CHECK(info["activeVariant"] == "Prod");
+    CHECK(info["context"]["file"] == "shader.hlsl");
+    CHECK(info["context"]["activeVariant"] == "Prod");
+    CHECK(info["context"]["entryPoint"] == "PSMain");
+    CHECK(info["context"]["targetProfile"] == "ps_6_6");
+    CHECK(info["context"]["origins"]["variant"]["label"] == "variant Prod");
+    CHECK(info["context"]["origins"]["entryPoint"]["label"] == "variant Prod");
     CHECK(info["entryPoint"] == "PSMain");
     CHECK(info["stage"] == "pixel");
     CHECK(info["targetProfile"] == "ps_6_6");
@@ -5060,11 +5118,16 @@ TEST_CASE("Call hierarchy prepares an item and reports outgoing calls with overl
     REQUIRE(prepare_main.size() == 1);
     const auto& main_item = prepare_main[0];
     CHECK(main_item["name"] == "main");
+    CHECK(main_item["context"]["file"] == "template.hlsl");
+    CHECK(main_item["context"]["activeVariant"].is_null());
+    CHECK(main_item["data"]["context"] == main_item["context"]);
 
+    auto round_trip_item = main_item;
+    round_trip_item["context"]["activeVariant"] = "client-tampered";
     const auto outgoing_from_main = call_hierarchy_result(
         server, hlsl_intellisense::json_rpc::Request{.id = std::int64_t{3},
                                                      .method = "callHierarchy/outgoingCalls",
-                                                     .params = Json{{"item", main_item}}});
+                                                     .params = Json{{"item", round_trip_item}}});
     REQUIRE(outgoing_from_main.is_array());
     REQUIRE(outgoing_from_main.size() == 2);
     const auto find_callee = [&](std::string_view detail_contains) {
@@ -5079,6 +5142,8 @@ TEST_CASE("Call hierarchy prepares an item and reports outgoing calls with overl
     REQUIRE(to_square_float != outgoing_from_main.end());
     CHECK((*to_recurse)["fromRanges"].size() == 1);
     CHECK((*to_square_float)["fromRanges"].size() == 1);
+    CHECK((*to_recurse)["to"]["context"] == main_item["data"]["context"]);
+    CHECK((*to_recurse)["to"]["data"]["context"] == main_item["data"]["context"]);
 
     // Overload identity: `square(int)` is a distinct callable from
     // `square(float)` despite sharing a name; preparing at its own
@@ -5353,6 +5418,139 @@ TEST_CASE("Call hierarchy rejects a prepared item as stale after the active vari
     CHECK(stale_outgoing_error->error.code == hlsl_intellisense::json_rpc::content_modified_code);
 }
 
+TEST_CASE("Outgoing calls reject a prepared item after switching between identically compiled "
+          "variants whose effective context alone changed",
+          "[lsp][call-hierarchy][safety][context]") {
+    TestDirectory directory;
+    {
+        std::ofstream config{directory.path() / "shadertoolsconfig.json"};
+        REQUIRE(config);
+        config << R"({
+            "root": true,
+            "hlsl.targetProfile": "ps_6_6",
+            "hlsl.variantsVersion": 1,
+            "hlsl.variants": [
+                { "name": "First", "hlsl.entryPoint": "PSMain" },
+                { "name": "Second", "hlsl.entryPoint": "PSMain" }
+            ]
+        })";
+        REQUIRE(config);
+    }
+    const auto document = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "shader.hlsl").string());
+    const std::string source = "float helper(float x) { return x * 2.0; }\n"
+                               "float4 PSMain(float4 position : SV_Position) : SV_Target {\n"
+                               "    return helper(position.x).xxxx;\n"
+                               "}\n";
+
+    hlsl_intellisense::lsp::Server server{[](const auto&) {}};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(
+        hlsl_intellisense::json_rpc::Notification{.method = "textDocument/didOpen",
+                                                  .params = Json{{"textDocument",
+                                                                  {{"uri", document.uri()},
+                                                                   {"languageId", "hlsl"},
+                                                                   {"version", 1},
+                                                                   {"text", source}}}}}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "hlsl/didChangeActiveVariant", .params = Json{{"variant", "First"}}}));
+
+    const auto caller_offset = source.find("PSMain");
+    const auto caller_item = call_hierarchy_result(
+        server,
+        prepare_call_hierarchy_request(2, document.uri(), position_at(source, caller_offset)))[0];
+    REQUIRE(caller_item["data"]["context"]["activeVariant"] == "First");
+
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "hlsl/didChangeActiveVariant", .params = Json{{"variant", "Second"}}}));
+
+    const auto stale_outgoing =
+        server.handle(hlsl_intellisense::json_rpc::Request{.id = std::int64_t{3},
+                                                           .method = "callHierarchy/outgoingCalls",
+                                                           .params = Json{{"item", caller_item}}});
+    REQUIRE(stale_outgoing.has_value());
+    const auto* error = std::get_if<hlsl_intellisense::json_rpc::ErrorResponse>(&*stale_outgoing);
+    REQUIRE(error != nullptr);
+    CHECK(error->error.code == hlsl_intellisense::json_rpc::content_modified_code);
+}
+
+TEST_CASE("Outgoing calls reject a context-only variant change that supersedes the server "
+          "submission after response construction",
+          "[lsp][call-hierarchy][safety][context][concurrency]") {
+    TestDirectory directory;
+    {
+        std::ofstream config{directory.path() / "shadertoolsconfig.json"};
+        REQUIRE(config);
+        config << R"({
+            "root": true,
+            "hlsl.targetProfile": "ps_6_6",
+            "hlsl.variantsVersion": 1,
+            "hlsl.variants": [
+                { "name": "First", "hlsl.entryPoint": "PSMain" },
+                { "name": "Second", "hlsl.entryPoint": "PSMain" }
+            ]
+        })";
+        REQUIRE(config);
+    }
+    const auto document = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "shader.hlsl").string());
+    const std::string source = "float helper(float x) { return x * 2.0; }\n"
+                               "float4 PSMain(float4 position : SV_Position) : SV_Target {\n"
+                               "    return helper(position.x).xxxx;\n"
+                               "}\n";
+    auto hooks = std::make_shared<hlsl_intellisense::analysis::AnalysisHooks>();
+    hlsl_intellisense::lsp::ServerOptions options;
+    options.analysis_hooks = hooks;
+    hlsl_intellisense::lsp::Server server{[](const auto&) {}, {}, options};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(
+        hlsl_intellisense::json_rpc::Notification{.method = "textDocument/didOpen",
+                                                  .params = Json{{"textDocument",
+                                                                  {{"uri", document.uri()},
+                                                                   {"languageId", "hlsl"},
+                                                                   {"version", 1},
+                                                                   {"text", source}}}}}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "hlsl/didChangeActiveVariant", .params = Json{{"variant", "First"}}}));
+
+    const auto caller_offset = source.find("PSMain");
+    const auto caller_item = call_hierarchy_result(
+        server,
+        prepare_call_hierarchy_request(2, document.uri(), position_at(source, caller_offset)))[0];
+    REQUIRE(caller_item["data"]["context"]["activeVariant"] == "First");
+
+    std::promise<void> entered;
+    std::promise<void> release;
+    auto released = release.get_future().share();
+    hooks->before_server_submission_revalidation = [&] {
+        entered.set_value();
+        released.wait();
+    };
+    auto response = std::async(std::launch::async, [&] {
+        return server.handle(
+            hlsl_intellisense::json_rpc::Request{.id = std::int64_t{3},
+                                                 .method = "callHierarchy/outgoingCalls",
+                                                 .params = Json{{"item", caller_item}}});
+    });
+    entered.get_future().wait();
+
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "hlsl/didChangeActiveVariant", .params = Json{{"variant", "Second"}}}));
+    release.set_value();
+
+    const auto result = response.get();
+    REQUIRE(result.has_value());
+    const auto* error = std::get_if<hlsl_intellisense::json_rpc::ErrorResponse>(&*result);
+    REQUIRE(error != nullptr);
+    CHECK(error->error.code == hlsl_intellisense::json_rpc::content_modified_code);
+}
+
 TEST_CASE("Incoming calls expand across every open root that includes the callee, covering "
           "unsaved edits",
           "[lsp][call-hierarchy][cross-file]") {
@@ -5398,10 +5596,16 @@ TEST_CASE("Incoming calls expand across every open root that includes the callee
                                                      .params = Json{{"item", helper_item}}});
     REQUIRE(incoming.is_array());
     CHECK(incoming.size() == 2);
-    CHECK(std::ranges::any_of(incoming,
-                              [](const Json& call) { return call["from"]["name"] == "main"; }));
-    CHECK(std::ranges::any_of(incoming,
-                              [](const Json& call) { return call["from"]["name"] == "alt"; }));
+    const auto main_call = std::ranges::find_if(
+        incoming, [](const Json& call) { return call["from"]["name"] == "main"; });
+    const auto alt_call = std::ranges::find_if(
+        incoming, [](const Json& call) { return call["from"]["name"] == "alt"; });
+    REQUIRE(main_call != incoming.end());
+    REQUIRE(alt_call != incoming.end());
+    CHECK((*main_call)["from"]["context"]["file"] == "a.hlsl");
+    CHECK((*alt_call)["from"]["context"]["file"] == "b.hlsl");
+    CHECK((*main_call)["from"]["data"]["context"] == (*main_call)["from"]["context"]);
+    CHECK((*alt_call)["from"]["data"]["context"] == (*alt_call)["from"]["context"]);
 }
 
 TEST_CASE("Incoming calls keep two roots' results for the very same caller location distinct, "
@@ -6467,6 +6671,60 @@ TEST_CASE("Server cancellation returns RequestCancelled for hlsl/entryPointDataF
     server.wait_for_analysis();
 }
 
+TEST_CASE("hlsl/entryPointDataFlow rejects a context whose server submission was superseded "
+          "after the Manager generation check",
+          "[lsp][entry-point-data-flow][safety][concurrency]") {
+    TestDirectory directory;
+    write_entry_point_data_flow_config(directory);
+    const auto document = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "shader.hlsl").string());
+    auto hooks = std::make_shared<hlsl_intellisense::analysis::AnalysisHooks>();
+    std::promise<void> entered;
+    std::promise<void> release;
+    auto released = release.get_future().share();
+    hooks->before_server_submission_revalidation = [&] {
+        entered.set_value();
+        released.wait();
+    };
+    hlsl_intellisense::lsp::ServerOptions options;
+    options.analysis_hooks = hooks;
+    hlsl_intellisense::lsp::Server server{[](const auto&) {}, {}, options};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    const auto source = entry_point_data_flow_shader();
+    static_cast<void>(server.handle(
+        hlsl_intellisense::json_rpc::Notification{.method = "textDocument/didOpen",
+                                                  .params = Json{{"textDocument",
+                                                                  {{"uri", document.uri()},
+                                                                   {"languageId", "hlsl"},
+                                                                   {"version", 1},
+                                                                   {"text", source}}}}}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "hlsl/didChangeActiveVariant", .params = Json{{"variant", "Prod"}}}));
+
+    auto response = std::async(std::launch::async, [&] {
+        return server.handle(hlsl_intellisense::json_rpc::Request{
+            .id = std::int64_t{2},
+            .method = "hlsl/entryPointDataFlow",
+            .params = Json{{"textDocument", {{"uri", document.uri()}}}}});
+    });
+    entered.get_future().wait();
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{3},
+        .method = "hlsl/memoryLayout",
+        .params = Json{{"textDocument", {{"uri", document.uri()}}},
+                       {"position", Json{{"line", 0}, {"character", 0}}}}}));
+    release.set_value();
+
+    const auto result = response.get();
+    REQUIRE(result.has_value());
+    const auto* error = std::get_if<hlsl_intellisense::json_rpc::ErrorResponse>(&*result);
+    REQUIRE(error != nullptr);
+    CHECK(error->error.code == hlsl_intellisense::json_rpc::content_modified_code);
+}
+
 namespace {
 
 void write_compute_visualization_config(const TestDirectory& directory,
@@ -6872,6 +7130,60 @@ TEST_CASE("Server cancellation returns RequestCancelled for hlsl/computeVisualiz
     CHECK(error->error.code == hlsl_intellisense::json_rpc::request_cancelled_code);
     release.set_value();
     server.wait_for_analysis();
+}
+
+TEST_CASE("hlsl/computeVisualization rejects a context whose server submission was superseded "
+          "after the Manager generation check",
+          "[lsp][compute-visualization][safety][concurrency]") {
+    TestDirectory directory;
+    write_compute_visualization_config(directory);
+    const auto document = hlsl_intellisense::workspace::DocumentUri::from_path(
+        (directory.path() / "compute.hlsl").string());
+    auto hooks = std::make_shared<hlsl_intellisense::analysis::AnalysisHooks>();
+    std::promise<void> entered;
+    std::promise<void> release;
+    auto released = release.get_future().share();
+    hooks->before_server_submission_revalidation = [&] {
+        entered.set_value();
+        released.wait();
+    };
+    hlsl_intellisense::lsp::ServerOptions options;
+    options.analysis_hooks = hooks;
+    hlsl_intellisense::lsp::Server server{[](const auto&) {}, {}, options};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    const auto source = compute_visualization_shader();
+    static_cast<void>(server.handle(
+        hlsl_intellisense::json_rpc::Notification{.method = "textDocument/didOpen",
+                                                  .params = Json{{"textDocument",
+                                                                  {{"uri", document.uri()},
+                                                                   {"languageId", "hlsl"},
+                                                                   {"version", 1},
+                                                                   {"text", source}}}}}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "hlsl/didChangeActiveVariant", .params = Json{{"variant", "Configured"}}}));
+
+    auto response = std::async(std::launch::async, [&] {
+        return server.handle(hlsl_intellisense::json_rpc::Request{
+            .id = std::int64_t{2},
+            .method = "hlsl/computeVisualization",
+            .params = Json{{"textDocument", {{"uri", document.uri()}}}}});
+    });
+    entered.get_future().wait();
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{3},
+        .method = "hlsl/memoryLayout",
+        .params = Json{{"textDocument", {{"uri", document.uri()}}},
+                       {"position", Json{{"line", 0}, {"character", 0}}}}}));
+    release.set_value();
+
+    const auto result = response.get();
+    REQUIRE(result.has_value());
+    const auto* error = std::get_if<hlsl_intellisense::json_rpc::ErrorResponse>(&*result);
+    REQUIRE(error != nullptr);
+    CHECK(error->error.code == hlsl_intellisense::json_rpc::content_modified_code);
 }
 
 TEST_CASE("initialize advertises callHierarchyProvider", "[lsp][call-hierarchy]") {

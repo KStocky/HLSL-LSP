@@ -22,6 +22,11 @@ internal sealed class HlslBootstrapTextViewListener : IWpfTextViewCreationListen
         new(HlslBootstrapPackage.PackageGuidString);
     private static int activationStarted;
 
+    [Export(typeof(AdornmentLayerDefinition))]
+    [Name(HlslEffectiveContextAdornmentLayer.LayerName)]
+    [Order(After = PredefinedAdornmentLayers.Text)]
+    internal AdornmentLayerDefinition EffectiveContextLayer { get; set; }
+
     [Import(typeof(SVsServiceProvider))]
     internal IServiceProvider ServiceProvider { get; set; }
 
@@ -38,6 +43,7 @@ internal sealed class HlslBootstrapTextViewListener : IWpfTextViewCreationListen
             return;
         }
         HlslCommandContextTracker.Attach(textView, document.FilePath);
+        _ = new HlslEffectiveContextIndicator(textView, document);
         HlslBootstrapPackage.RequestActivation(document.FilePath);
         if (Interlocked.Exchange(ref activationStarted, 1) != 0)
         {

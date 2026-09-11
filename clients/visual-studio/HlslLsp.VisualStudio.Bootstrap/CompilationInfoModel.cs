@@ -8,6 +8,8 @@ namespace HlslLsp.VisualStudio.Bootstrap;
 
 public sealed class CompilationInfoModel
 {
+    public EffectiveShaderContextModel Context { get; set; }
+
     public string EntryPoint { get; set; }
 
     public string Stage { get; set; }

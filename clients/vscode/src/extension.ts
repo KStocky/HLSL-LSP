@@ -13,6 +13,7 @@ import {
   CompilationInfo,
   copyDisassemblyCommand,
   disassemblyFileName,
+  escapeHtml,
   resolveCompilationInfoRefresh,
   saveDisassemblyCommand,
 } from "./compilationInfo";
@@ -47,6 +48,11 @@ import {
   resolveComputeVisualizationRefresh,
 } from "./computeVisualization";
 import { Debouncer } from "./debouncer";
+import {
+  EffectiveShaderContext,
+  effectiveContextTooltip,
+  variantLabel,
+} from "./effectiveContext";
 import { PanelController } from "./panelController";
 import {
   HlslServerSettings,
@@ -57,7 +63,11 @@ import {
   TraceSetting,
 } from "./configuration";
 import { ClientLifecycle, LifecycleClient, LifecycleState } from "./lifecycle";
-import { MemoryLayout, memoryLayoutHtml } from "./memoryLayout";
+import {
+  MemoryLayout,
+  memoryLayoutHtml,
+  updateMemoryLayoutForDocumentChange,
+} from "./memoryLayout";
 import {
   resolveDxcRuntimeDirectory,
   resolveServerRuntime,
@@ -90,6 +100,7 @@ interface ManagedClient extends LifecycleClient {
     uri: vscode.Uri,
     options: ComputeVisualizationOptions,
   ): Promise<ComputeVisualization | null>;
+  effectiveContext(uri: vscode.Uri): Promise<EffectiveShaderContext | null>;
   dxcRuntime(): Promise<DxcRuntimeInfo | null>;
   variants(uri: vscode.Uri | undefined): Promise<VariantList | null>;
 }
@@ -132,6 +143,17 @@ interface MemoryLayoutTarget {
 }
 
 let activeLifecycle: ClientLifecycle<ManagedClient> | undefined;
+
+interface MemoryLayoutViewState {
+  readonly panel: vscode.WebviewPanel;
+  uri: vscode.Uri;
+  position: vscode.Position | undefined;
+  hasContent: boolean;
+}
+
+let memoryLayoutState: MemoryLayoutViewState | undefined;
+let memoryLayoutGeneration = 0;
+let memoryLayoutDebounce: NodeJS.Timeout | undefined;
 
 interface CompilationInfoViewState {
   readonly panel: vscode.WebviewPanel;
@@ -212,9 +234,54 @@ let computeVisualizationState: ComputeVisualizationViewState | undefined;
 // only when the extension itself activates/deactivates, independent of the
 // per-restart watchers whose events feed it.
 let watchedFileRefreshDebouncer: Debouncer | undefined;
+let effectiveContextStatusDebouncer: Debouncer | undefined;
 
 function compilationInfoLoadingHtml(): string {
   return `<!doctype html><html><body style="color:var(--vscode-foreground);background:var(--vscode-editor-background);font-family:var(--vscode-font-family);padding:1rem 1.5rem;"><p>Compiling…</p></body></html>`;
+}
+
+function memoryLayoutLoadingHtml(): string {
+  return `<!doctype html><html><body style="color:var(--vscode-foreground);background:var(--vscode-editor-background);font-family:var(--vscode-font-family);padding:1rem 1.5rem;"><p>Analyzing memory layout…</p></body></html>`;
+}
+
+function memoryLayoutErrorHtml(message: string): string {
+  return `<!doctype html><html><body style="color:var(--vscode-foreground);background:var(--vscode-editor-background);font-family:var(--vscode-font-family);padding:1rem 1.5rem;"><h1>Memory Layout</h1><p style="color:var(--vscode-editorWarning-foreground)">${escapeHtml(message)}</p></body></html>`;
+}
+
+async function refreshMemoryLayout(
+  lifecycle: ClientLifecycle<ManagedClient>,
+  uri: vscode.Uri,
+  position: vscode.Position,
+): Promise<void> {
+  const generation = ++memoryLayoutGeneration;
+  let layout: MemoryLayout | null | undefined;
+  let failureMessage: string | undefined;
+  try {
+    layout = await lifecycle.withClient((client) =>
+      client.memoryLayout(uri, position),
+    );
+  } catch (error) {
+    failureMessage =
+      error instanceof Error ? error.message : "The request failed.";
+  }
+  if (
+    generation !== memoryLayoutGeneration ||
+    memoryLayoutState?.uri.toString() !== uri.toString() ||
+    memoryLayoutState.position?.line !== position.line ||
+    memoryLayoutState.position.character !== position.character
+  ) {
+    return;
+  }
+  if (layout !== null && layout !== undefined) {
+    memoryLayoutState.hasContent = true;
+    memoryLayoutState.panel.title = `Memory Layout: ${layout.name || layout.type}`;
+    memoryLayoutState.panel.webview.html = memoryLayoutHtml(layout);
+  } else if (!memoryLayoutState.hasContent) {
+    memoryLayoutState.panel.webview.html = memoryLayoutErrorHtml(
+      failureMessage ??
+        "No compiler-authoritative memory layout is available at this position.",
+    );
+  }
 }
 
 function resourceBindingsLoadingHtml(): string {
@@ -509,6 +576,17 @@ async function refreshAllOpenAnalysisPanels(
   lifecycle: ClientLifecycle<ManagedClient>,
 ): Promise<void> {
   const tasks: Promise<void>[] = [];
+  if (memoryLayoutState !== undefined) {
+    if (memoryLayoutState.position !== undefined) {
+      tasks.push(
+        refreshMemoryLayout(
+          lifecycle,
+          memoryLayoutState.uri,
+          memoryLayoutState.position,
+        ),
+      );
+    }
+  }
   if (compilationInfoState !== undefined) {
     tasks.push(refreshCompilationInfo(lifecycle, compilationInfoState.uri));
   }
@@ -788,6 +866,15 @@ class VscodeLanguageClient implements ManagedClient {
     );
   }
 
+  public effectiveContext(
+    uri: vscode.Uri,
+  ): Promise<EffectiveShaderContext | null> {
+    return this.client.sendRequest<EffectiveShaderContext | null>(
+      "hlsl/effectiveContext",
+      { textDocument: { uri: uri.toString() } },
+    );
+  }
+
   public preprocessorExplorer(
     uri: vscode.Uri,
   ): Promise<PreprocessorExplorerReport | null> {
@@ -986,7 +1073,10 @@ export async function activate(
         serverArgs,
         handleRuntimeRestartRequired,
         handleActiveVariantChanged,
-        () => watchedFileRefreshDebouncer?.schedule(),
+        () => {
+          watchedFileRefreshDebouncer?.schedule();
+          effectiveContextStatusDebouncer?.schedule();
+        },
       );
     } catch (error) {
       for (const watcher of watchers) {
@@ -1001,6 +1091,7 @@ export async function activate(
   });
 
   let variantStatusGeneration = 0;
+  let variantStatusDocument: string | undefined;
   const updateVariantStatus = async (): Promise<void> => {
     const generation = ++variantStatusGeneration;
     const editor = vscode.window.activeTextEditor;
@@ -1009,13 +1100,18 @@ export async function activate(
       return;
     }
     const documentUri = editor.document.uri;
-    let list: VariantList | null | undefined;
+    const documentKey = documentUri.toString();
+    if (variantStatusDocument !== documentKey) {
+      variantStatus.hide();
+      variantStatusDocument = undefined;
+    }
+    let shaderContext: EffectiveShaderContext | null | undefined;
     try {
-      list = await lifecycle.withClient((client) =>
-        client.variants(documentUri),
+      shaderContext = await lifecycle.withClient((client) =>
+        client.effectiveContext(documentUri),
       );
     } catch {
-      list = undefined;
+      shaderContext = undefined;
     }
     if (
       generation !== variantStatusGeneration ||
@@ -1024,20 +1120,23 @@ export async function activate(
     ) {
       return;
     }
-    if (
-      list === undefined ||
-      list === null ||
-      applicableVariants(list.variants).length === 0
-    ) {
-      variantStatus.hide();
+    if (shaderContext === undefined || shaderContext === null) {
+      if (variantStatusDocument !== documentKey) {
+        variantStatus.hide();
+      }
       return;
     }
-    const active = list.activeVariant ?? "";
-    variantStatus.text = `$(versions) HLSL: ${active !== "" ? active : "Default"}`;
-    variantStatus.tooltip =
-      "Active HLSL shader compilation variant. Click to change.";
+    variantStatusDocument = documentKey;
+    variantStatus.text = `$(versions) HLSL: ${variantLabel(shaderContext.activeVariant)}`;
+    const tooltip = new vscode.MarkdownString(
+      effectiveContextTooltip(shaderContext),
+    );
+    variantStatus.tooltip = tooltip;
     variantStatus.show();
   };
+  effectiveContextStatusDebouncer = new Debouncer(() => {
+    void updateVariantStatus();
+  });
 
   const restart = async (): Promise<void> => {
     try {
@@ -1215,22 +1314,60 @@ export async function activate(
             target.position.character,
           );
         }
-        const layout = await lifecycle.withClient((client) =>
-          client.memoryLayout(uri, position),
-        );
-        if (layout === null || layout === undefined) {
-          await vscode.window.showInformationMessage(
-            "No supported HLSL memory layout is available at the caret.",
+        if (memoryLayoutState === undefined) {
+          const generation = ++memoryLayoutGeneration;
+          const layout = await lifecycle.withClient((client) =>
+            client.memoryLayout(uri, position),
           );
+          if (generation !== memoryLayoutGeneration) {
+            return;
+          }
+          if (layout === null || layout === undefined) {
+            await vscode.window.showInformationMessage(
+              "No supported HLSL memory layout is available at the caret.",
+            );
+            return;
+          }
+          const panel = vscode.window.createWebviewPanel(
+            "hlslMemoryLayout",
+            `Memory Layout: ${layout.name || layout.type}`,
+            vscode.ViewColumn.Beside,
+            { enableScripts: false },
+          );
+          memoryLayoutState = {
+            panel,
+            uri,
+            position,
+            hasContent: true,
+          };
+          panel.webview.html = memoryLayoutHtml(layout);
+          panel.onDidDispose(() => {
+            if (memoryLayoutState?.panel === panel) {
+              ++memoryLayoutGeneration;
+              if (memoryLayoutDebounce !== undefined) {
+                clearTimeout(memoryLayoutDebounce);
+                memoryLayoutDebounce = undefined;
+              }
+              memoryLayoutState = undefined;
+            }
+          });
           return;
+        } else {
+          const switchingTarget =
+            memoryLayoutState.uri.toString() !== uri.toString() ||
+            memoryLayoutState.position?.line !== position.line ||
+            memoryLayoutState.position.character !== position.character;
+          memoryLayoutState.uri = uri;
+          memoryLayoutState.position = position;
+          if (switchingTarget) {
+            memoryLayoutState.hasContent = false;
+            memoryLayoutState.panel.webview.html = memoryLayoutLoadingHtml();
+          }
+          memoryLayoutState.panel.reveal(vscode.ViewColumn.Beside);
         }
-        const panel = vscode.window.createWebviewPanel(
-          "hlslMemoryLayout",
-          `Memory Layout: ${layout.name || layout.type}`,
-          vscode.ViewColumn.Beside,
-          { enableScripts: false },
-        );
-        panel.webview.html = memoryLayoutHtml(layout);
+        if (memoryLayoutState.uri.toString() === uri.toString()) {
+          await refreshMemoryLayout(lifecycle, uri, position);
+        }
       },
     ),
     vscode.commands.registerCommand("hlsl.showCompilationInfo", async () => {
@@ -1902,6 +2039,7 @@ export async function activate(
         return;
       }
       void refreshAllOpenAnalysisPanels(lifecycle);
+      effectiveContextStatusDebouncer?.schedule();
     }),
     vscode.workspace.onDidChangeTextDocument((event) => {
       // Same conservative "any open HLSL document" trigger as the save
@@ -1909,6 +2047,48 @@ export async function activate(
       // triggers one request per panel, not a storm of them.
       if (event.document.languageId !== "hlsl") {
         return;
+      }
+      if (
+        vscode.window.activeTextEditor?.document.uri.toString() ===
+        event.document.uri.toString()
+      ) {
+        effectiveContextStatusDebouncer?.schedule();
+      }
+      if (memoryLayoutState !== undefined) {
+        if (memoryLayoutDebounce !== undefined) {
+          clearTimeout(memoryLayoutDebounce);
+        }
+        const update = updateMemoryLayoutForDocumentChange(
+          memoryLayoutState.uri.toString(),
+          event.document.uri.toString(),
+          memoryLayoutState.position,
+          event.contentChanges,
+        );
+        if (update.invalidated) {
+          ++memoryLayoutGeneration;
+          memoryLayoutState.position = undefined;
+          memoryLayoutState.hasContent = false;
+          memoryLayoutState.panel.webview.html = memoryLayoutErrorHtml(
+            "The tracked declaration was edited. Run Memory Layout again at the desired position.",
+          );
+          memoryLayoutDebounce = undefined;
+        } else if (update.position !== undefined) {
+          memoryLayoutState.position = new vscode.Position(
+            update.position.line,
+            update.position.character,
+          );
+          if (update.shouldRefresh) {
+            memoryLayoutDebounce = setTimeout(() => {
+              if (memoryLayoutState?.position !== undefined) {
+                void refreshMemoryLayout(
+                  lifecycle,
+                  memoryLayoutState.uri,
+                  memoryLayoutState.position,
+                );
+              }
+            }, 500);
+          }
+        }
       }
       if (compilationInfoState !== undefined) {
         if (compilationInfoDebounce !== undefined) {
@@ -1983,6 +2163,12 @@ export async function activate(
 export async function deactivate(): Promise<void> {
   const lifecycle = activeLifecycle;
   activeLifecycle = undefined;
+  ++memoryLayoutGeneration;
+  if (memoryLayoutDebounce !== undefined) {
+    clearTimeout(memoryLayoutDebounce);
+    memoryLayoutDebounce = undefined;
+  }
+  memoryLayoutState = undefined;
   if (compilationInfoDebounce !== undefined) {
     clearTimeout(compilationInfoDebounce);
     compilationInfoDebounce = undefined;
@@ -2004,5 +2190,7 @@ export async function deactivate(): Promise<void> {
   computeVisualizationState = undefined;
   watchedFileRefreshDebouncer?.dispose();
   watchedFileRefreshDebouncer = undefined;
+  effectiveContextStatusDebouncer?.dispose();
+  effectiveContextStatusDebouncer = undefined;
   await lifecycle?.stop();
 }

@@ -132,6 +132,12 @@ struct AnalysisHooks {
     // resolved stale, on the basis of the metadata snapshot's own
     // point-in-time content. Never set in production.
     std::function<void(std::string_view)> before_call_hierarchy_candidate_root;
+    // Test seam only: invoked after an analysis result and its server-side
+    // submission context have been captured, but before handlers return
+    // them together. Lets tests supersede only the server submission while
+    // preserving the Manager content generation, proving these two
+    // generation namespaces are validated independently.
+    std::function<void()> before_server_submission_revalidation;
 };
 
 // Pairs a query result with the content generation (see

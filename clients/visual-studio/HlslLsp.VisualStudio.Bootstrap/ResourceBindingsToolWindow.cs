@@ -137,23 +137,14 @@ internal sealed class ResourceBindingsControl : UserControl
 
     private void AddHeader(CompilationInfoModel info)
     {
-        var title = string.IsNullOrEmpty(info.EntryPoint)
-            ? info.TargetProfile
-            : $"{info.EntryPoint} ({info.TargetProfile})";
+        EffectiveShaderContextDisplay.AddHeader(
+            content,
+            "Resource Bindings",
+            info.Context);
         content.Children.Add(new TextBlock
         {
-            Text = "Resource Bindings: " +
-                   (string.IsNullOrEmpty(title) ? "(default entry point)" : title),
-            FontSize = 18,
-            FontWeight = FontWeights.SemiBold,
-        });
-        var variant = string.IsNullOrEmpty(info.ActiveVariant)
-            ? "(none)"
-            : info.ActiveVariant;
-        content.Children.Add(new TextBlock
-        {
-            Text = $"Stage {info.Stage} · active variant {variant}",
-            Margin = new Thickness(0, 3, 0, 6),
+            Text = $"Stage: {EffectiveShaderContextDisplay.Value(info.Stage)}",
+            Margin = new Thickness(0, 0, 0, 6),
             Opacity = 0.75,
         });
         if (!info.Success)

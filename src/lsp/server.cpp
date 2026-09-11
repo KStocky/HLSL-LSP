@@ -20,6 +20,7 @@
 #include <limits>
 #include <stdexcept>
 #include <thread>
+#include <tuple>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -34,6 +35,21 @@ struct EffectiveShaderTarget {
     std::string entry_point;
     std::string target_profile;
 };
+
+[[nodiscard]] bool has_compiler_option(const std::vector<std::string>& arguments,
+                                       std::string_view option) {
+    for (std::size_t index = 0; index < arguments.size(); ++index) {
+        const auto& argument = arguments[index];
+        if (argument == option && index + 1 < arguments.size()) {
+            ++index;
+            return true;
+        }
+        if (argument.starts_with(option) && argument.size() > option.size()) {
+            return true;
+        }
+    }
+    return false;
+}
 
 [[nodiscard]] EffectiveShaderTarget
 effective_shader_target(const workspace::WorkspaceConfiguration& configuration) {
@@ -52,6 +68,34 @@ effective_shader_target(const workspace::WorkspaceConfiguration& configuration) 
         }
     }
     return result;
+}
+
+[[nodiscard]] Json effective_context_origin_json(const EffectiveContextOrigin& origin) {
+    Json result{{"label", origin.label}, {"setting", origin.setting}};
+    if (origin.file.has_value()) {
+        result["uri"] = workspace::DocumentUri::from_path(origin.file->generic_string()).uri();
+    }
+    return result;
+}
+
+[[nodiscard]] Json effective_shader_context_json(const EffectiveShaderContext& context) {
+    Json origins = Json::object();
+    if (context.variant_origin.has_value()) {
+        origins["variant"] = effective_context_origin_json(*context.variant_origin);
+    }
+    if (context.entry_point_origin.has_value()) {
+        origins["entryPoint"] = effective_context_origin_json(*context.entry_point_origin);
+    }
+    if (context.target_profile_origin.has_value()) {
+        origins["targetProfile"] = effective_context_origin_json(*context.target_profile_origin);
+    }
+    return {{"documentUri", context.document_uri},
+            {"file", context.file},
+            {"activeVariant",
+             context.active_variant.has_value() ? Json(*context.active_variant) : Json(nullptr)},
+            {"entryPoint", context.entry_point},
+            {"targetProfile", context.target_profile},
+            {"origins", std::move(origins)}};
 }
 
 [[noreturn]] void invalid_params(std::string_view message) {
@@ -2213,6 +2257,10 @@ void Server::register_handlers() {
                                          [this](const auto& params, const auto& context) {
                                              return compilation_info(params, context);
                                          });
+    dispatcher_.register_request_handler("hlsl/effectiveContext",
+                                         [this](const auto& params, const auto& context) {
+                                             return effective_context(params, context);
+                                         });
     dispatcher_.register_request_handler("hlsl/computeVisualization",
                                          [this](const auto& params, const auto& context) {
                                              return compute_visualization(params, context);
@@ -2757,7 +2805,7 @@ std::string Server::text_for_path(std::string_view path) const {
 
 Json Server::call_hierarchy_item(const dxc::CallableSymbol& callable, const std::string& root_uri,
                                  const std::string& root_identity, std::int64_t root_version,
-                                 std::uint64_t root_generation) const {
+                                 std::uint64_t root_generation, const Json& context) const {
     const auto target = workspace::DocumentUri::from_path(callable.location.path);
     const auto text = text_for_path(callable.location.path);
     const auto whole_range = text.empty() ? workspace::Range{} : callable_range(callable, text);
@@ -2773,19 +2821,22 @@ Json Server::call_hierarchy_item(const dxc::CallableSymbol& callable, const std:
               // changing `rootVersion`, so `rootVersion` alone cannot
               // detect it.
               {"generation", root_generation},
+              {"context", context},
               {"path", callable.location.path},
               {"line", callable.location.line},
               {"column", callable.location.column},
               {"startOffset", callable.start_offset},
               {"cursorKind", callable.cursor_kind},
               {"name", callable.name}};
-    return {{"name", callable.name},
-            {"kind", symbol_kind(callable.cursor_kind, callable.name)},
-            {"detail", callable.signature},
-            {"uri", target.uri()},
-            {"range", lsp_range(whole_range)},
-            {"selectionRange", lsp_range(selection_range)},
-            {"data", std::move(data)}};
+    Json result{{"name", callable.name},
+                {"kind", symbol_kind(callable.cursor_kind, callable.name)},
+                {"detail", callable.signature},
+                {"uri", target.uri()},
+                {"range", lsp_range(whole_range)},
+                {"selectionRange", lsp_range(selection_range)},
+                {"data", std::move(data)},
+                {"context", context}};
+    return result;
 }
 
 Json Server::navigable_json(std::string_view name, std::uint32_t cursor_kind,
@@ -2814,6 +2865,7 @@ Server::CallHierarchyItemData Server::parse_call_hierarchy_item_data(const Json&
     result.root_identity = string_member(data, "rootIdentity");
     result.root_version = integer_member(data, "rootVersion");
     result.generation = unsigned64_member(data, "generation");
+    result.context = object_member(data, "context");
     result.path = string_member(data, "path");
     result.line = unsigned_member(data, "line");
     result.column = unsigned_member(data, "column");
@@ -2843,7 +2895,7 @@ Json Server::prepare_call_hierarchy(const std::optional<Json>& params,
         }
     }();
 
-    analyze_and_publish(snapshot.uri());
+    const auto submission = analyze_and_publish(snapshot.uri());
     const auto [line, column] = dxc_position(snapshot.text(), request_position);
     const auto callable =
         analysis_.callable_at(snapshot.document_uri().identity(), snapshot.version(),
@@ -2870,9 +2922,9 @@ Json Server::prepare_call_hierarchy(const std::optional<Json>& params,
     // offsets/new text" hazard the recheck immediately below exists to
     // catch, by rejecting outright whenever anything could have raced
     // *any* part of this construction, rather than only checking beforehand.
-    auto item =
-        call_hierarchy_item(*callable.value, snapshot.uri(), snapshot.document_uri().identity(),
-                            snapshot.version(), callable.generation);
+    auto item = call_hierarchy_item(
+        *callable.value, snapshot.uri(), snapshot.document_uri().identity(), snapshot.version(),
+        callable.generation, effective_shader_context_json(submission.context));
     {
         std::scoped_lock state_lock{state_mutex_};
         if (!documents_.contains(snapshot.uri()) ||
@@ -2900,6 +2952,8 @@ Json Server::prepare_call_hierarchy(const std::optional<Json>& params,
                                      context.cancellation) != callable.generation) {
         throw HandlerError{json_rpc::content_modified_code, "prepareCallHierarchy was superseded"};
     }
+    require_current_submission(snapshot.document_uri().identity(), submission.generation,
+                               "prepareCallHierarchy was superseded");
     return Json::array({std::move(item)});
 }
 
@@ -2947,7 +3001,12 @@ Json Server::call_hierarchy_outgoing_calls(const std::optional<Json>& params,
                                "Call hierarchy item is no longer valid"};
         }
     }
-    analyze_and_publish(data.root_uri);
+    const auto submission = analyze_and_publish(data.root_uri);
+    const auto submission_context = effective_shader_context_json(submission.context);
+    if (submission_context != data.context) {
+        throw HandlerError{json_rpc::content_modified_code,
+                           "Call hierarchy item context is no longer current"};
+    }
     // Validates that `data` still describes the same symbol in the current
     // analysis (see `validate_call_hierarchy_item`'s comment). That check
     // and the `outgoing_calls` query below are still two separately timed
@@ -2989,7 +3048,8 @@ Json Server::call_hierarchy_outgoing_calls(const std::optional<Json>& params,
                 lsp_range(offset_range(caller_text, call_site.start_offset, call_site.end_offset)));
         }
         result.push_back({{"to", call_hierarchy_item(call.callee, data.root_uri, data.root_identity,
-                                                     data.root_version, outgoing.generation)},
+                                                     data.root_version, outgoing.generation,
+                                                     submission_context)},
                           {"fromRanges", std::move(from_ranges)}});
     }
     // The checks above close the window between validation and the
@@ -2999,8 +3059,10 @@ Json Server::call_hierarchy_outgoing_calls(const std::optional<Json>& params,
     // during this construction (of the caller's own file, or of whichever
     // file a callee happens to be defined in) could otherwise pair
     // offsets computed against `outgoing.generation` with already-newer
-    // text. One last generation recheck, strictly after the full response
-    // is built, catches that remaining window too.
+    // text. One last Manager generation recheck, strictly after the full
+    // response is built, catches that remaining window too. The separate
+    // server-submission check that follows also protects context-only
+    // changes for which the Manager may legitimately retain cached content.
     if (options_.analysis_hooks && options_.analysis_hooks->before_call_hierarchy_revalidation) {
         options_.analysis_hooks->before_call_hierarchy_revalidation();
     }
@@ -3009,6 +3071,11 @@ Json Server::call_hierarchy_outgoing_calls(const std::optional<Json>& params,
         throw HandlerError{json_rpc::content_modified_code,
                            "Call hierarchy item no longer matches the analyzed source"};
     }
+    if (options_.analysis_hooks && options_.analysis_hooks->before_server_submission_revalidation) {
+        options_.analysis_hooks->before_server_submission_revalidation();
+    }
+    require_current_submission(data.root_identity, submission.generation, submission_context,
+                               "Call hierarchy item context was superseded");
     return result;
 }
 
@@ -3059,6 +3126,7 @@ Json Server::call_hierarchy_incoming_calls(const std::optional<Json>& params,
         std::string root_identity;
         std::int64_t root_version{};
         std::uint64_t generation{};
+        Json context;
         std::vector<dxc::Reference> call_sites;
     };
     // Keyed by (caller path, caller start offset, *root identity*): two
@@ -3109,8 +3177,12 @@ Json Server::call_hierarchy_incoming_calls(const std::optional<Json>& params,
     // actually depended on, not only the subset that happened to
     // contribute a caller (see that pass's own comment for why an
     // empty-result root still needs this).
-    std::unordered_map<std::string, std::pair<std::int64_t, std::uint64_t>>
-        queried_root_generations;
+    struct QueriedRootGeneration {
+        std::int64_t root_version{};
+        std::uint64_t content_generation{};
+        std::uint64_t submission_generation{};
+    };
+    std::unordered_map<std::string, QueriedRootGeneration> queried_root_generations;
 
     // Every currently open root is queried, unconditionally -- there is no
     // "is this root even a plausible candidate" filter here (there
@@ -3152,13 +3224,16 @@ Json Server::call_hierarchy_incoming_calls(const std::optional<Json>& params,
             }
             return documents_.snapshot(root.root_uri);
         }();
-        analyze_and_publish(root_snapshot.uri());
+        const auto candidate_submission = analyze_and_publish(root_snapshot.uri());
         auto incoming =
             analysis_.incoming_calls(root.root_identity, root_snapshot.version(), data.path,
                                      data.line, data.column, context.cancellation);
         auto& calls = incoming.value;
         queried_root_generations.insert_or_assign(
-            root.root_identity, std::pair{root_snapshot.version(), incoming.generation});
+            root.root_identity,
+            QueriedRootGeneration{.root_version = root_snapshot.version(),
+                                  .content_generation = incoming.generation,
+                                  .submission_generation = candidate_submission.generation});
         // Only meaningful when this candidate root *is* the item's own
         // root: closes the same TOCTOU window `outgoing_calls` guards
         // against above -- a reanalysis of `data.root_identity` landing
@@ -3190,6 +3265,8 @@ Json Server::call_hierarchy_incoming_calls(const std::optional<Json>& params,
                                                      .root_identity = root.root_identity,
                                                      .root_version = root_snapshot.version(),
                                                      .generation = incoming.generation,
+                                                     .context = effective_shader_context_json(
+                                                         candidate_submission.context),
                                                      .call_sites = std::move(call.call_sites)});
             } else {
                 // Both entries share this root/generation (same key), so
@@ -3238,7 +3315,7 @@ Json Server::call_hierarchy_incoming_calls(const std::optional<Json>& params,
         }
         result.push_back(
             {{"from", call_hierarchy_item(entry.caller, entry.root_uri, entry.root_identity,
-                                          entry.root_version, entry.generation)},
+                                          entry.root_version, entry.generation, entry.context)},
              {"fromRanges", std::move(from_ranges)}});
     }
 
@@ -3261,14 +3338,15 @@ Json Server::call_hierarchy_incoming_calls(const std::optional<Json>& params,
     if (options_.analysis_hooks && options_.analysis_hooks->before_call_hierarchy_revalidation) {
         options_.analysis_hooks->before_call_hierarchy_revalidation();
     }
-    for (const auto& [root_identity, version_and_generation] : queried_root_generations) {
+    for (const auto& [root_identity, generations] : queried_root_generations) {
         context.cancellation.throw_if_cancellation_requested();
-        const auto& [root_version, expected_generation] = version_and_generation;
-        if (analysis_.content_generation(root_identity, root_version, context.cancellation) !=
-            expected_generation) {
+        if (analysis_.content_generation(root_identity, generations.root_version,
+                                         context.cancellation) != generations.content_generation) {
             throw HandlerError{json_rpc::content_modified_code,
                                "A referenced root changed during analysis"};
         }
+        require_current_submission(root_identity, generations.submission_generation,
+                                   "A referenced root changed during analysis");
     }
     return result;
 }
@@ -3292,7 +3370,7 @@ Json Server::entry_point_data_flow(const std::optional<Json>& params,
         }
     }();
 
-    analyze_and_publish(snapshot.uri());
+    const auto submission = analyze_and_publish(snapshot.uri());
     // `flow` and `generation` are fetched together, atomically, from the
     // same serialized manager operation (see `WithGeneration`'s comment):
     // fetching them via two separate `Manager` calls could straddle a
@@ -3319,11 +3397,13 @@ Json Server::entry_point_data_flow(const std::optional<Json>& params,
     const auto root_uri = snapshot.uri();
     const auto root_identity = snapshot.document_uri().identity();
     const auto root_version = snapshot.version();
+    const auto context_json = effective_shader_context_json(submission.context);
 
-    Json result{{"found", flow.found}, {"explanation", flow.explanation}};
+    Json result{
+        {"context", context_json}, {"found", flow.found}, {"explanation", flow.explanation}};
     if (flow.entry_point.has_value()) {
         result["entryPoint"] = call_hierarchy_item(*flow.entry_point, root_uri, root_identity,
-                                                   root_version, generation);
+                                                   root_version, generation, context_json);
     } else {
         // `Json{nullptr}` would construct a one-element array via the
         // initializer-list constructor; assignment is used instead so this
@@ -3335,7 +3415,7 @@ Json Server::entry_point_data_flow(const std::optional<Json>& params,
     for (const auto& node : flow.reachable_functions) {
         reachable.push_back(
             {{"function", call_hierarchy_item(node.function, root_uri, root_identity, root_version,
-                                              generation)},
+                                              generation, context_json)},
              {"depth", node.depth},
              {"recursive", node.recursive}});
     }
@@ -3343,8 +3423,8 @@ Json Server::entry_point_data_flow(const std::optional<Json>& params,
 
     Json unreachable = Json::array();
     for (const auto& function : flow.unreachable_functions) {
-        unreachable.push_back(
-            call_hierarchy_item(function, root_uri, root_identity, root_version, generation));
+        unreachable.push_back(call_hierarchy_item(function, root_uri, root_identity, root_version,
+                                                  generation, context_json));
     }
     result["unreachableFunctions"] = std::move(unreachable);
 
@@ -3398,6 +3478,11 @@ Json Server::entry_point_data_flow(const std::optional<Json>& params,
         throw HandlerError{json_rpc::content_modified_code,
                            "hlsl/entryPointDataFlow was superseded"};
     }
+    if (options_.analysis_hooks && options_.analysis_hooks->before_server_submission_revalidation) {
+        options_.analysis_hooks->before_server_submission_revalidation();
+    }
+    require_current_submission(root_identity, submission.generation,
+                               "hlsl/entryPointDataFlow was superseded");
     return result;
 }
 
@@ -3624,19 +3709,27 @@ Json Server::memory_layout(const std::optional<Json>& params,
         invalid_params(error.what());
     }
 
-    analyze_and_publish(snapshot.uri());
+    const auto submission = analyze_and_publish(snapshot.uri());
     const auto [line, column] = dxc_position(snapshot.text(), request_position);
     const auto layout =
         analysis_.memory_layout(snapshot.document_uri().identity(), snapshot.version(),
                                 snapshot.path(), line, column, context.cancellation);
     {
         std::scoped_lock state_lock{state_mutex_};
+        const auto generation = analysis_generations_.find(snapshot.document_uri().identity());
         if (!documents_.contains(snapshot.uri()) ||
-            documents_.snapshot(snapshot.uri()).version() != snapshot.version()) {
+            documents_.snapshot(snapshot.uri()).version() != snapshot.version() ||
+            generation == analysis_generations_.end() ||
+            generation->second != submission.generation) {
             throw HandlerError{json_rpc::content_modified_code, "Memory layout was superseded"};
         }
     }
-    return layout.has_value() ? memory_layout_json(*layout) : Json(nullptr);
+    if (!layout.has_value()) {
+        return nullptr;
+    }
+    auto result = memory_layout_json(*layout);
+    result["context"] = effective_shader_context_json(submission.context);
+    return result;
 }
 
 Json Server::command_context(const std::optional<Json>& params,
@@ -3737,9 +3830,17 @@ Json Server::preprocessor_explorer(const std::optional<Json>& params,
     }
     context.cancellation.throw_if_cancellation_requested();
 
-    const auto configuration = configuration_for(snapshot, configuration_state);
+    workspace::VariantSelection active_variant_selection = workspace::VariantSelection::undefined;
+    const auto configuration =
+        configuration_for(snapshot, configuration_state, &active_variant_selection);
+    const auto report_context = effective_context_for(snapshot, configuration_state, configuration,
+                                                      active_variant_selection);
     auto resolution = workspace::resolve_includes(snapshot, open_documents, configuration);
-    analyze_and_publish(snapshot.uri());
+    const auto submission = analyze_and_publish(snapshot.uri());
+    if (effective_shader_context_json(report_context) !=
+        effective_shader_context_json(submission.context)) {
+        throw HandlerError{json_rpc::content_modified_code, "Preprocessor explorer was superseded"};
+    }
     bool skipped_regions_available = true;
     std::string skipped_regions_unavailable_reason;
     if (resolution.has_rewritten_sources && !dxc::supports_skipped_ranges_for_rewritten_sources()) {
@@ -3935,13 +4036,17 @@ Json Server::preprocessor_explorer(const std::optional<Json>& params,
 
     {
         std::scoped_lock state_lock{state_mutex_};
+        const auto generation = analysis_generations_.find(snapshot.document_uri().identity());
         if (!documents_.contains(snapshot.uri()) ||
-            documents_.snapshot(snapshot.uri()).version() != snapshot.version()) {
+            documents_.snapshot(snapshot.uri()).version() != snapshot.version() ||
+            generation == analysis_generations_.end() ||
+            generation->second != submission.generation) {
             throw HandlerError{json_rpc::content_modified_code,
                                "Preprocessor explorer was superseded"};
         }
     }
-    return {{"rootUri", snapshot.uri()},
+    return {{"context", effective_shader_context_json(report_context)},
+            {"rootUri", snapshot.uri()},
             {"files", std::move(files)},
             {"skippedRegions", std::move(skipped_regions)},
             {"macros", std::move(macros)},
@@ -4015,8 +4120,51 @@ Json Server::compilation_info(const std::optional<Json>& params,
         }
     }
     auto result = compilation_info_json(info, submission.active_variant, resource_location_texts);
+    result["context"] = effective_shader_context_json(submission.context);
     require_current();
     return result;
+}
+
+Json Server::effective_context(const std::optional<Json>& params,
+                               const json_rpc::RequestContext& context) {
+    require_running();
+    const auto& value = object_params(params);
+    const auto uri = string_member(object_member(value, "textDocument"), "uri");
+    const auto [snapshot, configuration_state, context_revision] = [&] {
+        std::scoped_lock state_lock{state_mutex_};
+        try {
+            const auto& state = documents_.document(uri);
+            if (!state.open) {
+                invalid_params("hlsl/effectiveContext document is not open");
+            }
+            return std::tuple{documents_.snapshot(uri),
+                              ConfigurationState{.editor_settings = editor_settings_,
+                                                 .client_default_language_version =
+                                                     client_default_language_version_,
+                                                 .active_variant = active_variant_,
+                                                 .workspace_folders = workspace_folders_},
+                              effective_context_revision_};
+        } catch (const workspace::DocumentError& error) {
+            invalid_params(error.what());
+        }
+    }();
+    context.cancellation.throw_if_cancellation_requested();
+    workspace::VariantSelection active_variant_selection = workspace::VariantSelection::undefined;
+    const auto configuration =
+        configuration_for(snapshot, configuration_state, &active_variant_selection);
+    const auto result = effective_context_for(snapshot, configuration_state, configuration,
+                                              active_variant_selection);
+    context.cancellation.throw_if_cancellation_requested();
+    {
+        std::scoped_lock state_lock{state_mutex_};
+        if (!documents_.contains(snapshot.uri()) ||
+            documents_.snapshot(snapshot.uri()).version() != snapshot.version() ||
+            effective_context_revision_ != context_revision) {
+            throw HandlerError{json_rpc::content_modified_code,
+                               "hlsl/effectiveContext was superseded"};
+        }
+    }
+    return effective_shader_context_json(result);
 }
 
 Json Server::compute_visualization(const std::optional<Json>& params,
@@ -4047,7 +4195,7 @@ Json Server::compute_visualization(const std::optional<Json>& params,
         }
     }();
 
-    analyze_and_publish(snapshot.uri());
+    const auto submission = analyze_and_publish(snapshot.uri());
     const auto info_with_generation = analysis_.compilation_info_with_generation(
         snapshot.document_uri().identity(), snapshot.version(), snapshot.path(),
         context.cancellation);
@@ -4066,6 +4214,7 @@ Json Server::compute_visualization(const std::optional<Json>& params,
 
     const bool found = !info.entry_point.empty();
     Json result{
+        {"context", effective_shader_context_json(submission.context)},
         {"applicable", false},
         {"found", found},
         {"explanation", ""},
@@ -4338,6 +4487,11 @@ Json Server::compute_visualization(const std::optional<Json>& params,
         throw HandlerError{json_rpc::content_modified_code,
                            "hlsl/computeVisualization was superseded"};
     }
+    if (options_.analysis_hooks && options_.analysis_hooks->before_server_submission_revalidation) {
+        options_.analysis_hooks->before_server_submission_revalidation();
+    }
+    require_current_submission(root_identity, submission.generation,
+                               "hlsl/computeVisualization was superseded");
     return result;
 }
 
@@ -4847,6 +5001,9 @@ void Server::did_change_configuration(const std::optional<Json>& params) {
             }
             inlay_inputs_changed =
                 editor_settings_ != candidate || inlay_hint_settings_ != candidate_inlay_hints;
+            if (editor_settings_ != candidate) {
+                ++effective_context_revision_;
+            }
             editor_settings_ = candidate;
             inlay_hint_settings_ = candidate_inlay_hints;
         }
@@ -4877,6 +5034,9 @@ void Server::did_change_client_defaults(const std::optional<Json>& params) {
         {
             std::scoped_lock state_lock{state_mutex_};
             changed = client_default_language_version_ != *defaults.language_version;
+            if (changed) {
+                ++effective_context_revision_;
+            }
             client_default_language_version_ = *defaults.language_version;
         }
         if (changed) {
@@ -4913,6 +5073,7 @@ void Server::did_change_active_variant(const std::optional<Json>& params) {
             changed = active_variant_ != variant;
             active_variant_ = variant;
             if (changed) {
+                ++effective_context_revision_;
                 reported_variant_issue_key_.reset();
             }
         }
@@ -4997,6 +5158,9 @@ void Server::did_change_workspace_folders(const std::optional<Json>& params) {
         {
             std::scoped_lock state_lock{state_mutex_};
             changed = workspace_folders_ != workspace_folders;
+            if (changed) {
+                ++effective_context_revision_;
+            }
             workspace_folders_ = std::move(workspace_folders);
         }
         if (changed) {
@@ -5058,6 +5222,7 @@ void Server::did_change_watched_files(const std::optional<Json>& params) {
                         }
                         configuration_watch_states_.insert_or_assign(changed.identity(),
                                                                      std::move(watch_state));
+                        ++effective_context_revision_;
                     }
                     changed_configuration_uris.push_back(changed.uri());
                     changed_configuration_directories.push_back(
@@ -5185,13 +5350,23 @@ Server::AnalysisSubmission Server::analyze_and_publish(std::string_view uri) {
         auto snapshot = documents_.snapshot(uri);
         root_identity = snapshot.document_uri().identity();
         const auto generation = ++analysis_generations_[root_identity];
-        auto configuration = configuration_for(snapshot, editor_settings_);
+        workspace::VariantSelection active_variant_selection =
+            workspace::VariantSelection::undefined;
+        const auto configuration_state =
+            ConfigurationState{.editor_settings = editor_settings_,
+                               .client_default_language_version = client_default_language_version_,
+                               .active_variant = active_variant_,
+                               .workspace_folders = workspace_folders_};
+        auto configuration =
+            configuration_for(snapshot, configuration_state, &active_variant_selection);
         const auto effective_target = effective_shader_target(configuration);
         submission = {
             .generation = generation,
             .active_variant = active_variant_,
             .entry_point = effective_target.entry_point,
             .target_profile = effective_target.target_profile,
+            .context = effective_context_for(snapshot, configuration_state, configuration,
+                                             active_variant_selection),
         };
         return analysis::AnalysisInput{.root = snapshot,
                                        .open_documents = documents_.open_snapshots(),
@@ -5214,6 +5389,25 @@ Server::AnalysisSubmission Server::analyze_and_publish(std::string_view uri) {
         analysis_.wait_idle();
     }
     return submission;
+}
+
+void Server::require_current_submission(std::string_view root_identity, std::uint64_t generation,
+                                        std::string_view message) const {
+    std::scoped_lock state_lock{state_mutex_};
+    const auto submission = analysis_submissions_.find(std::string{root_identity});
+    if (submission == analysis_submissions_.end() || submission->second.generation != generation) {
+        throw HandlerError{json_rpc::content_modified_code, std::string{message}};
+    }
+}
+
+void Server::require_current_submission(std::string_view root_identity, std::uint64_t generation,
+                                        const Json& context, std::string_view message) const {
+    std::scoped_lock state_lock{state_mutex_};
+    const auto submission = analysis_submissions_.find(std::string{root_identity});
+    if (submission == analysis_submissions_.end() || submission->second.generation != generation ||
+        effective_shader_context_json(submission->second.context) != context) {
+        throw HandlerError{json_rpc::content_modified_code, std::string{message}};
+    }
 }
 
 workspace::WorkspaceConfiguration
@@ -5268,6 +5462,71 @@ Server::configuration_for(const workspace::SourceSnapshot& snapshot,
     return workspace::apply_configuration_overrides(
         std::move(configuration), state.editor_settings,
         configuration_base_directory(snapshot.path(), state.workspace_folders));
+}
+
+EffectiveShaderContext
+Server::effective_context_for(const workspace::SourceSnapshot& snapshot,
+                              const ConfigurationState& state,
+                              const workspace::WorkspaceConfiguration& configuration,
+                              workspace::VariantSelection active_variant_selection) {
+    const auto effective_target = effective_shader_target(configuration);
+    EffectiveShaderContext result{
+        .document_uri = snapshot.uri(),
+        .file = std::filesystem::path{snapshot.path()}.filename().generic_string(),
+        .active_variant = std::nullopt,
+        .entry_point = effective_target.entry_point,
+        .target_profile = effective_target.target_profile,
+        .variant_origin = std::nullopt,
+        .entry_point_origin = std::nullopt,
+        .target_profile_origin = std::nullopt,
+    };
+
+    const auto setting_origin =
+        [&configuration](std::string_view key,
+                         std::string setting) -> std::optional<EffectiveContextOrigin> {
+        const auto found = configuration.setting_origins.find(key);
+        if (found == configuration.setting_origins.end()) {
+            return std::nullopt;
+        }
+        EffectiveContextOrigin origin{
+            .label = found->second,
+            .setting = std::move(setting),
+            .file = std::nullopt,
+        };
+        if (const auto file = configuration.setting_origin_files.find(key);
+            file != configuration.setting_origin_files.end()) {
+            origin.file = file->second;
+        }
+        return origin;
+    };
+
+    if (state.active_variant.has_value() && !state.active_variant->empty() &&
+        active_variant_selection == workspace::VariantSelection::applied) {
+        result.active_variant = state.active_variant;
+        const auto variant = std::ranges::find_if(
+            configuration.variants, [&state](const workspace::ResolvedVariant& candidate) {
+                return candidate.name == *state.active_variant;
+            });
+        if (variant != configuration.variants.end()) {
+            result.variant_origin = EffectiveContextOrigin{
+                .label = "variant " + variant->name,
+                .setting = "activeVariant",
+                .file = variant->declaring_file,
+            };
+        }
+    }
+
+    const bool entry_point_overridden =
+        has_compiler_option(configuration.additional_arguments, "-E");
+    const bool target_profile_overridden =
+        has_compiler_option(configuration.additional_arguments, "-T");
+    result.entry_point_origin =
+        setting_origin(entry_point_overridden ? "additionalArguments" : "entryPoint",
+                       entry_point_overridden ? "additionalArguments" : "entryPoint");
+    result.target_profile_origin =
+        setting_origin(target_profile_overridden ? "additionalArguments" : "targetProfile",
+                       target_profile_overridden ? "additionalArguments" : "targetProfile");
+    return result;
 }
 
 workspace::WorkspaceConfiguration

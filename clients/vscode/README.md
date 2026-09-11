@@ -107,6 +107,12 @@ when the variant selects a different DXC runtime. See the repository's
 [named compilation variants](../../docs/shadertoolsconfig.md#named-compilation-variants)
 reference for the schema and behavior.
 
+The status item is shown only for the active HLSL editor. Its compact label uses
+the active variant (`Default` when none is selected), while its tooltip shows
+the server-authoritative file, effective entry point, target profile, and
+available configuration origins. Clicking it always invokes variant selection.
+Every custom HLSL analysis panel uses the same context labels and terminology.
+
 ## Shader compilation
 
 Run **HLSL: Show Shader Compilation** to open a combined view of the active

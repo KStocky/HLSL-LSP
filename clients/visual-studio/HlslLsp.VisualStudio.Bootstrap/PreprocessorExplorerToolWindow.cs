@@ -140,19 +140,10 @@ internal sealed class PreprocessorExplorerControl : UserControl
 
     private void AddHeader(PreprocessorExplorerModel report)
     {
-        content.Children.Add(new TextBlock
-        {
-            Text = "Preprocessor Explorer",
-            FontSize = 18,
-            FontWeight = FontWeights.SemiBold,
-        });
-        content.Children.Add(new TextBlock
-        {
-            Text = report.RootUri,
-            Margin = new Thickness(0, 3, 0, 12),
-            Opacity = 0.75,
-            TextWrapping = TextWrapping.Wrap,
-        });
+        EffectiveShaderContextDisplay.AddHeader(
+            content,
+            "Preprocessor Explorer",
+            report.Context);
     }
 
     private void AddSection(string title, Action addBody)
@@ -523,7 +514,7 @@ internal sealed class PreprocessorExplorerControl : UserControl
         {
             grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             AddPlainCell(grid, row, 0, setting.Name ?? string.Empty);
-            AddPlainCell(grid, row, 1, SettingValueText(setting.Value));
+            AddPlainCell(grid, row, 1, SettingValueText(setting.Name, setting.Value));
             AddOriginCell(grid, row, 2, setting.Origin, setting.OriginUri);
             ++row;
         }
@@ -533,7 +524,7 @@ internal sealed class PreprocessorExplorerControl : UserControl
     // The server reports a setting's value in whatever raw JSON shape it
     // has (scalar, array, or object); this renders any of those shapes
     // legibly without needing a bespoke converter per setting name.
-    private static string SettingValueText(JToken value)
+    private static string SettingValueText(string name, JToken value)
     {
         if (value == null || value.Type == JTokenType.Null)
         {
@@ -553,7 +544,11 @@ internal sealed class PreprocessorExplorerControl : UserControl
             return entries.Length == 0 ? "(none)" : string.Join(", ", entries);
         }
         var text = value.ToString();
-        return string.IsNullOrEmpty(text) ? "(none)" : text;
+        return string.IsNullOrEmpty(text) &&
+               (string.Equals(name, "entryPoint", StringComparison.Ordinal) ||
+                string.Equals(name, "targetProfile", StringComparison.Ordinal))
+            ? EffectiveShaderContextDisplay.NotConfigured
+            : string.IsNullOrEmpty(text) ? "(none)" : text;
     }
 
     // --- Shared table helpers -------------------------------------------

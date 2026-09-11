@@ -19,6 +19,7 @@ import {
   RootSignatureRootDescriptor,
   RootSignatureStaticSampler,
 } from "./compilationInfo";
+import { effectiveContextHeaderHtml } from "./effectiveContext";
 
 // Dedicated **HLSL Resource Bindings** view: register-space/class grouping,
 // collisions, embedded root-signature state, and root-signature
@@ -464,12 +465,7 @@ ${bindlessNote}
 }
 
 function headerSection(info: CompilationInfo): string {
-  const rows: [string, string][] = [
-    ["Entry point", info.entryPoint || "(none)"],
-    ["Stage", info.stage || "(unknown)"],
-    ["Target profile", info.targetProfile || "(none)"],
-    ["Active variant", info.activeVariant ?? "(none)"],
-  ];
+  const rows: [string, string][] = [["Stage", info.stage || "Not configured"]];
   const table = `<table>${rows
     .map(
       ([label, value]) =>
@@ -487,7 +483,7 @@ ${status}
 }
 
 export function resourceBindingsHtml(info: CompilationInfo): string {
-  const title = info.entryPoint || "(default entry point)";
+  const title = info.entryPoint || "Not configured";
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -515,6 +511,7 @@ export function resourceBindingsHtml(info: CompilationInfo): string {
 </head>
 <body>
 <h1>Resource Bindings: ${escapeHtml(title)}</h1>
+${effectiveContextHeaderHtml(info.context)}
 ${headerSection(info)}
 ${groupsSection(info)}
 ${collisionsSection(info)}
@@ -581,7 +578,7 @@ export function resolveResourceBindingsRefresh(
   return {
     html: resourceBindingsHtml(info),
     hasContent: true,
-    title: `Resource Bindings: ${info.entryPoint || "(default entry point)"}`,
+    title: `Resource Bindings: ${info.entryPoint || "Not configured"}`,
   };
 }
 

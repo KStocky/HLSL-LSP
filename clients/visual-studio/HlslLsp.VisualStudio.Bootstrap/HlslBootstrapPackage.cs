@@ -42,7 +42,9 @@ namespace HlslLsp.VisualStudio.Bootstrap;
 [Guid(PackageGuidString)]
 public sealed class HlslBootstrapPackage : AsyncPackage
 {
-    private long memoryLayoutRequestGeneration;
+    private readonly MemoryLayoutRefreshGate memoryLayoutRefreshGate = new();
+    private readonly CoalescingBackgroundRefreshCancellation memoryLayoutBackgroundRefreshCancellation =
+        new(TimeSpan.FromSeconds(30));
     private long compilationInfoRequestGeneration;
     private int explicitCompilationInfoRequests;
     private long resourceBindingsRequestGeneration;
@@ -112,6 +114,16 @@ public sealed class HlslBootstrapPackage : AsyncPackage
             .FileAndForget("HlslLsp/CommandContextMainThread");
     }
 
+    internal static void RunInBackground(Func<Task> action, string name)
+    {
+        HlslBootstrapPackage package;
+        lock (Gate)
+        {
+            package = instance;
+        }
+        package?.JoinableTaskFactory.RunAsync(action).FileAndForget(name);
+    }
+
     public HlslOptionsSnapshot GetOptions()
     {
         ThreadHelper.ThrowIfNotOnUIThread();
@@ -165,6 +177,7 @@ public sealed class HlslBootstrapPackage : AsyncPackage
             throw new InvalidOperationException(
                 "Visual Studio's command service is unavailable.");
         }
+
         commandTextManager =
             await GetServiceAsync(typeof(SVsTextManager)) as IVsTextManager;
         var commandSet = new Guid("cedfa85a-cd51-4825-af1f-0e05bd475426");
@@ -226,6 +239,9 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         commands.AddCommand(computeVisualization);
     }
 
+    public void ScheduleEffectiveContextIndicatorRefresh()
+        => HlslEffectiveContextIndicator.InvalidateAll();
+
     private async Task ShowMemoryLayoutAsync(CancellationToken cancellationToken)
     {
         await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
@@ -233,12 +249,21 @@ public sealed class HlslBootstrapPackage : AsyncPackage
                 out var uri,
                 out var line,
                 out var character,
-                out _))
+                out var lines))
         {
             return;
         }
 
-        await ShowMemoryLayoutAsync(uri, line, character, cancellationToken);
+        await EnsureCallHierarchyEditorServicesAsync(cancellationToken);
+        var buffer = lines is IVsTextBuffer bufferAdapter
+            ? callHierarchyEditorAdapters?.GetDocumentBuffer(bufferAdapter)
+            : null;
+        await ShowMemoryLayoutExplicitAsync(
+            uri,
+            line,
+            character,
+            buffer == null ? null : CreateRootTrackingPoint(buffer, line, character),
+            cancellationToken);
     }
 
     private async Task ShowMemoryLayoutAsync(
@@ -247,26 +272,222 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         int character,
         CancellationToken cancellationToken)
     {
-        var generation = Interlocked.Increment(ref memoryLayoutRequestGeneration);
-        var layout = await MemoryLayoutBridge.RequestAsync(
+        await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+        await EnsureCallHierarchyEditorServicesAsync(cancellationToken);
+        var buffer = TryGetOpenCallHierarchyBuffer(uri);
+        await ShowMemoryLayoutExplicitAsync(
             uri,
             line,
             character,
+            buffer == null ? null : CreateRootTrackingPoint(buffer, line, character),
             cancellationToken);
-        if (generation != Interlocked.Read(ref memoryLayoutRequestGeneration))
+    }
+
+    private async Task ShowMemoryLayoutExplicitAsync(
+        Uri uri,
+        int line,
+        int character,
+        ITrackingPoint trackingPoint,
+        CancellationToken cancellationToken)
+    {
+        var generation = memoryLayoutRefreshGate.EnterExplicitRequest();
+        try
+        {
+            using (var requestCancellation =
+                   CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+            {
+                requestCancellation.CancelAfter(TimeSpan.FromSeconds(30));
+                await RequestMemoryLayoutAsync(
+                    uri,
+                    line,
+                    character,
+                    trackingPoint,
+                    generation,
+                    requestCancellation.Token,
+                    cancellationToken);
+            }
+        }
+        finally
+        {
+            if (memoryLayoutRefreshGate.ExitExplicitRequest())
+            {
+                await RefreshMemoryLayoutIfOpenAsync(null, cancellationToken);
+            }
+        }
+    }
+
+    private async Task RequestMemoryLayoutAsync(
+        Uri uri,
+        int line,
+        int character,
+        ITrackingPoint trackingPoint,
+        long generation,
+        CancellationToken cancellationToken,
+        CancellationToken ambientCancellationToken)
+    {
+        MemoryLayoutModel layout = null;
+        string failureMessage = null;
+        try
+        {
+            layout = await MemoryLayoutBridge.RequestAsync(
+                uri,
+                line,
+                character,
+                cancellationToken);
+        }
+        catch (OperationCanceledException) when (ambientCancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (OperationCanceledException)
+        {
+            failureMessage = "The memory layout request was cancelled.";
+        }
+        catch (Exception error)
+        {
+            failureMessage = "Could not retrieve memory layout information: " + error.Message;
+        }
+        if (!memoryLayoutRefreshGate.IsCurrent(generation))
         {
             return;
         }
-        await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+        await JoinableTaskFactory.SwitchToMainThreadAsync(ambientCancellationToken);
         var window = await ShowToolWindowAsync(
             typeof(MemoryLayoutToolWindow),
             0,
             true,
-            cancellationToken) as MemoryLayoutToolWindow;
-        if (generation == Interlocked.Read(ref memoryLayoutRequestGeneration))
+            ambientCancellationToken) as MemoryLayoutToolWindow;
+        if (memoryLayoutRefreshGate.IsCurrent(generation))
         {
-            window?.SetLayout(layout);
+            if (failureMessage != null)
+            {
+                window?.SetError(
+                    uri,
+                    line,
+                    character,
+                    trackingPoint,
+                    failureMessage,
+                    true);
+            }
+            else if (layout == null)
+            {
+                window?.SetError(
+                    uri,
+                    line,
+                    character,
+                    trackingPoint,
+                    "No compiler-authoritative memory layout is available at this position.",
+                    true);
+            }
+            else
+            {
+                window?.SetLayout(uri, line, character, trackingPoint, layout);
+            }
         }
+    }
+
+    internal static void ExecuteSelectVariantCommand()
+    {
+        HlslBootstrapPackage package;
+        lock (Gate)
+        {
+            package = instance;
+        }
+        package?.JoinableTaskFactory.RunAsync(
+                async () =>
+                {
+                    await package.JoinableTaskFactory.SwitchToMainThreadAsync(
+                        package.DisposalToken);
+                    var shell = await package.GetServiceAsync(typeof(SVsUIShell)) as IVsUIShell;
+                    if (shell == null)
+                    {
+                        return;
+                    }
+                    var commandSet = new Guid("cedfa85a-cd51-4825-af1f-0e05bd475426");
+                    ErrorHandler.ThrowOnFailure(
+                        shell.PostExecCommand(
+                            ref commandSet,
+                            0x0101,
+                            0,
+                            null));
+                })
+            .FileAndForget("HlslLsp/SelectVariantFromIndicator");
+    }
+
+    public async Task RefreshMemoryLayoutIfOpenAsync(
+        string savedFilePath,
+        CancellationToken cancellationToken)
+    {
+        if (!memoryLayoutRefreshGate.TryBeginBackgroundRefresh(out var generation))
+        {
+            return;
+        }
+        await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+        if (await FindToolWindowAsync(
+                    typeof(MemoryLayoutToolWindow),
+                    0,
+                    false,
+                    cancellationToken)
+                is not MemoryLayoutToolWindow window ||
+            window.DocumentUri == null)
+        {
+            return;
+        }
+        if (savedFilePath != null &&
+            (!Uri.TryCreate(savedFilePath, UriKind.Absolute, out var savedUri) ||
+             !savedUri.IsFile ||
+             !window.DocumentUri.Equals(savedUri)))
+        {
+            return;
+        }
+        if (!memoryLayoutRefreshGate.IsCurrent(generation))
+        {
+            return;
+        }
+        await EnsureCallHierarchyEditorServicesAsync(cancellationToken);
+        if (!memoryLayoutRefreshGate.IsCurrent(generation))
+        {
+            return;
+        }
+        var liveBuffer = TryGetOpenCallHierarchyBuffer(window.DocumentUri);
+        var trackingPoint = window.TrackingPoint;
+        if (trackingPoint == null ||
+            !MemoryLayoutTrackingBuffer.IsCurrent(liveBuffer, trackingPoint.TextBuffer))
+        {
+            window.SetError(
+                window.DocumentUri,
+                window.Line,
+                window.Character,
+                null,
+                "The tracked document buffer is stale or no longer open. Select Memory Layout again at the desired position.",
+                false);
+            return;
+        }
+        var trackedPosition = ResolveTrackedPosition(trackingPoint);
+        if (!trackedPosition.HasValue)
+        {
+            window.SetError(
+                window.DocumentUri,
+                window.Line,
+                window.Character,
+                null,
+                "The tracked declaration is no longer available. Select Memory Layout again at the desired position.",
+                false);
+            return;
+        }
+        window.UpdateTrackedPosition(
+            trackedPosition.Value.Line,
+            trackedPosition.Value.Character);
+        var refreshCancellation =
+            memoryLayoutBackgroundRefreshCancellation.BeginNext(cancellationToken);
+        await RequestMemoryLayoutAsync(
+            window.DocumentUri,
+            trackedPosition.Value.Line,
+            trackedPosition.Value.Character,
+            trackingPoint,
+            generation,
+            refreshCancellation.Token,
+            cancellationToken);
     }
 
     private async Task ShowCompilationInfoAsync(CancellationToken cancellationToken)
@@ -1118,7 +1339,7 @@ public sealed class HlslBootstrapPackage : AsyncPackage
     }
 
     // Lazily resolves the plain VS editor services needed to anchor/re-
-    // resolve a call-hierarchy root position against a live text buffer
+    // resolve call-hierarchy and memory-layout positions against live buffers
     // (see TryGetOpenCallHierarchyBuffer/CreateRootTrackingPoint below).
     // Resolved at most once per package instance; a failure to resolve any
     // of them is never fatal -- callers simply fall back to a less precise
@@ -1139,9 +1360,9 @@ public sealed class HlslBootstrapPackage : AsyncPackage
     }
 
     // Looks up the ITextBuffer currently backing an open document by its
-    // file path, independent of which view (if any) is active -- the
-    // call-hierarchy root document need not still be the focused editor
-    // when a background refresh runs. Returns null (never throws) when the
+    // file path, independent of which view (if any) is active -- the tracked
+    // document need not still be the focused editor when a background
+    // refresh runs. Returns null (never throws) when the
     // document is not open, or the editor services above could not be
     // resolved; both are treated identically to "no live buffer to anchor
     // against" by callers.

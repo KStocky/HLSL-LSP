@@ -37,6 +37,25 @@ shape:
 
 ```json
 {
+  "context": {
+    "documentUri": "file:///C:/shaders/example.hlsl",
+    "file": "example.hlsl",
+    "activeVariant": "Tinted",
+    "entryPoint": "PSMain",
+    "targetProfile": "ps_6_6",
+    "origins": {
+      "variant": {
+        "label": "variant Tinted",
+        "setting": "activeVariant",
+        "uri": "file:///C:/shaders/shadertoolsconfig.json"
+      },
+      "entryPoint": {
+        "label": "variant Tinted",
+        "setting": "entryPoint",
+        "uri": "file:///C:/shaders/shadertoolsconfig.json"
+      }
+    }
+  },
   "entryPoint": "PSMain",
   "stage": "pixel",
   "targetProfile": "ps_6_6",
@@ -90,6 +109,21 @@ shape:
   }
 }
 ```
+
+The same `context` shape is embedded in every custom analysis response
+(`hlsl/memoryLayout`, `hlsl/preprocessorExplorer`,
+`hlsl/entryPointDataFlow`, and `hlsl/computeVisualization`) and is available
+directly through `hlsl/effectiveContext` with the same
+`TextDocumentIdentifier` parameters. Call-hierarchy items carry it as a
+top-level extension field so Visual Studio's custom Call Hierarchy window can
+render the same header while standard LSP clients safely ignore it.
+
+`context.entryPoint` and `context.targetProfile` are resolved from the final
+compiler argument list, including later `-E`/`-T` values supplied through
+additional arguments. Each available origin identifies the contributing
+setting and its human-readable source; `uri` is present when that source is a
+configuration file. Clients display `Default` for a null active variant and
+`Not configured` for an empty entry point or target profile.
 
 `entryPoint`, `targetProfile`, `languageVersion`, `defines`, and
 `includeDirectories` are read back from the DXC command line the server

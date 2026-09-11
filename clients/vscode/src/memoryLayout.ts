@@ -1,3 +1,8 @@
+import {
+  EffectiveShaderContext,
+  effectiveContextHeaderHtml,
+} from "./effectiveContext";
+
 export interface MemoryLayoutMember {
   readonly name: string;
   readonly type: string;
@@ -16,6 +21,7 @@ export interface MemoryLayoutMember {
 }
 
 export interface MemoryLayout {
+  readonly context?: EffectiveShaderContext;
   readonly name: string;
   readonly type: string;
   readonly mode: "natural" | "constantBuffer";
@@ -24,6 +30,100 @@ export interface MemoryLayout {
   readonly allocationSize: number;
   readonly members: readonly MemoryLayoutMember[];
   readonly diagnostics: readonly string[];
+}
+
+export interface TrackedPosition {
+  readonly line: number;
+  readonly character: number;
+}
+
+export interface TrackedPositionChange {
+  readonly range: {
+    readonly start: TrackedPosition;
+    readonly end: TrackedPosition;
+  };
+  readonly text: string;
+}
+
+export interface MemoryLayoutDocumentChange {
+  readonly position: TrackedPosition | undefined;
+  readonly invalidated: boolean;
+  readonly shouldRefresh: boolean;
+}
+
+function comparePosition(
+  left: TrackedPosition,
+  right: TrackedPosition,
+): number {
+  return left.line - right.line || left.character - right.character;
+}
+
+export function transformTrackedPosition(
+  position: TrackedPosition,
+  changes: readonly TrackedPositionChange[],
+): TrackedPosition | undefined {
+  let transformed = { ...position };
+  const ordered = [...changes].sort(
+    (left, right) =>
+      comparePosition(right.range.start, left.range.start) ||
+      comparePosition(right.range.end, left.range.end),
+  );
+  for (const change of ordered) {
+    const startComparison = comparePosition(change.range.start, position);
+    const endComparison = comparePosition(change.range.end, position);
+    const insertionAtTarget =
+      startComparison === 0 &&
+      endComparison === 0 &&
+      comparePosition(change.range.start, change.range.end) === 0;
+    if (insertionAtTarget || (startComparison <= 0 && endComparison > 0)) {
+      return undefined;
+    }
+    if (endComparison > 0 || startComparison >= 0) {
+      continue;
+    }
+
+    const insertedLines = change.text.split("\n");
+    const insertedLineCount = insertedLines.length - 1;
+    const insertedLastLineLength =
+      insertedLines[insertedLines.length - 1]?.length ?? 0;
+    const removedLineCount = change.range.end.line - change.range.start.line;
+    if (transformed.line === change.range.end.line) {
+      transformed = {
+        line: change.range.start.line + insertedLineCount,
+        character:
+          (insertedLineCount === 0 ? change.range.start.character : 0) +
+          insertedLastLineLength +
+          transformed.character -
+          change.range.end.character,
+      };
+    } else {
+      transformed = {
+        line: transformed.line + insertedLineCount - removedLineCount,
+        character: transformed.character,
+      };
+    }
+  }
+  return transformed;
+}
+
+export function updateMemoryLayoutForDocumentChange(
+  trackedUri: string,
+  editedUri: string,
+  position: TrackedPosition | undefined,
+  changes: readonly TrackedPositionChange[],
+): MemoryLayoutDocumentChange {
+  if (position === undefined) {
+    return { position, invalidated: false, shouldRefresh: false };
+  }
+  if (trackedUri !== editedUri) {
+    return { position, invalidated: false, shouldRefresh: true };
+  }
+  const transformed = transformTrackedPosition(position, changes);
+  return {
+    position: transformed,
+    invalidated: transformed === undefined,
+    shouldRefresh: transformed !== undefined,
+  };
 }
 
 export interface MemoryLayoutSegment {
@@ -255,6 +355,7 @@ export function memoryLayoutHtml(layout: MemoryLayout): string {
 </head>
 <body>
 <h1>${escapeHtml(layout.name || layout.type)}</h1>
+${effectiveContextHeaderHtml(layout.context)}
 ${summary}
 ${diagnostics}
 ${diagram}

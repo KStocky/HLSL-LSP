@@ -313,15 +313,14 @@ internal sealed class CallHierarchyExplorerControl : UserControl
         ThreadHelper.ThrowIfNotOnUIThread();
         content.Children.Clear();
         content.Margin = new Thickness(12);
-        content.Children.Add(new TextBlock
-        {
-            Text = "Call Hierarchy",
-            FontSize = 18,
-            FontWeight = FontWeights.SemiBold,
-        });
-
         if (frame == null)
         {
+            content.Children.Add(new TextBlock
+            {
+                Text = "Call Hierarchy",
+                FontSize = 18,
+                FontWeight = FontWeights.SemiBold,
+            });
             content.Children.Add(new TextBlock
             {
                 Text = placeholderMessage ?? string.Empty,
@@ -331,6 +330,11 @@ internal sealed class CallHierarchyExplorerControl : UserControl
             });
             return;
         }
+
+        EffectiveShaderContextDisplay.AddHeader(
+            content,
+            "Call Hierarchy",
+            frame.Item?.Context);
 
         if (canGoBack)
         {

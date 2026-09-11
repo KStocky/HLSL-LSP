@@ -5,7 +5,127 @@ import {
   type MemoryLayout,
   memoryLayoutHtml,
   memoryLayoutSegments,
+  transformTrackedPosition,
+  updateMemoryLayoutForDocumentChange,
 } from "../../src/memoryLayout";
+
+void test("memory layout tracking translates edits strictly before the target", () => {
+  assert.deepEqual(
+    transformTrackedPosition({ line: 4, character: 8 }, [
+      {
+        range: {
+          start: { line: 1, character: 0 },
+          end: { line: 1, character: 0 },
+        },
+        text: "one\ntwo\n",
+      },
+      {
+        range: {
+          start: { line: 4, character: 2 },
+          end: { line: 4, character: 4 },
+        },
+        text: "replacement",
+      },
+    ]),
+    { line: 6, character: 17 },
+  );
+});
+
+void test("memory layout tracking invalidates edits overlapping the target", () => {
+  assert.equal(
+    transformTrackedPosition({ line: 3, character: 5 }, [
+      {
+        range: {
+          start: { line: 3, character: 4 },
+          end: { line: 3, character: 7 },
+        },
+        text: "x",
+      },
+    ]),
+    undefined,
+  );
+  assert.equal(
+    transformTrackedPosition({ line: 3, character: 5 }, [
+      {
+        range: {
+          start: { line: 3, character: 5 },
+          end: { line: 3, character: 5 },
+        },
+        text: "x",
+      },
+    ]),
+    undefined,
+  );
+});
+
+void test("memory layout include edits refresh without transforming the tracked root position", () => {
+  assert.deepEqual(
+    updateMemoryLayoutForDocumentChange(
+      "file:///root.hlsl",
+      "file:///include.hlsli",
+      { line: 3, character: 5 },
+      [
+        {
+          range: {
+            start: { line: 0, character: 0 },
+            end: { line: 100, character: 0 },
+          },
+          text: "",
+        },
+      ],
+    ),
+    {
+      position: { line: 3, character: 5 },
+      invalidated: false,
+      shouldRefresh: true,
+    },
+  );
+});
+
+void test("memory layout root edits transform or invalidate before scheduling refresh", () => {
+  assert.deepEqual(
+    updateMemoryLayoutForDocumentChange(
+      "file:///root.hlsl",
+      "file:///root.hlsl",
+      { line: 3, character: 5 },
+      [
+        {
+          range: {
+            start: { line: 1, character: 0 },
+            end: { line: 1, character: 0 },
+          },
+          text: "\n",
+        },
+      ],
+    ),
+    {
+      position: { line: 4, character: 5 },
+      invalidated: false,
+      shouldRefresh: true,
+    },
+  );
+  assert.deepEqual(
+    updateMemoryLayoutForDocumentChange(
+      "file:///root.hlsl",
+      "file:///root.hlsl",
+      { line: 3, character: 5 },
+      [
+        {
+          range: {
+            start: { line: 3, character: 5 },
+            end: { line: 3, character: 5 },
+          },
+          text: "x",
+        },
+      ],
+    ),
+    {
+      position: undefined,
+      invalidated: true,
+      shouldRefresh: false,
+    },
+  );
+});
 
 void test("memory layout HTML renders nested offsets and escapes source names", () => {
   const html = memoryLayoutHtml({

@@ -2,6 +2,7 @@ import "./compilationInfo.test";
 import "./computeVisualization.test";
 import "./configuration.test";
 import "./debouncer.test";
+import "./effectiveContext.test";
 import "./entryPointDataFlow.test";
 import "./lifecycle.test";
 import "./memoryLayout.test";

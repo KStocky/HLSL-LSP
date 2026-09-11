@@ -75,6 +75,17 @@ active variant and the picker's own state stay in sync either way, because
 the server reports its resulting variant back through a
 `hlsl/activeVariantChanged` notification after the command completes.
 
+Each HLSL editor shows a compact extension-owned indicator with the
+server-authoritative active variant, effective entry point, and effective
+target profile. Hover it for the full file and configuration-origin context;
+click it to invoke **HLSL > Select Shader Variant**. The indicator updates
+asynchronously, is removed with its editor view, and never overwrites Visual
+Studio's shared status text or performs RPC from `BeforeQueryStatus`. Every
+custom HLSL tool window uses the same
+**File**, **Variant**, **Entry point**, **Target profile**, and available
+**Configuration origins** header (`Default` and `Not configured` are used
+consistently).
+
 Choose **HLSL > Shader Compilation** from the editor context menu to open a tool window with the active
 HLSL document's effective compiler configuration, compiler success/failure and
 diagnostics, output type and size, DXC reflection (signatures, resource

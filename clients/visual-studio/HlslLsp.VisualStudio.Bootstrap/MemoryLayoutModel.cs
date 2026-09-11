@@ -7,6 +7,8 @@ namespace HlslLsp.VisualStudio.Bootstrap;
 
 public sealed class MemoryLayoutModel
 {
+    public EffectiveShaderContextModel Context { get; set; }
+
     public string Name { get; set; }
 
     public string Type { get; set; }
@@ -92,6 +94,73 @@ internal static class MemoryLayoutByteScale
             rowStart + 12,
             rowStart + 16,
         };
+}
+
+internal static class MemoryLayoutTrackingBuffer
+{
+    internal static bool IsCurrent(object liveBuffer, object trackedBuffer)
+        => liveBuffer != null && ReferenceEquals(liveBuffer, trackedBuffer);
+}
+
+// Serializes explicit target selections with background refresh starts.
+// Allocating the request generation while holding the same lock as the
+// explicit-request count closes the race where a refresh passed a gate just
+// before an explicit selection, then incremented its generation afterward.
+internal sealed class MemoryLayoutRefreshGate
+{
+    private readonly object gate = new();
+    private int explicitRequestsInFlight;
+    private bool refreshPending;
+    private long requestGeneration;
+
+    internal long EnterExplicitRequest()
+    {
+        lock (gate)
+        {
+            ++explicitRequestsInFlight;
+            return ++requestGeneration;
+        }
+    }
+
+    internal bool ExitExplicitRequest()
+    {
+        lock (gate)
+        {
+            if (explicitRequestsInFlight > 0)
+            {
+                --explicitRequestsInFlight;
+            }
+            if (explicitRequestsInFlight != 0 || !refreshPending)
+            {
+                return false;
+            }
+            refreshPending = false;
+            return true;
+        }
+    }
+
+    internal bool TryBeginBackgroundRefresh(out long generation)
+    {
+        lock (gate)
+        {
+            if (explicitRequestsInFlight != 0)
+            {
+                refreshPending = true;
+                generation = 0;
+                return false;
+            }
+            generation = ++requestGeneration;
+            return true;
+        }
+    }
+
+    internal bool IsCurrent(long generation)
+    {
+        lock (gate)
+        {
+            return requestGeneration == generation;
+        }
+    }
 }
 
 public static class MemoryLayoutBridge
