@@ -220,7 +220,7 @@ int main(int argc, char* argv[]) {
             continue;
         }
         if (method == "definition" || method == "hover" || method == "memoryLayout" ||
-            method == "callableAt") {
+            method == "macroExpansion" || method == "macroName" || method == "callableAt") {
             writer.write(reply(id, Json(nullptr)).dump());
             continue;
         }

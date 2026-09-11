@@ -60,6 +60,14 @@ asynchronously, so opening the menu never blocks the Visual Studio UI; while a
 new caret position is being resolved, contextual commands are temporarily
 disabled rather than acting on stale data.
 
+Place the caret on a macro invocation and choose **Expand Macro** from Quick
+Info or **HLSL > Expand Macro** from the editor context menu. The command is
+shown only when DXC resolves a macro expansion at that location. Its
+theme-aware tool window presents the original invocation and the final
+compiler-preprocessed token sequence using the current unsaved document,
+includes, active variant, and effective compiler configuration. See
+[macro expansion](../../docs/macro-expansion.md) for details.
+
 When a `shadertoolsconfig.json` declares named compilation variants under
 `hlsl.variants`, right-click the shader and choose
 **HLSL > Select Shader Variant**. The picker contains only variants applicable

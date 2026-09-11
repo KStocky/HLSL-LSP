@@ -36,6 +36,7 @@
     "onCommand:hlsl.openEffectiveConfigurationFile",
     "onCommand:hlsl.showOutput",
     "onCommand:hlsl.showDiagnostics",
+    "onCommand:hlsl.expandMacro",
     "onCommand:hlsl.showMemoryLayout",
     "onCommand:hlsl.showCompilationInfo",
     "onCommand:hlsl.showResourceBindings",
@@ -98,6 +99,12 @@
       {
         "command": "hlsl.showDiagnostics",
         "title": "HLSL: Show Client Diagnostics",
+        "category": "HLSL"
+      },
+      {
+        "command": "hlsl.expandMacro",
+        "title": "HLSL: Expand Macro",
+        "shortTitle": "Expand Macro",
         "category": "HLSL"
       },
       {
@@ -177,6 +184,11 @@
           "command": "hlsl.showPreprocessorExplorer",
           "when": "editorLangId == hlsl",
           "group": "1_configuration@3"
+        },
+        {
+          "command": "hlsl.expandMacro",
+          "when": "editorLangId == hlsl && hlsl.macroExpansionAvailable",
+          "group": "2_inspection@0"
         },
         {
           "command": "hlsl.showMemoryLayout",

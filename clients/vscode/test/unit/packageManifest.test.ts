@@ -81,13 +81,22 @@ void test("HLSL submenu exposes every custom shader workflow in stable groups", 
       ["hlsl.selectVariant", "1_configuration@1"],
       ["hlsl.showCompilationInfo", "1_configuration@2"],
       ["hlsl.showPreprocessorExplorer", "1_configuration@3"],
+      ["hlsl.expandMacro", "2_inspection@0"],
       ["hlsl.showMemoryLayout", "2_inspection@1"],
       ["hlsl.showResourceBindings", "2_inspection@2"],
       ["hlsl.showComputeVisualization", "2_inspection@3"],
       ["hlsl.showEntryPointDataFlow", "3_analysis@1"],
     ],
   );
-  assert(entries.every((entry) => entry.when === "editorLangId == hlsl"));
+  assert.equal(
+    entries.find((entry) => entry.command === "hlsl.expandMacro")?.when,
+    "editorLangId == hlsl && hlsl.macroExpansionAvailable",
+  );
+  assert(
+    entries
+      .filter((entry) => entry.command !== "hlsl.expandMacro")
+      .every((entry) => entry.when === "editorLangId == hlsl"),
+  );
   assert(
     entries.every((entry) => entry.command !== "hlsl.showCallHierarchy"),
     "VS Code's native call hierarchy must not be duplicated",
@@ -111,6 +120,7 @@ void test("HLSL submenu uses concise command labels", () => {
       "Select Shader Variant",
       "Shader Compilation",
       "Preprocessor Explorer",
+      "Expand Macro",
       "Memory Layout",
       "Resource Bindings",
       "Compute Visualization",

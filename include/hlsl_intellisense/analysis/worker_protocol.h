@@ -16,7 +16,7 @@
 namespace hlsl_intellisense::analysis {
 
 inline constexpr std::size_t analysis_worker_max_payload_size = std::size_t{64} * 1024U * 1024U;
-inline constexpr unsigned analysis_worker_protocol_version = 2;
+inline constexpr unsigned analysis_worker_protocol_version = 4;
 
 enum class WorkerAnalysisKind : std::uint8_t { cache_hit, parsed, reparsed };
 
@@ -66,6 +66,14 @@ class WorkerClient final {
     memory_layout(std::string_view root_identity, std::string path, std::uint32_t line,
                   std::uint32_t column, std::chrono::milliseconds timeout,
                   const json_rpc::CancellationToken& cancellation);
+    [[nodiscard]] std::optional<dxc::MacroExpansion>
+    macro_expansion(std::string_view root_identity, std::string path, std::uint32_t line,
+                    std::uint32_t column, std::chrono::milliseconds timeout,
+                    const json_rpc::CancellationToken& cancellation);
+    [[nodiscard]] std::optional<std::string>
+    macro_name(std::string_view root_identity, std::string path, std::uint32_t line,
+               std::uint32_t column, std::chrono::milliseconds timeout,
+               const json_rpc::CancellationToken& cancellation);
     [[nodiscard]] dxc::CompilationInfo
     compilation_info(std::string_view root_identity, std::chrono::milliseconds timeout,
                      const json_rpc::CancellationToken& cancellation);

@@ -355,6 +355,41 @@ internal sealed class HlslLanguageClient :
             .ConfigureAwait(false);
     }
 
+    internal async Task<MacroExpansionModel> GetMacroExpansionAsync(
+        Uri documentUri,
+        int line,
+        int character,
+        CancellationToken cancellationToken)
+    {
+        var currentRpc = Volatile.Read(ref rpc);
+        if (currentRpc == null)
+        {
+            await rpcAttached.WaitAsync(cancellationToken).ConfigureAwait(false);
+            currentRpc = Volatile.Read(ref rpc);
+            if (currentRpc == null)
+            {
+                throw new InvalidOperationException(
+                    "The HLSL language server connection is unavailable.");
+            }
+        }
+        return await currentRpc.InvokeWithParameterObjectAsync<MacroExpansionModel>(
+                "hlsl/macroExpansion",
+                new
+                {
+                    textDocument = new
+                    {
+                        uri = documentUri.AbsoluteUri,
+                    },
+                    position = new
+                    {
+                        line,
+                        character,
+                    },
+                },
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
     internal async Task<HlslCommandContextModel> GetCommandContextAsync(
         Uri documentUri,
         int line,

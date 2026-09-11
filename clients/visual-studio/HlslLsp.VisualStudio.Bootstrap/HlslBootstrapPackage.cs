@@ -23,6 +23,7 @@ namespace HlslLsp.VisualStudio.Bootstrap;
 [ProvideSettingsManifest(PackageRelativeManifestFile = "HlslLsp.registration.json")]
 [ProvideMenuResource("Menus.ctmenu", 1)]
 [ProvideToolWindow(typeof(MemoryLayoutToolWindow))]
+[ProvideToolWindow(typeof(MacroExpansionToolWindow))]
 [ProvideToolWindow(typeof(CompilationInfoToolWindow))]
 [ProvideToolWindow(typeof(ResourceBindingsToolWindow))]
 [ProvideToolWindow(typeof(PreprocessorExplorerToolWindow))]
@@ -43,6 +44,7 @@ namespace HlslLsp.VisualStudio.Bootstrap;
 public sealed class HlslBootstrapPackage : AsyncPackage
 {
     private readonly MemoryLayoutRefreshGate memoryLayoutRefreshGate = new();
+    private long macroExpansionRequestGeneration;
     private readonly CoalescingBackgroundRefreshCancellation memoryLayoutBackgroundRefreshCancellation =
         new(TimeSpan.FromSeconds(30));
     private long compilationInfoRequestGeneration;
@@ -163,6 +165,11 @@ public sealed class HlslBootstrapPackage : AsyncPackage
                 JoinableTaskFactory.RunAsync(
                         () => ShowMemoryLayoutAsync(uri, line, character, DisposalToken))
                     .FileAndForget("HlslLsp/ShowMemoryLayout"));
+        MacroExpansionBridge.RegisterPresenter(
+            (uri, line, character) =>
+                JoinableTaskFactory.RunAsync(
+                        () => ShowMacroExpansionAsync(uri, line, character, DisposalToken))
+                    .FileAndForget("HlslLsp/ExpandMacro"));
         ComputeVisualizationBridge.RegisterPresenter(
             (uri, options) =>
                 JoinableTaskFactory.RunAsync(
@@ -211,6 +218,13 @@ public sealed class HlslBootstrapPackage : AsyncPackage
                 new CommandID(commandSet, HlslCommandIds.MemoryLayout));
         memoryLayout.BeforeQueryStatus += OnHlslContextCommandBeforeQueryStatus;
         commands.AddCommand(memoryLayout);
+        var macroExpansion = new OleMenuCommand(
+                (_, _) => JoinableTaskFactory.RunAsync(
+                        () => ShowMacroExpansionAsync(DisposalToken))
+                    .FileAndForget("HlslLsp/ExpandMacro"),
+                new CommandID(commandSet, HlslCommandIds.MacroExpansion));
+        macroExpansion.BeforeQueryStatus += OnHlslContextCommandBeforeQueryStatus;
+        commands.AddCommand(macroExpansion);
         var selectVariant = new OleMenuCommand(
                 (_, _) => JoinableTaskFactory.RunAsync(
                         () => SelectVariantAsync(DisposalToken))
@@ -319,6 +333,7 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         bool refreshPending = false)
     {
         memoryLayoutRefreshGate.InvalidateForRefresh(cause, refreshPending);
+        Interlocked.Increment(ref macroExpansionRequestGeneration);
         Interlocked.Increment(ref compilationInfoRequestGeneration);
         Interlocked.Increment(ref resourceBindingsRequestGeneration);
         Interlocked.Increment(ref preprocessorExplorerRequestGeneration);
@@ -759,6 +774,7 @@ public sealed class HlslBootstrapPackage : AsyncPackage
     private static readonly Type[] AnalysisWindowTypes =
     {
         typeof(MemoryLayoutToolWindow),
+        typeof(MacroExpansionToolWindow),
         typeof(CompilationInfoToolWindow),
         typeof(ResourceBindingsToolWindow),
         typeof(PreprocessorExplorerToolWindow),
@@ -1119,6 +1135,78 @@ public sealed class HlslBootstrapPackage : AsyncPackage
             character,
             buffer == null ? null : CreateRootTrackingPoint(buffer, line, character),
             cancellationToken);
+    }
+
+    private async Task ShowMacroExpansionAsync(CancellationToken cancellationToken)
+    {
+        await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+        if (!TryGetActiveHlslEditorContext(
+                out var uri,
+                out var line,
+                out var character,
+                out _))
+        {
+            return;
+        }
+        await ShowMacroExpansionAsync(uri, line, character, cancellationToken);
+    }
+
+    private async Task ShowMacroExpansionAsync(
+        Uri uri,
+        int line,
+        int character,
+        CancellationToken cancellationToken)
+    {
+        var generation = Interlocked.Increment(ref macroExpansionRequestGeneration);
+        await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+        var window = await ShowToolWindowAsync(
+                typeof(MacroExpansionToolWindow),
+                0,
+                true,
+                cancellationToken) as MacroExpansionToolWindow;
+        window?.SetStatus("Resolving compiler expansion...");
+
+        MacroExpansionModel expansion = null;
+        string failureMessage = null;
+        try
+        {
+            expansion = await MacroExpansionBridge.RequestAsync(
+                    uri,
+                    line,
+                    character,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception error)
+        {
+            failureMessage = "Could not expand the macro: " + error.Message;
+        }
+        if (generation != Volatile.Read(ref macroExpansionRequestGeneration))
+        {
+            return;
+        }
+
+        await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+        if (generation != Volatile.Read(ref macroExpansionRequestGeneration))
+        {
+            return;
+        }
+        if (failureMessage != null)
+        {
+            window?.SetStatus(failureMessage);
+        }
+        else if (expansion == null)
+        {
+            window?.SetStatus("No compiler-backed macro expansion is available at the caret.");
+        }
+        else
+        {
+            window?.SetExpansion(expansion);
+        }
     }
 
     private async Task ShowMemoryLayoutExplicitAsync(

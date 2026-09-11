@@ -44,6 +44,7 @@
 namespace {
 
 constexpr std::size_t max_disassembly_bytes = std::size_t{4} * 1024U * 1024U;
+constexpr std::size_t max_preprocessed_output_bytes = std::size_t{8} * 1024U * 1024U;
 constexpr UINT32 psv_part = DXC_FOURCC('P', 'S', 'V', '0');
 
 // Public PSVRuntimeInfo0 ABI from
@@ -899,10 +900,10 @@ extract_disassembly(IDxcCompiler3& compiler, const DxcBuffer& object, std::strin
 
 namespace hlsl_intellisense::dxc::detail {
 
-PreprocessDiagnostics preprocess_diagnostics_from_compile(DxcCreateInstanceProc create_instance,
-                                                          const std::vector<SourceFile>& sources,
-                                                          const std::vector<std::string>& arguments,
-                                                          std::string_view main_path) {
+PreprocessOutput preprocess_from_compile(DxcCreateInstanceProc create_instance,
+                                         const std::vector<SourceFile>& sources,
+                                         const std::vector<std::string>& arguments,
+                                         std::string_view main_path) {
     const auto source_it = std::ranges::find(sources, main_path, &SourceFile::path);
     if (source_it == sources.end()) {
         return {};
@@ -958,7 +959,7 @@ PreprocessDiagnostics preprocess_diagnostics_from_compile(DxcCreateInstanceProc 
         return {};
     }
 
-    PreprocessDiagnostics output{.available = true};
+    PreprocessOutput output{.available = true};
     LocalComPtr<IDxcBlobEncoding> errors;
     if (FAILED(result->GetErrorBuffer(errors.put()))) {
         return {};
@@ -971,7 +972,21 @@ PreprocessDiagnostics preprocess_diagnostics_from_compile(DxcCreateInstanceProc 
             return {};
         }
     }
+    LocalComPtr<IDxcBlobUtf8> hlsl;
+    const auto hlsl_hr =
+        result->GetOutput(DXC_OUT_HLSL, __uuidof(IDxcBlobUtf8), hlsl.put_void(), nullptr);
+    if (SUCCEEDED(hlsl_hr) && hlsl && hlsl->GetStringLength() <= max_preprocessed_output_bytes) {
+        output.text.assign(hlsl->GetStringPointer(), hlsl->GetStringLength());
+    }
     return output;
+}
+
+PreprocessDiagnostics preprocess_diagnostics_from_compile(DxcCreateInstanceProc create_instance,
+                                                          const std::vector<SourceFile>& sources,
+                                                          const std::vector<std::string>& arguments,
+                                                          std::string_view main_path) {
+    auto output = preprocess_from_compile(create_instance, sources, arguments, main_path);
+    return {.available = output.available, .diagnostics = std::move(output.diagnostics)};
 }
 
 CompilationInfo compilation_info_from_compile(DxcCreateInstanceProc create_instance,

@@ -1080,6 +1080,13 @@ compilation_info_json(const dxc::CompilationInfo& info,
     return "command:hlsl.showMemoryLayout?" + percent_encode(arguments.dump());
 }
 
+[[nodiscard]] std::string macro_expansion_command(std::string_view uri,
+                                                  workspace::Position position_value) {
+    const Json arguments = Json::array(
+        {Json{{"textDocument", {{"uri", uri}}}, {"position", lsp_position(position_value)}}});
+    return "command:hlsl.expandMacro?" + percent_encode(arguments.dump());
+}
+
 // NOLINTBEGIN(bugprone-easily-swappable-parameters)
 void append_workspace_symbols(Json& output, const std::vector<dxc::Symbol>& symbols,
                               const workspace::SourceSnapshot& snapshot, std::string_view query,
@@ -2250,6 +2257,10 @@ void Server::register_handlers() {
     dispatcher_.register_request_handler(
         "hlsl/memoryLayout",
         [this](const auto& params, const auto& context) { return memory_layout(params, context); });
+    dispatcher_.register_request_handler("hlsl/macroExpansion",
+                                         [this](const auto& params, const auto& context) {
+                                             return macro_expansion(params, context);
+                                         });
     dispatcher_.register_request_handler("hlsl/commandContext",
                                          [this](const auto& params, const auto& context) {
                                              return command_context(params, context);
@@ -3614,21 +3625,35 @@ Json Server::hover(const std::optional<Json>& params, const json_rpc::RequestCon
         return nullptr;
     }
 
-    analyze_and_publish(snapshot.uri());
+    const auto submission = analyze_and_publish(snapshot.uri());
     const auto [line, column] = dxc_position(snapshot.text(), request_position);
     const auto information = analysis_.hover(snapshot.document_uri().identity(), snapshot.version(),
                                              snapshot.path(), line, column, context.cancellation);
     const auto layout =
         analysis_.memory_layout(snapshot.document_uri().identity(), snapshot.version(),
                                 snapshot.path(), line, column, context.cancellation);
+    std::optional<analysis::WithGeneration<std::optional<std::string>>> macro;
+    std::optional<std::uint64_t> content_generation;
+    if (command_links_) {
+        macro = analysis_.macro_name(snapshot.document_uri().identity(), snapshot.version(),
+                                     snapshot.path(), line, column, context.cancellation);
+        content_generation = analysis_.content_generation(snapshot.document_uri().identity(),
+                                                          snapshot.version(), context.cancellation);
+    }
     {
         std::scoped_lock state_lock{state_mutex_};
+        const auto generation = analysis_generations_.find(snapshot.document_uri().identity());
         if (!documents_.contains(snapshot.uri()) ||
-            documents_.snapshot(snapshot.uri()).version() != snapshot.version()) {
+            documents_.snapshot(snapshot.uri()).version() != snapshot.version() ||
+            generation == analysis_generations_.end() ||
+            generation->second != submission.generation ||
+            (macro.has_value() &&
+             (!content_generation.has_value() || macro->generation != *content_generation))) {
             throw HandlerError{json_rpc::content_modified_code, "Hover was superseded"};
         }
     }
-    if (!information.has_value() && !layout.has_value()) {
+    const auto has_macro = macro.has_value() && macro->value.has_value();
+    if (!information.has_value() && !layout.has_value() && !has_macro) {
         return nullptr;
     }
 
@@ -3639,10 +3664,13 @@ Json Server::hover(const std::optional<Json>& params, const json_rpc::RequestCon
         contents += information->display_name;
     } else if (information.has_value()) {
         contents += information->name;
-    } else {
+    } else if (layout.has_value()) {
         contents += layout->selected_type;
         contents += ' ';
         contents += layout->selected_name;
+    } else {
+        contents += "Macro ";
+        contents += *macro->value;
     }
     if (information.has_value() && !information->qualified_name.empty() &&
         information->qualified_name != information->display_name &&
@@ -3677,9 +3705,14 @@ Json Server::hover(const std::optional<Json>& params, const json_rpc::RequestCon
             contents += ')';
         }
     }
+    if (has_macro) {
+        contents += "\n\n[Expand Macro](";
+        contents += macro_expansion_command(uri, request_position);
+        contents += ')';
+    }
 
     Json result{{"contents",
-                 {{"kind", layout.has_value() ? "markdown" : "plaintext"},
+                 {{"kind", layout.has_value() || has_macro ? "markdown" : "plaintext"},
                   {"value", std::move(contents)}}}};
     if (information.has_value() && information->start_offset <= information->end_offset &&
         information->end_offset <= snapshot.text().size()) {
@@ -3737,6 +3770,86 @@ Json Server::memory_layout(const std::optional<Json>& params,
     return result;
 }
 
+Json Server::macro_expansion(const std::optional<Json>& params,
+                             const json_rpc::RequestContext& context) {
+    require_running();
+    const auto& value = object_params(params);
+    const auto uri = string_member(object_member(value, "textDocument"), "uri");
+    const auto request_position = position(object_member(value, "position"));
+    const auto snapshot = [&] {
+        std::scoped_lock state_lock{state_mutex_};
+        try {
+            const auto& state = documents_.document(uri);
+            if (!state.open) {
+                invalid_params("Macro expansion document is not open");
+            }
+            return documents_.snapshot(uri);
+        } catch (const workspace::DocumentError& error) {
+            invalid_params(error.what());
+        }
+    }();
+    try {
+        static_cast<void>(workspace::utf8_offset_at(snapshot.text(), request_position));
+    } catch (const workspace::DocumentError& error) {
+        invalid_params(error.what());
+    }
+
+    const auto submission = analyze_and_publish(snapshot.uri());
+    const auto [line, column] = dxc_position(snapshot.text(), request_position);
+    const auto expansion =
+        analysis_.macro_expansion(snapshot.document_uri().identity(), snapshot.version(),
+                                  snapshot.path(), line, column, context.cancellation);
+    const auto content_generation = analysis_.content_generation(
+        snapshot.document_uri().identity(), snapshot.version(), context.cancellation);
+    {
+        std::scoped_lock state_lock{state_mutex_};
+        const auto generation = analysis_generations_.find(snapshot.document_uri().identity());
+        if (!documents_.contains(snapshot.uri()) ||
+            documents_.snapshot(snapshot.uri()).version() != snapshot.version() ||
+            generation == analysis_generations_.end() ||
+            generation->second != submission.generation ||
+            expansion.generation != content_generation) {
+            throw HandlerError{json_rpc::content_modified_code, "Macro expansion was superseded"};
+        }
+    }
+    if (!expansion.value.has_value()) {
+        return nullptr;
+    }
+
+    const auto& result_value = *expansion.value;
+    Json result{{"name", result_value.name},
+                {"invocation", result_value.invocation},
+                {"expansion", result_value.expanded_text},
+                {"range", lsp_range(offset_range(snapshot.text(), result_value.range.start.offset,
+                                                 result_value.range.end.offset))},
+                {"definitionLocation", nullptr},
+                {"context", effective_shader_context_json(submission.context)}};
+    if (result_value.definition_location.has_value()) {
+        const auto& definition = *result_value.definition_location;
+        const auto target = workspace::DocumentUri::from_path(definition.path);
+        const auto text = text_for_path(definition.path);
+        const auto start =
+            text.empty()
+                ? workspace::Position{.line = definition.line > 0 ? definition.line - 1 : 0,
+                                      .character =
+                                          definition.column > 0 ? definition.column - 1 : 0}
+                : workspace::lsp_position_at(
+                      text, (std::min)(static_cast<std::size_t>(definition.offset), text.size()));
+        auto end = start;
+        if (!text.empty()) {
+            end = workspace::lsp_position_at(
+                text,
+                (std::min)(static_cast<std::size_t>(definition.offset) + result_value.name.size(),
+                           text.size()));
+        } else {
+            end.character += static_cast<std::uint32_t>(result_value.name.size());
+        }
+        result["definitionLocation"] =
+            Json{{"uri", target.uri()}, {"range", lsp_range({.start = start, .end = end})}};
+    }
+    return result;
+}
+
 Json Server::command_context(const std::optional<Json>& params,
                              const json_rpc::RequestContext& context) {
     require_running();
@@ -3770,6 +3883,8 @@ Json Server::command_context(const std::optional<Json>& params,
     const auto layout =
         analysis_.memory_layout(snapshot.document_uri().identity(), snapshot.version(),
                                 snapshot.path(), line, column, context.cancellation);
+    const auto macro = analysis_.macro_name(snapshot.document_uri().identity(), snapshot.version(),
+                                            snapshot.path(), line, column, context.cancellation);
     const auto callable =
         analysis_.callable_at(snapshot.document_uri().identity(), snapshot.version(),
                               snapshot.path(), line, column, context.cancellation);
@@ -3783,7 +3898,7 @@ Json Server::command_context(const std::optional<Json>& params,
             documents_.snapshot(snapshot.uri()).version() != snapshot.version() ||
             generation == analysis_generations_.end() ||
             generation->second != submission.generation ||
-            content_generation != callable.generation) {
+            content_generation != callable.generation || content_generation != macro.generation) {
             throw HandlerError{json_rpc::content_modified_code,
                                "HLSL command context was superseded"};
         }
@@ -3792,11 +3907,14 @@ Json Server::command_context(const std::optional<Json>& params,
     const auto callable_name = callable.value.has_value() ? callable.value->name : std::string{};
     const auto memory_layout_target =
         layout.has_value() ? (!layout->name.empty() ? layout->name : layout->type) : std::string{};
+    const auto macro_name = macro.value.value_or(std::string{});
     const bool is_entry_point =
         !submission.entry_point.empty() && callable_name == submission.entry_point;
     const bool is_compute = is_entry_point && submission.target_profile.starts_with("cs_");
     return Json{{"memoryLayoutAvailable", layout.has_value()},
                 {"memoryLayoutTarget", memory_layout_target},
+                {"macroExpansionAvailable", macro.value.has_value()},
+                {"macroName", macro_name},
                 {"callHierarchyAvailable", callable.value.has_value()},
                 {"callableName", callable_name},
                 {"entryPointDataFlowAvailable", is_entry_point},

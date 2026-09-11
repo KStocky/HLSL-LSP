@@ -191,6 +191,31 @@ public sealed class HlslCommandContextTests : IDisposable
         Assert.Equal("Call Hierarchy for helper", result.Text);
     }
 
+    [Fact]
+    public void MacroExpansionCommand_IsVisibleOnlyForCompilerResolvedMacro()
+    {
+        var unavailable = HlslCommandPresentation.Evaluate(
+            HlslCommandKind.MacroExpansion,
+            hlslEditor: true,
+            contextKnown: true,
+            context: new HlslCommandContextModel());
+        var available = HlslCommandPresentation.Evaluate(
+            HlslCommandKind.MacroExpansion,
+            hlslEditor: true,
+            contextKnown: true,
+            context: new HlslCommandContextModel
+            {
+                MacroExpansionAvailable = true,
+                MacroName = "WRAP",
+            });
+
+        Assert.False(unavailable.Visible);
+        Assert.False(unavailable.Enabled);
+        Assert.True(available.Visible);
+        Assert.True(available.Enabled);
+        Assert.Equal("Expand Macro for WRAP", available.Text);
+    }
+
 
     [Fact]
     public void DocumentCommand_UsesEffectiveConfigurationLabel()

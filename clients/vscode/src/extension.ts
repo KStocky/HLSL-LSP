@@ -91,6 +91,12 @@ import {
   updateMemoryLayoutForDocumentChange,
 } from "./memoryLayout";
 import {
+  MacroExpansion,
+  macroExpansionHtml,
+  macroExpansionMessageHtml,
+  macroExpansionTarget,
+} from "./macroExpansion";
+import {
   resolveDxcRuntimeDirectory,
   resolveServerRuntime,
   RuntimeEnvironment,
@@ -113,6 +119,14 @@ interface ManagedClient extends LifecycleClient {
     uri: vscode.Uri,
     position: vscode.Position,
   ): Promise<MemoryLayout | null>;
+  macroExpansion(
+    uri: vscode.Uri,
+    position: vscode.Position,
+  ): Promise<MacroExpansion | null>;
+  commandContext(
+    uri: vscode.Uri,
+    position: vscode.Position,
+  ): Promise<HlslCommandContext | null>;
   compilationInfo(uri: vscode.Uri): Promise<CompilationInfo | null>;
   preprocessorExplorer(
     uri: vscode.Uri,
@@ -164,7 +178,16 @@ interface MemoryLayoutTarget {
   readonly position: { readonly line: number; readonly character: number };
 }
 
+interface HlslCommandContext {
+  readonly macroExpansionAvailable?: boolean;
+  readonly macroName?: string;
+}
+
 let activeLifecycle: ClientLifecycle<ManagedClient> | undefined;
+let macroExpansionGeneration = 0;
+let macroContextGeneration = 0;
+let macroContextDebounce: NodeJS.Timeout | undefined;
+let macroExpansionPanel: vscode.WebviewPanel | undefined;
 
 type AnalysisPanelKind =
   | "memoryLayout"
@@ -1476,12 +1499,20 @@ class VscodeLanguageClient implements ManagedClient {
           const hover = await next(document, position, token);
           if (hover !== null && hover !== undefined) {
             for (const content of hover.contents) {
-              if (
-                content instanceof vscode.MarkdownString &&
-                content.value.includes("command:hlsl.showMemoryLayout")
-              ) {
+              if (content instanceof vscode.MarkdownString) {
+                const enabledCommands = [
+                  content.value.includes("command:hlsl.showMemoryLayout")
+                    ? "hlsl.showMemoryLayout"
+                    : undefined,
+                  content.value.includes("command:hlsl.expandMacro")
+                    ? "hlsl.expandMacro"
+                    : undefined,
+                ].filter((command): command is string => command !== undefined);
+                if (enabledCommands.length === 0) {
+                  continue;
+                }
                 content.isTrusted = {
-                  enabledCommands: ["hlsl.showMemoryLayout"],
+                  enabledCommands,
                 };
               }
             }
@@ -1607,6 +1638,32 @@ class VscodeLanguageClient implements ManagedClient {
       textDocument: { uri: uri.toString() },
       position: { line: position.line, character: position.character },
     });
+  }
+
+  public macroExpansion(
+    uri: vscode.Uri,
+    position: vscode.Position,
+  ): Promise<MacroExpansion | null> {
+    return this.client.sendRequest<MacroExpansion | null>(
+      "hlsl/macroExpansion",
+      {
+        textDocument: { uri: uri.toString() },
+        position: { line: position.line, character: position.character },
+      },
+    );
+  }
+
+  public commandContext(
+    uri: vscode.Uri,
+    position: vscode.Position,
+  ): Promise<HlslCommandContext | null> {
+    return this.client.sendRequest<HlslCommandContext | null>(
+      "hlsl/commandContext",
+      {
+        textDocument: { uri: uri.toString() },
+        position: { line: position.line, character: position.character },
+      },
+    );
   }
 
   public compilationInfo(uri: vscode.Uri): Promise<CompilationInfo | null> {
@@ -1880,6 +1937,8 @@ export async function activate(
               ? watchedFileRefreshCause
               : cause;
           invalidateOpenAnalysisPanels(cause, true);
+          invalidateMacroExpansion(cause);
+          scheduleMacroExpansionContext();
           watchedFileRefreshDebouncer?.schedule();
           effectiveContextStatusDebouncer?.schedule();
         },
@@ -1887,10 +1946,13 @@ export async function activate(
           if (transition === "disconnected") {
             cancelPendingAnalysisRefreshes();
             invalidateOpenAnalysisPanels("Disconnected server");
+            invalidateMacroExpansion("Disconnected server");
+            scheduleMacroExpansionContext();
             return;
           }
           if (lifecycle.state === "running") {
             void refreshAllOpenAnalysisPanels(lifecycle, "Disconnected server");
+            scheduleMacroExpansionContext();
           }
         },
       );
@@ -1956,9 +2018,70 @@ export async function activate(
     void updateVariantStatus();
   });
 
+  const updateMacroExpansionContext = async (): Promise<void> => {
+    const generation = ++macroContextGeneration;
+    const editor = vscode.window.activeTextEditor;
+    if (editor?.document.languageId !== "hlsl") {
+      await vscode.commands.executeCommand(
+        "setContext",
+        "hlsl.macroExpansionAvailable",
+        false,
+      );
+      return;
+    }
+    const uri = editor.document.uri;
+    const position = editor.selection.active;
+    let commandContext: HlslCommandContext | null | undefined;
+    try {
+      commandContext = await lifecycle.withClient((client) =>
+        client.commandContext(uri, position),
+      );
+    } catch {
+      commandContext = undefined;
+    }
+    const active = vscode.window.activeTextEditor;
+    if (
+      generation !== macroContextGeneration ||
+      active?.document.uri.toString() !== uri.toString() ||
+      !active.selection.active.isEqual(position)
+    ) {
+      return;
+    }
+    await vscode.commands.executeCommand(
+      "setContext",
+      "hlsl.macroExpansionAvailable",
+      commandContext?.macroExpansionAvailable === true,
+    );
+  };
+  const scheduleMacroExpansionContext = (): void => {
+    ++macroContextGeneration;
+    if (macroContextDebounce !== undefined) {
+      clearTimeout(macroContextDebounce);
+    }
+    void vscode.commands.executeCommand(
+      "setContext",
+      "hlsl.macroExpansionAvailable",
+      false,
+    );
+    macroContextDebounce = setTimeout(() => {
+      macroContextDebounce = undefined;
+      void updateMacroExpansionContext();
+    }, 125);
+  };
+  const invalidateMacroExpansion = (cause: string): void => {
+    ++macroExpansionGeneration;
+    if (macroExpansionPanel !== undefined) {
+      macroExpansionPanel.title = "HLSL Macro Expansion";
+      macroExpansionPanel.webview.html = macroExpansionMessageHtml(
+        `The displayed macro expansion is stale (${cause}). Run Expand Macro again.`,
+      );
+    }
+  };
+
   const restart = async (): Promise<void> => {
     cancelPendingAnalysisRefreshes();
     invalidateOpenAnalysisPanels("Disconnected server", true);
+    invalidateMacroExpansion("Disconnected server");
     try {
       await lifecycle.restart();
       outputChannel.appendLine("Language server restarted.");
@@ -1981,6 +2104,7 @@ export async function activate(
       );
     }
     await updateVariantStatus();
+    scheduleMacroExpansionContext();
   };
 
   // Persists the resulting active variant a hlsl-lsp.selectVariant command
@@ -1998,6 +2122,7 @@ export async function activate(
       // configuration change (and the resync it would otherwise retrigger).
       return;
     }
+    invalidateMacroExpansion("Variant change");
     const target =
       vscode.workspace.workspaceFolders &&
       vscode.workspace.workspaceFolders.length > 0
@@ -2312,6 +2437,7 @@ export async function activate(
     vscode.commands.registerCommand("hlsl.stopServer", async () => {
       cancelPendingAnalysisRefreshes();
       invalidateOpenAnalysisPanels("Disconnected server");
+      invalidateMacroExpansion("Disconnected server");
       await lifecycle.stop();
       outputChannel.appendLine("Language server stopped.");
     }),
@@ -2404,6 +2530,87 @@ export async function activate(
             command.panel,
           );
         }
+      },
+    ),
+    vscode.commands.registerCommand(
+      "hlsl.expandMacro",
+      async (commandArgument: unknown) => {
+        const editor = vscode.window.activeTextEditor;
+        const target = macroExpansionTarget(commandArgument);
+        let uri: vscode.Uri;
+        let position: vscode.Position;
+        if (target === undefined) {
+          if (editor?.document.languageId !== "hlsl") {
+            await vscode.window.showInformationMessage(
+              "Open an HLSL document and place the caret on a macro invocation.",
+            );
+            return;
+          }
+          uri = editor.document.uri;
+          position = editor.selection.active;
+        } else {
+          uri = vscode.Uri.parse(target.textDocument.uri, true);
+          position = new vscode.Position(
+            target.position.line,
+            target.position.character,
+          );
+        }
+
+        const generation = ++macroExpansionGeneration;
+        if (macroExpansionPanel === undefined) {
+          const panel = vscode.window.createWebviewPanel(
+            "hlslMacroExpansion",
+            "HLSL Macro Expansion",
+            vscode.ViewColumn.Beside,
+            { enableScripts: false },
+          );
+          macroExpansionPanel = panel;
+          panel.onDidDispose(() => {
+            if (macroExpansionPanel === panel) {
+              ++macroExpansionGeneration;
+              macroExpansionPanel = undefined;
+            }
+          });
+        } else {
+          macroExpansionPanel.reveal(vscode.ViewColumn.Beside);
+        }
+        const panel = macroExpansionPanel;
+        panel.title = "HLSL Macro Expansion";
+        panel.webview.html = macroExpansionMessageHtml(
+          "Resolving compiler expansion...",
+        );
+
+        let expansion: MacroExpansion | null | undefined;
+        try {
+          expansion = await lifecycle.withClient((client) =>
+            client.macroExpansion(uri, position),
+          );
+        } catch (error) {
+          if (
+            generation !== macroExpansionGeneration ||
+            panel !== macroExpansionPanel
+          ) {
+            return;
+          }
+          panel.webview.html = macroExpansionMessageHtml(
+            `Unable to expand macro: ${errorMessage(error)}`,
+          );
+          return;
+        }
+        if (
+          generation !== macroExpansionGeneration ||
+          panel !== macroExpansionPanel
+        ) {
+          return;
+        }
+        if (expansion === null || expansion === undefined) {
+          panel.webview.html = macroExpansionMessageHtml(
+            "No compiler-backed macro expansion is available at the caret.",
+          );
+          return;
+        }
+        panel.title = `Macro Expansion: ${expansion.name}`;
+        panel.webview.html = macroExpansionHtml(expansion);
       },
     ),
     vscode.commands.registerCommand(
@@ -3176,7 +3383,13 @@ export async function activate(
     }),
     vscode.window.onDidChangeActiveTextEditor((editor) => {
       void updateVariantStatus();
+      scheduleMacroExpansionContext();
       void followActiveShader(context, lifecycle, editor);
+    }),
+    vscode.window.onDidChangeTextEditorSelection((event) => {
+      if (event.textEditor === vscode.window.activeTextEditor) {
+        scheduleMacroExpansionContext();
+      }
     }),
     vscode.workspace.onDidChangeConfiguration(async (event) => {
       const resource = configurationResource();
@@ -3188,6 +3401,7 @@ export async function activate(
       );
       if (analysisChange !== undefined) {
         invalidateOpenAnalysisPanels(analysisChange.cause);
+        invalidateMacroExpansion(analysisChange.cause);
       }
       if (analysisChange?.action === "restart") {
         if (event.affectsConfiguration("hlsl.dxcRuntimeDirectory", resource)) {
@@ -3209,6 +3423,7 @@ export async function activate(
         );
       }
       await updateVariantStatus();
+      scheduleMacroExpansionContext();
       if (analysisChange?.action === "refresh") {
         await refreshAllOpenAnalysisPanels(lifecycle, analysisChange.cause);
       }
@@ -3226,6 +3441,7 @@ export async function activate(
       if (document.languageId !== "hlsl") {
         return;
       }
+      invalidateMacroExpansion("Source edit");
       invalidateOpenAnalysisPanels("Source edit", true);
       void refreshAllOpenAnalysisPanels(lifecycle, "Source edit");
       effectiveContextStatusDebouncer?.schedule();
@@ -3236,6 +3452,9 @@ export async function activate(
       }
     }),
     vscode.workspace.onDidCloseTextDocument((document) => {
+      if (document.languageId === "hlsl") {
+        invalidateMacroExpansion("Source buffer closed");
+      }
       const closedUri = document.uri.toString();
       for (const state of openAnalysisPanelStates()) {
         if (state.uri.toString() !== closedUri) {
@@ -3251,12 +3470,14 @@ export async function activate(
       if (event.document.languageId !== "hlsl") {
         return;
       }
+      invalidateMacroExpansion("Source edit");
       ++memoryLayoutGeneration;
       if (
         vscode.window.activeTextEditor?.document.uri.toString() ===
         event.document.uri.toString()
       ) {
         effectiveContextStatusDebouncer?.schedule();
+        scheduleMacroExpansionContext();
       }
       if (memoryLayoutState?.targetAvailable) {
         if (memoryLayoutDebounce !== undefined) {
@@ -3370,6 +3591,7 @@ export async function activate(
     });
   }
   await updateVariantStatus();
+  scheduleMacroExpansionContext();
 
   return {
     get state(): LifecycleState {
@@ -3388,6 +3610,19 @@ export async function deactivate(): Promise<void> {
   activeLifecycle = undefined;
   cancelPendingAnalysisRefreshes();
   ++memoryLayoutGeneration;
+  ++macroExpansionGeneration;
+  ++macroContextGeneration;
+  if (macroContextDebounce !== undefined) {
+    clearTimeout(macroContextDebounce);
+    macroContextDebounce = undefined;
+  }
+  macroExpansionPanel?.dispose();
+  macroExpansionPanel = undefined;
+  void vscode.commands.executeCommand(
+    "setContext",
+    "hlsl.macroExpansionAvailable",
+    false,
+  );
   memoryLayoutState = undefined;
   compilationInfoState = undefined;
   resourceBindingsState = undefined;

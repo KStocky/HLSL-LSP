@@ -280,6 +280,7 @@ public sealed class HlslLspActivator :
             OnConfigurationChangedFromServerAsync,
             OnLanguageServerConnectionChanged);
         MemoryLayoutBridge.Register(languageClient.GetMemoryLayoutAsync);
+        MacroExpansionBridge.Register(languageClient.GetMacroExpansionAsync);
         HlslCommandContextBridge.Register(languageClient.GetCommandContextAsync);
         CompilationInfoBridge.Register(languageClient.GetCompilationInfoAsync);
         EffectiveShaderContextBridge.Register(languageClient.GetEffectiveContextAsync);
@@ -308,6 +309,7 @@ public sealed class HlslLspActivator :
     {
         if (!running)
         {
+            HlslCommandContextBridge.Invalidate();
             host.InvalidateAnalysisViews(
                 AnalysisFreshnessCause.DisconnectedServer);
             return;

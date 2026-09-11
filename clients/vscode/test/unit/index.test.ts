@@ -8,6 +8,7 @@ import "./effectiveContext.test";
 import "./entryPointDataFlow.test";
 import "./lifecycle.test";
 import "./memoryLayout.test";
+import "./macroExpansion.test";
 import "./packageManifest.test";
 import "./panelController.test";
 import "./preprocessorExplorer.test";

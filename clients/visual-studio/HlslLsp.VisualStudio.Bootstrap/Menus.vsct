@@ -27,6 +27,13 @@
       </Menu>
     </Menus>
     <Buttons>
+      <Button guid="guidHlslLspCommands" id="ExpandMacro" priority="0x00ff" type="Button">
+        <Parent guid="guidHlslLspCommands" id="HlslContextInspectionGroup"/>
+        <CommandFlag>DynamicVisibility</CommandFlag>
+        <Strings>
+          <ButtonText>Expand Macro</ButtonText>
+        </Strings>
+      </Button>
       <Button guid="guidHlslLspCommands" id="ShowMemoryLayout" priority="0x0100" type="Button">
         <Parent guid="guidHlslLspCommands" id="HlslContextInspectionGroup"/>
         <CommandFlag>DynamicVisibility</CommandFlag>
@@ -109,6 +116,7 @@
       <IDSymbol name="ShowCallHierarchy" value="0x0106"/>
       <IDSymbol name="ShowComputeVisualization" value="0x0107"/>
       <IDSymbol name="OpenEffectiveConfiguration" value="0x0108"/>
+      <IDSymbol name="ExpandMacro" value="0x0109"/>
     </GuidSymbol>
   </Symbols>
 </CommandTable>
