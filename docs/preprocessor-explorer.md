@@ -35,6 +35,15 @@ macro includes dynamic. DXC remains authoritative for replacement values and
 preprocessing, and receives rewritten source only when a safely resolved
 virtual macro include must be mapped to its physical file.
 
+The pinned DXC runtime's legacy IntelliSense index can incorrectly diagnose the
+valid GNU-style `, ##__VA_ARGS__` comma-elision form because one of its
+preprocessor options is not initialized. When that specific diagnostic occurs,
+HLSL-LSP checks the same in-memory source and effective options with DXC's
+compiler preprocessor before publishing it. Genuine invalid token pastes remain
+diagnostics. The legacy index still builds the surrounding cursor tree, so
+completion or navigation immediately inside an affected expansion may remain
+limited until DXC fixes the index itself.
+
 DXC 1.9's Linux `GetSkippedRanges` API is unsafe when IntelliSense receives
 source buffers with virtual include directives rewritten to physical paths.
 For those snapshots only, HLSL-LSP does not call that API. The response marks

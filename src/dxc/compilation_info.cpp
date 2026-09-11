@@ -899,6 +899,81 @@ extract_disassembly(IDxcCompiler3& compiler, const DxcBuffer& object, std::strin
 
 namespace hlsl_intellisense::dxc::detail {
 
+PreprocessDiagnostics preprocess_diagnostics_from_compile(DxcCreateInstanceProc create_instance,
+                                                          const std::vector<SourceFile>& sources,
+                                                          const std::vector<std::string>& arguments,
+                                                          std::string_view main_path) {
+    const auto source_it = std::ranges::find(sources, main_path, &SourceFile::path);
+    if (source_it == sources.end()) {
+        return {};
+    }
+
+    LocalComPtr<IDxcCompiler3> compiler;
+    check(create_instance(CLSID_DxcCompiler, __uuidof(IDxcCompiler3), compiler.put_void()),
+          "Create IDxcCompiler3 for preprocessing");
+    LocalComPtr<IDxcUtils> utils;
+    check(create_instance(CLSID_DxcUtils, __uuidof(IDxcUtils), utils.put_void()),
+          "Create IDxcUtils for preprocessing");
+
+    std::vector<std::wstring> wide_args;
+    const auto source_directory = std::filesystem::path{main_path}.parent_path();
+    if (!source_directory.empty()) {
+        wide_args.push_back(L"-I");
+        wide_args.push_back(utf8_to_wide(source_directory.generic_string()));
+    }
+    for (const auto& argument : arguments) {
+        wide_args.push_back(utf8_to_wide(argument));
+    }
+    wide_args.push_back(L"-P");
+    wide_args.push_back(L"-fdiagnostics-format=clang");
+
+    std::vector<LPCWSTR> arg_ptrs;
+    arg_ptrs.reserve(wide_args.size());
+    for (const auto& wide_argument : wide_args) {
+        arg_ptrs.push_back(wide_argument.c_str());
+    }
+    const auto wide_main_path = utf8_to_wide(main_path);
+    LocalComPtr<IDxcCompilerArgs> compiler_args;
+    check(utils->BuildArguments(wide_main_path.c_str(), nullptr, nullptr, arg_ptrs.data(),
+                                static_cast<UINT32>(arg_ptrs.size()), nullptr, 0,
+                                compiler_args.put()),
+          "BuildArguments for preprocessing");
+
+    LocalComPtr<IDxcBlobEncoding> source_blob;
+    check(utils->CreateBlobFromPinned(source_it->text.data(),
+                                      static_cast<UINT32>(source_it->text.size()), DXC_CP_UTF8,
+                                      source_blob.put()),
+          "CreateBlobFromPinned for preprocessing");
+    const DxcBuffer source_buffer{.Ptr = source_blob->GetBufferPointer(),
+                                  .Size = source_blob->GetBufferSize(),
+                                  .Encoding = DXC_CP_UTF8};
+
+    auto* include_handler = new InMemoryIncludeHandler(utils.get(), sources);
+    LocalComPtr<IDxcResult> result;
+    const HRESULT preprocess_hr =
+        compiler->Compile(&source_buffer, compiler_args->GetArguments(), compiler_args->GetCount(),
+                          include_handler, __uuidof(IDxcResult), result.put_void());
+    include_handler->Release();
+    if (FAILED(preprocess_hr) || !result) {
+        return {};
+    }
+
+    PreprocessDiagnostics output{.available = true};
+    LocalComPtr<IDxcBlobEncoding> errors;
+    if (FAILED(result->GetErrorBuffer(errors.put()))) {
+        return {};
+    }
+    if (errors && errors->GetBufferSize() > 0) {
+        const std::string_view error_text{static_cast<const char*>(errors->GetBufferPointer()),
+                                          errors->GetBufferSize()};
+        output.diagnostics = parse_compiler_diagnostics(error_text);
+        if (output.diagnostics.empty()) {
+            return {};
+        }
+    }
+    return output;
+}
+
 CompilationInfo compilation_info_from_compile(DxcCreateInstanceProc create_instance,
                                               const std::vector<SourceFile>& sources,
                                               const std::vector<std::string>& arguments,
