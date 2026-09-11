@@ -19,6 +19,7 @@
 #include <filesystem>
 #include <iterator>
 #include <limits>
+#include <optional>
 #include <regex>
 #include <span>
 #include <stdexcept>
@@ -484,6 +485,11 @@ class TaskRanges final {
 [[nodiscard]] bool is_missing_descriptor_heap_diagnostic(std::string_view message) {
     return message == "use of undeclared identifier 'ResourceDescriptorHeap'" ||
            message == "use of undeclared identifier 'SamplerDescriptorHeap'";
+}
+
+[[nodiscard]] bool is_invalid_token_paste_diagnostic(std::string_view message) {
+    return message.starts_with("pasting formed '") &&
+           message.ends_with("', an invalid preprocessing token");
 }
 
 [[nodiscard]] bool is_null_cursor(IDxcCursor* cursor) {
@@ -2378,6 +2384,7 @@ struct TranslationUnit::Impl final {
     // IntelliSense index parse which cannot consume them).
     std::vector<std::string> full_arguments;
     bool descriptor_heaps_supported{};
+    mutable std::optional<detail::PreprocessDiagnostics> token_paste_preprocessing;
     std::vector<ComPtr<IDxcUnsavedFile>> unsaved_files;
     ComPtr<IDxcTranslationUnit> translation_unit;
 
@@ -2482,6 +2489,28 @@ auto TranslationUnit::diagnostics() const -> std::vector<Diagnostic> {
             .message = std::string{owned_spelling.view()},
             .location = safe_diagnostic_location(*diagnostic.get(), implementation_->root_path),
             .fix_its = safe_diagnostic_fix_its(*diagnostic.get())});
+    }
+
+    if (std::ranges::any_of(result, [](const auto& diagnostic) {
+            return is_invalid_token_paste_diagnostic(diagnostic.message);
+        })) {
+        if (!implementation_->token_paste_preprocessing.has_value()) {
+            implementation_->token_paste_preprocessing =
+                detail::preprocess_diagnostics_from_compile(
+                    implementation_->owner->create_instance, implementation_->sources,
+                    implementation_->arguments, implementation_->root_path);
+        }
+        const auto& compiler = *implementation_->token_paste_preprocessing;
+        if (compiler.available) {
+            std::erase_if(result, [](const auto& diagnostic) {
+                return is_invalid_token_paste_diagnostic(diagnostic.message);
+            });
+            std::ranges::copy_if(compiler.diagnostics, std::back_inserter(result),
+                                 [](const auto& diagnostic) {
+                                     return diagnostic.severity >= DiagnosticSeverity::error &&
+                                            is_invalid_token_paste_diagnostic(diagnostic.message);
+                                 });
+        }
     }
     return result;
 }
@@ -4084,6 +4113,7 @@ auto TranslationUnit::entry_point_data_flow(
 
 void TranslationUnit::reparse(std::vector<SourceFile> files) {
     implementation_->sources = std::move(files);
+    implementation_->token_paste_preprocessing.reset();
     implementation_->rebuild_unsaved_files();
 #ifdef _WIN32
     auto pointers = implementation_->unsaved_file_pointers();

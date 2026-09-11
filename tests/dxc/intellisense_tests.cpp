@@ -149,6 +149,79 @@ TEST_CASE("DXC accepts comment delimiters formed by phase-two splicing",
     }));
 }
 
+TEST_CASE("DXC IntelliSense accepts valid variadic comma elision",
+          "[dxc][preprocessor][variadic][regression]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.target_profile = "ps_6_6";
+    options.entry_point = "main";
+    options.defines = {"ENABLE_INVOKE=1"};
+    options.additional_arguments = {"-fdiagnostics-format=msvc"};
+    const auto directory = std::filesystem::current_path() / "variadic-macro";
+    const auto root = (directory / shader_path).generic_string();
+    const auto include_path = (directory / "macro_helpers.hlsli").generic_string();
+    const std::string include_source =
+        "#if ENABLE_INVOKE\n"
+        "#define INVOKE_IMPL(Function, ...) Function(0, ##__VA_ARGS__)\n"
+        "#define INVOKE(...) INVOKE_IMPL(__VA_ARGS__)\n"
+        "#endif\n";
+    const std::string source = "#include \"macro_helpers.hlsli\"\n"
+                               "float add(float left, float right) { return left + right; }\n"
+                               "float4 main() : SV_Target {\n"
+                               "    float value = 1;\n"
+                               "    return INVOKE(add, value).xxxx;\n"
+                               "}\n";
+
+    auto translation_unit =
+        intellisense.parse(root, {{root, source}, {include_path, include_source}}, options);
+    const auto compilation = translation_unit.compilation_info();
+    std::string compilation_messages;
+    for (const auto& diagnostic : compilation.diagnostics) {
+        compilation_messages += diagnostic.message;
+        compilation_messages += '\n';
+    }
+    INFO(compilation_messages);
+    REQUIRE(compilation.success);
+
+    const auto diagnostics = translation_unit.diagnostics();
+    std::string messages;
+    for (const auto& diagnostic : diagnostics) {
+        messages += diagnostic.message;
+        messages += '\n';
+    }
+    INFO(messages);
+    CHECK(std::ranges::none_of(diagnostics, [](const auto& diagnostic) {
+        return diagnostic.severity >= hlsl_intellisense::dxc::DiagnosticSeverity::error;
+    }));
+}
+
+TEST_CASE("DXC IntelliSense still rejects invalid token pasting",
+          "[dxc][preprocessor][token-pasting][regression]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.additional_arguments = {"-fdiagnostics-format=msvc"};
+    const std::string source = "#define INVOKE(Function, ...) Function(0, ##__VA_ARGS__)\n"
+                               "#define INVALID_PASTE(Token) add(0, ##Token)\n"
+                               "float add(float left, float right) { return left + right; }\n"
+                               "float4 main() : SV_Target {\n"
+                               "    float value = 1;\n"
+                               "    float valid = INVOKE(add, value);\n"
+                               "    return INVALID_PASTE(value).xxxx + valid;\n"
+                               "}\n";
+
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+    const auto diagnostics = translation_unit.diagnostics();
+    const auto invalid_pastes = std::ranges::count_if(diagnostics, [](const auto& diagnostic) {
+        return diagnostic.severity >= hlsl_intellisense::dxc::DiagnosticSeverity::error &&
+               diagnostic.message.find("invalid preprocessing token") != std::string::npos;
+    });
+    CHECK(invalid_pastes == 1);
+    CHECK(std::ranges::any_of(diagnostics, [](const auto& diagnostic) {
+        return diagnostic.location.line == 7 &&
+               diagnostic.message.find("invalid preprocessing token") != std::string::npos;
+    }));
+}
+
 TEST_CASE("DXC inlay hints use inferred cursor types and unambiguous signatures",
           "[dxc][inlay-hints]") {
     hlsl_intellisense::dxc::Intellisense intellisense;

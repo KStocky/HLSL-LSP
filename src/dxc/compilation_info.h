@@ -16,6 +16,18 @@
 
 namespace hlsl_intellisense::dxc::detail {
 
+struct PreprocessDiagnostics {
+    bool available{};
+    std::vector<Diagnostic> diagnostics;
+};
+
+// Runs DXC's compiler preprocessor over the exact in-memory source snapshot.
+// This is used only to arbitrate diagnostics from known-divergent legacy
+// IntelliSense preprocessing paths; AST features still come from IDxcIndex.
+[[nodiscard]] PreprocessDiagnostics preprocess_diagnostics_from_compile(
+    DxcCreateInstanceProc create_instance, const std::vector<SourceFile>& sources,
+    const std::vector<std::string>& arguments, std::string_view main_path);
+
 // Compiles the actual root source and every resolved in-memory include source
 // using the exact effective compiler arguments (unmodified: no synthetic
 // wrapper source and no argument substitution), then extracts the
