@@ -306,6 +306,7 @@ export interface CompilationCompatibility {
 }
 
 export interface CompilationInfo {
+  readonly context?: EffectiveShaderContext;
   readonly entryPoint: string;
   readonly stage: string;
   readonly targetProfile: string;
@@ -403,11 +404,21 @@ function listOrNone(values: readonly string[]): string {
 
 function configurationSection(info: CompilationInfo): string {
   const rows: [string, string][] = [
-    ["Entry point", info.entryPoint || "(none)"],
-    ["Stage", info.stage || "(unknown)"],
-    ["Target profile", info.targetProfile || "(none)"],
-    ["Language version", info.languageVersion || "(default)"],
-    ["Active variant", info.activeVariant ?? "(none)"],
+    ["Entry point", contextValue(info.context?.entryPoint ?? info.entryPoint)],
+    ["Stage", contextValue(info.stage)],
+    [
+      "Target profile",
+      contextValue(info.context?.targetProfile ?? info.targetProfile),
+    ],
+    ["Language version", info.languageVersion || "Default"],
+    [
+      "Active variant",
+      variantLabel(
+        info.context === undefined
+          ? info.activeVariant
+          : info.context.activeVariant,
+      ),
+    ],
   ];
   const table = `<table>${rows
     .map(
@@ -573,7 +584,7 @@ ${threadGroupSize}
 }
 
 export function compilationInfoHtml(info: CompilationInfo): string {
-  const title = info.entryPoint || "(default entry point)";
+  const title = info.entryPoint || "Shader compilation";
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -600,6 +611,7 @@ export function compilationInfoHtml(info: CompilationInfo): string {
 </head>
 <body>
 <h1>${escapeHtml(title)}</h1>
+${effectiveContextHeaderHtml(info.context)}
 ${configurationSection(info)}
 ${diagnosticsSection(info)}
 ${outputSection(info)}
@@ -682,7 +694,13 @@ export function resolveCompilationInfoRefresh(
   return {
     html: compilationInfoHtml(info),
     hasContent: true,
-    title: `Shader Compilation: ${info.entryPoint || "(default entry point)"}`,
+    title: `Shader Compilation: ${contextValue(info.context?.entryPoint ?? info.entryPoint)}`,
     info,
   };
 }
+import {
+  contextValue,
+  EffectiveShaderContext,
+  effectiveContextHeaderHtml,
+  variantLabel,
+} from "./effectiveContext";

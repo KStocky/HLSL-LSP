@@ -44,6 +44,23 @@ struct InlayHintSettings {
     bool operator==(const InlayHintSettings&) const = default;
 };
 
+struct EffectiveContextOrigin {
+    std::string label;
+    std::string setting;
+    std::optional<std::filesystem::path> file;
+};
+
+struct EffectiveShaderContext {
+    std::string document_uri;
+    std::string file;
+    std::optional<std::string> active_variant;
+    std::string entry_point;
+    std::string target_profile;
+    std::optional<EffectiveContextOrigin> variant_origin;
+    std::optional<EffectiveContextOrigin> entry_point_origin;
+    std::optional<EffectiveContextOrigin> target_profile_origin;
+};
+
 class Server final {
   public:
     using NotificationSender = std::function<void(const json_rpc::Notification&)>;
@@ -96,6 +113,7 @@ class Server final {
         std::string root_identity;
         std::int64_t root_version{};
         std::uint64_t generation{};
+        json_rpc::Json context;
         std::string path;
         std::uint32_t line{};
         std::uint32_t column{};
@@ -105,11 +123,10 @@ class Server final {
     };
     [[nodiscard]] static CallHierarchyItemData
     parse_call_hierarchy_item_data(const json_rpc::Json& item);
-    [[nodiscard]] json_rpc::Json call_hierarchy_item(const dxc::CallableSymbol& callable,
-                                                     const std::string& root_uri,
-                                                     const std::string& root_identity,
-                                                     std::int64_t root_version,
-                                                     std::uint64_t root_generation) const;
+    [[nodiscard]] json_rpc::Json
+    call_hierarchy_item(const dxc::CallableSymbol& callable, const std::string& root_uri,
+                        const std::string& root_identity, std::int64_t root_version,
+                        std::uint64_t root_generation, const json_rpc::Json& context) const;
     // Re-validates a previously built CallHierarchyItemData against the
     // *current* analysis of its own root: throws
     // json_rpc::HandlerError{content_modified_code, ...} when the root is
@@ -188,6 +205,8 @@ class Server final {
                                                  const json_rpc::RequestContext& context);
     [[nodiscard]] json_rpc::Json compilation_info(const std::optional<json_rpc::Json>& params,
                                                   const json_rpc::RequestContext& context);
+    [[nodiscard]] json_rpc::Json effective_context(const std::optional<json_rpc::Json>& params,
+                                                   const json_rpc::RequestContext& context);
     [[nodiscard]] json_rpc::Json compute_visualization(const std::optional<json_rpc::Json>& params,
                                                        const json_rpc::RequestContext& context);
     [[nodiscard]] json_rpc::Json preprocessor_explorer(const std::optional<json_rpc::Json>& params,
@@ -224,9 +243,14 @@ class Server final {
         std::optional<std::string> active_variant;
         std::string entry_point;
         std::string target_profile;
+        EffectiveShaderContext context;
     };
 
     AnalysisSubmission analyze_and_publish(std::string_view uri);
+    void require_current_submission(std::string_view root_identity, std::uint64_t generation,
+                                    std::string_view message) const;
+    void require_current_submission(std::string_view root_identity, std::uint64_t generation,
+                                    const json_rpc::Json& context, std::string_view message) const;
     void reanalyze_all();
     // Compares the DXC runtime selected by editor settings and shadertoolsconfig
     // against the runtime this process loaded. A valid, different selection
@@ -276,6 +300,11 @@ class Server final {
     [[nodiscard]] static workspace::WorkspaceConfiguration
     configuration_for(const workspace::SourceSnapshot& snapshot, const ConfigurationState& state,
                       workspace::VariantSelection* active_variant_selection = nullptr);
+    [[nodiscard]] static EffectiveShaderContext
+    effective_context_for(const workspace::SourceSnapshot& snapshot,
+                          const ConfigurationState& state,
+                          const workspace::WorkspaceConfiguration& configuration,
+                          workspace::VariantSelection active_variant_selection);
     // Resolves the configuration that would be active if `variant_name` were
     // selected instead of (or in addition to, if none is currently active) the
     // active variant, applied on top of the same file-derived base and editor
@@ -348,6 +377,7 @@ class Server final {
     std::mutex analysis_submission_mutex_;
     mutable std::mutex state_mutex_;
     std::unordered_map<std::string, std::string> configuration_watch_states_;
+    std::uint64_t effective_context_revision_{};
     std::unordered_map<std::string, std::uint64_t> analysis_generations_;
     std::unordered_map<std::string, AnalysisSubmission> analysis_submissions_;
     // The diagnostics last published for each document (keyed by document

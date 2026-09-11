@@ -57,6 +57,17 @@ The Visual Studio variant picker additionally recognizes configured custom
 shader extensions. Both clients remove variants that do not apply to the
 active document.
 
+For an active HLSL document, both clients show a compact effective shader
+context indicator sourced from the server's `hlsl/effectiveContext` request.
+Every custom analysis result also begins with the same **File**, **Variant**,
+**Entry point**, **Target profile**, and available **Configuration origins**
+header. `Default` consistently means that no named variant is active, while
+`Not configured` means that no effective entry point or target profile was
+supplied. Final `-E`/`-T` compiler arguments are authoritative. Visual Studio
+uses a compact extension-owned editor indicator; click it to run
+**HLSL > Select Shader Variant** without overwriting Visual Studio's shared
+status text.
+
 Every HLSL tool window follows Visual Studio's active foreground, background,
 hyperlink, control, scrollbar, and environment-font theme resources.
 

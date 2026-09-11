@@ -6,8 +6,24 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 using Microsoft.VisualStudio.Shell;
+using Microsoft.VisualStudio.Text;
 
 namespace HlslLsp.VisualStudio.Bootstrap;
+
+internal static class MemoryLayoutTargetIdentity
+{
+    internal static bool IsSame(
+        Uri currentUri,
+        int currentLine,
+        int currentCharacter,
+        Uri requestedUri,
+        int requestedLine,
+        int requestedCharacter)
+        => currentUri != null &&
+           currentUri.Equals(requestedUri) &&
+           currentLine == requestedLine &&
+           currentCharacter == requestedCharacter;
+}
 
 [Guid("9d208088-c1e2-451d-907c-6e7f825b9714")]
 public sealed class MemoryLayoutToolWindow : ToolWindowPane
@@ -21,8 +37,57 @@ public sealed class MemoryLayoutToolWindow : ToolWindowPane
         Content = control;
     }
 
-    internal void SetLayout(MemoryLayoutModel layout)
-        => control.SetLayout(layout);
+    internal Uri DocumentUri { get; private set; }
+
+    internal int Line { get; private set; }
+
+    internal int Character { get; private set; }
+
+    internal ITrackingPoint TrackingPoint { get; private set; }
+
+    internal void UpdateTrackedPosition(int line, int character)
+    {
+        Line = line;
+        Character = character;
+    }
+
+    internal void SetLayout(
+        Uri uri,
+        int line,
+        int character,
+        ITrackingPoint trackingPoint,
+        MemoryLayoutModel layout)
+    {
+        DocumentUri = uri;
+        Line = line;
+        Character = character;
+        TrackingPoint = trackingPoint;
+        control.SetLayout(layout);
+    }
+
+    internal void SetError(
+        Uri uri,
+        int line,
+        int character,
+        ITrackingPoint trackingPoint,
+        string message,
+        bool preserveContent)
+    {
+        var preserve =
+            preserveContent &&
+            MemoryLayoutTargetIdentity.IsSame(
+                DocumentUri,
+                Line,
+                Character,
+                uri,
+                line,
+                character);
+        DocumentUri = uri;
+        Line = line;
+        Character = character;
+        TrackingPoint = trackingPoint;
+        control.SetError(message, preserve);
+    }
 }
 
 internal sealed class MemoryLayoutControl : UserControl
@@ -38,6 +103,7 @@ internal sealed class MemoryLayoutControl : UserControl
     };
 
     private readonly StackPanel content = new();
+    private bool hasContent;
 
     internal MemoryLayoutControl()
     {
@@ -53,6 +119,7 @@ internal sealed class MemoryLayoutControl : UserControl
 
     internal void SetLayout(MemoryLayoutModel layout)
     {
+        hasContent = layout != null;
         content.Children.Clear();
         content.Margin = new Thickness(12);
         if (layout == null)
@@ -66,17 +133,15 @@ internal sealed class MemoryLayoutControl : UserControl
             return;
         }
 
-        content.Children.Add(new TextBlock
-        {
-            Text = string.IsNullOrEmpty(layout.Name) ? layout.Type : layout.Name,
-            FontSize = 18,
-            FontWeight = FontWeights.SemiBold,
-        });
+        EffectiveShaderContextDisplay.AddHeader(
+            content,
+            string.IsNullOrEmpty(layout.Name) ? layout.Type : layout.Name,
+            layout.Context);
         content.Children.Add(new TextBlock
         {
             Text = $"{ModeName(layout.Mode)} · size {layout.Size} bytes · " +
                    $"alignment {layout.Alignment} bytes · allocation {layout.AllocationSize} bytes",
-            Margin = new Thickness(0, 3, 0, 12),
+            Margin = new Thickness(0, 0, 0, 12),
             Opacity = 0.75,
         });
         foreach (var diagnostic in layout.Diagnostics ?? Array.Empty<string>())
@@ -91,6 +156,23 @@ internal sealed class MemoryLayoutControl : UserControl
         }
         AddDiagram(layout);
         AddMemberTable(layout);
+    }
+
+    internal void SetError(string message, bool preserveContent)
+    {
+        if (hasContent && preserveContent)
+        {
+            return;
+        }
+        hasContent = false;
+        content.Children.Clear();
+        content.Margin = new Thickness(12);
+        content.Children.Add(new TextBlock
+        {
+            Text = message,
+            Foreground = Brushes.OrangeRed,
+            TextWrapping = TextWrapping.Wrap,
+        });
     }
 
     private void AddDiagram(MemoryLayoutModel layout)

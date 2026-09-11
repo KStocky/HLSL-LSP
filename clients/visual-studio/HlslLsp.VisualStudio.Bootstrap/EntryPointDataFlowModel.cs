@@ -14,6 +14,8 @@ namespace HlslLsp.VisualStudio.Bootstrap;
 // CompilationInfoModel.cs) rather than a second bespoke range shape.
 public sealed class CallHierarchyItemModel
 {
+    public EffectiveShaderContextModel Context { get; set; }
+
     public string Name { get; set; }
 
     public long Kind { get; set; }
@@ -99,6 +101,8 @@ public sealed class GlobalAccessModel
 // client-side from a name or position that DXC did not itself report.
 public sealed class EntryPointDataFlowModel
 {
+    public EffectiveShaderContextModel Context { get; set; }
+
     // False when no entry point is configured, or a configured entry point
     // name does not resolve to any function definition in the current
     // unsaved snapshot; every list below is then empty and Explanation is a

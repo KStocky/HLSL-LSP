@@ -158,12 +158,10 @@ internal sealed class EntryPointDataFlowControl : UserControl
 
     private void AddHeader(EntryPointDataFlowModel report)
     {
-        content.Children.Add(new TextBlock
-        {
-            Text = "Entry-Point Data Flow",
-            FontSize = 18,
-            FontWeight = FontWeights.SemiBold,
-        });
+        EffectiveShaderContextDisplay.AddHeader(
+            content,
+            "Entry-Point Data Flow",
+            report.Context);
         var entryPoint = report.EntryPoint;
         var subtitle = entryPoint != null
             ? $"Entry point: {entryPoint.Name}" +
@@ -172,7 +170,7 @@ internal sealed class EntryPointDataFlowControl : UserControl
         content.Children.Add(new TextBlock
         {
             Text = subtitle,
-            Margin = new Thickness(0, 3, 0, 12),
+            Margin = new Thickness(0, 0, 0, 12),
             Opacity = 0.75,
             TextWrapping = TextWrapping.Wrap,
         });

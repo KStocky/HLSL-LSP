@@ -97,6 +97,7 @@ export interface PreprocessorCompilerAnalysis {
 }
 
 export interface PreprocessorExplorerReport {
+  readonly context?: EffectiveShaderContext;
   readonly rootUri: string;
   readonly files: readonly PreprocessorFile[];
   readonly skippedRegions: readonly PreprocessorSkippedRegion[];
@@ -271,7 +272,8 @@ function macroRow(macro: PreprocessorMacro): string {
   return `<tr><td>${label}</td><td><code>${escapeHtml(macro.value)}</code></td><td>${escapeHtml(sourceLabel)}</td><td>${origin}</td></tr>`;
 }
 
-function settingValueText(value: PreprocessorSettingValue): string {
+function settingValueText(setting: PreprocessorSetting): string {
+  const value = setting.value;
   if (Array.isArray(value)) {
     return value.length === 0 ? "(none)" : value.join(", ");
   }
@@ -282,7 +284,12 @@ function settingValueText(value: PreprocessorSettingValue): string {
       : entries.map(([key, entry]) => `${key} \u2192 ${entry}`).join(", ");
   }
   const text = String(value);
-  return text.length === 0 ? "(none)" : text;
+  return text.length === 0 &&
+    (setting.name === "entryPoint" || setting.name === "targetProfile")
+    ? "Not configured"
+    : text.length === 0
+      ? "(none)"
+      : text;
 }
 
 function settingRow(setting: PreprocessorSetting): string {
@@ -293,7 +300,7 @@ function settingRow(setting: PreprocessorSetting): string {
           uri: setting.originUri,
           range: pointRange({ line: 0, character: 0 }),
         });
-  return `<tr><td>${escapeHtml(setting.name)}</td><td>${escapeHtml(settingValueText(setting.value))}</td><td>${origin}</td></tr>`;
+  return `<tr><td>${escapeHtml(setting.name)}</td><td>${escapeHtml(settingValueText(setting))}</td><td>${origin}</td></tr>`;
 }
 
 export function preprocessorExplorerHtml(
@@ -368,7 +375,8 @@ export function preprocessorExplorerHtml(
 </head>
 <body>
 <h1>Preprocessor Explorer</h1>
-<div class="summary">${escapeHtml(report.rootUri)}</div>
+${effectiveContextHeaderHtml(report.context)}
+${report.context === undefined ? `<div class="summary">${escapeHtml(report.rootUri)}</div>` : ""}
 ${diagnostics}
 ${files}
 <h2>Preprocessor-skipped regions</h2>
@@ -514,3 +522,7 @@ export function parsePreprocessorLocationCommandArg(
   }
   return { uri: candidate.uri, range };
 }
+import {
+  EffectiveShaderContext,
+  effectiveContextHeaderHtml,
+} from "./effectiveContext";

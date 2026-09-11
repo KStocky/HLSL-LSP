@@ -417,6 +417,34 @@ internal sealed class HlslLanguageClient :
             .ConfigureAwait(false);
     }
 
+    internal async Task<EffectiveShaderContextModel> GetEffectiveContextAsync(
+        Uri documentUri,
+        CancellationToken cancellationToken)
+    {
+        var currentRpc = Volatile.Read(ref rpc);
+        if (currentRpc == null)
+        {
+            await rpcAttached.WaitAsync(cancellationToken).ConfigureAwait(false);
+            currentRpc = Volatile.Read(ref rpc);
+            if (currentRpc == null)
+            {
+                throw new InvalidOperationException(
+                    "The HLSL language server connection is unavailable.");
+            }
+        }
+        return await currentRpc.InvokeWithParameterObjectAsync<EffectiveShaderContextModel>(
+                "hlsl/effectiveContext",
+                new
+                {
+                    textDocument = new
+                    {
+                        uri = documentUri.AbsoluteUri,
+                    },
+                },
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
     // Mirrors GetCompilationInfoAsync: the server analyzes the document's
     // current (possibly unsaved) snapshot and its active variant, so no
     // position or variant parameter is sent here. This is a distinct

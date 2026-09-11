@@ -165,6 +165,7 @@ public sealed class HlslLspActivator :
         MemoryLayoutBridge.Register(languageClient.GetMemoryLayoutAsync);
         HlslCommandContextBridge.Register(languageClient.GetCommandContextAsync);
         CompilationInfoBridge.Register(languageClient.GetCompilationInfoAsync);
+        EffectiveShaderContextBridge.Register(languageClient.GetEffectiveContextAsync);
         PreprocessorExplorerBridge.Register(languageClient.GetPreprocessorExplorerAsync);
         EntryPointDataFlowBridge.Register(languageClient.GetEntryPointDataFlowAsync);
         ComputeVisualizationBridge.Register(languageClient.GetComputeVisualizationAsync);
@@ -175,6 +176,7 @@ public sealed class HlslLspActivator :
             languageClient.GetVariantsAsync,
             OnActiveVariantSelectedAsync);
         await broker.LoadAsync(new HlslLanguageClientMetadata(), languageClient);
+        host.ScheduleEffectiveContextIndicatorRefresh();
 
         navigationBars = new HlslNavigationBarManager(
             editorAdapters,
@@ -317,6 +319,7 @@ public sealed class HlslLspActivator :
             await languageClient.UpdateLanguageVersionAsync(options.LanguageVersion);
         }
         await languageClient.UpdateInlayHintsAsync(options.InlayHints);
+        host.ScheduleEffectiveContextIndicatorRefresh();
     }
 
     private string EffectiveRuntimeDirectory(HlslOptionsSnapshot options)
@@ -358,6 +361,7 @@ public sealed class HlslLspActivator :
                     options.LanguageVersion,
                     requested);
                 RefreshVariantDependentWindows(CancellationToken.None);
+                host.ScheduleEffectiveContextIndicatorRefresh();
                 navigationBars?.Refresh();
             })
             .FileAndForget("HlslLsp/RuntimeRestart");
@@ -385,6 +389,7 @@ public sealed class HlslLspActivator :
         // that ordering guarantee.
         await client.UpdateActiveVariantAsync(value);
         RefreshVariantDependentWindows(cancellationToken);
+        host.ScheduleEffectiveContextIndicatorRefresh();
     }
 
     // Applies a variant the server itself already selected and applied (via
@@ -400,6 +405,7 @@ public sealed class HlslLspActivator :
     {
         workspaceActiveVariant = variant ?? string.Empty;
         RefreshVariantDependentWindows(CancellationToken.None);
+        host.ScheduleEffectiveContextIndicatorRefresh();
         return Task.CompletedTask;
     }
 
@@ -409,6 +415,7 @@ public sealed class HlslLspActivator :
             nameof(HlslLspActivator),
             "Refreshing HLSL views after server configuration processing.");
         RefreshVariantDependentWindows(CancellationToken.None);
+        host.ScheduleEffectiveContextIndicatorRefresh();
         joinableTaskFactory.RunAsync(async () =>
             {
                 await joinableTaskFactory.SwitchToMainThreadAsync();
@@ -421,6 +428,9 @@ public sealed class HlslLspActivator :
     private void RefreshVariantDependentWindows(CancellationToken cancellationToken)
     {
         HlslCommandContextBridge.Invalidate();
+        joinableTaskFactory.RunAsync(
+                () => host.RefreshMemoryLayoutIfOpenAsync(null, cancellationToken))
+            .FileAndForget("HlslLsp/RefreshMemoryLayout");
         // A previously opened Shader Compilation window can only become stale
         // through this variant change (the server itself is not restarted),
         // so refresh it here rather than waiting for the next manual
@@ -467,6 +477,7 @@ public sealed class HlslLspActivator :
     public int OnAfterSave(uint docCookie)
     {
         HlslCommandContextBridge.Invalidate();
+        host.ScheduleEffectiveContextIndicatorRefresh();
         if (runningDocuments == null)
         {
             return VSConstants.S_OK;
@@ -513,6 +524,9 @@ public sealed class HlslLspActivator :
             joinableTaskFactory.RunAsync(
                     () => host.RefreshCompilationInfoIfOpenAsync(moniker, disposalToken))
                 .FileAndForget("HlslLsp/RefreshCompilationInfoOnSave");
+            joinableTaskFactory.RunAsync(
+                    () => host.RefreshMemoryLayoutIfOpenAsync(moniker, disposalToken))
+                .FileAndForget("HlslLsp/RefreshMemoryLayoutOnSave");
             // The Resource Bindings window is refreshed independently on the
             // same save, matching the same non-file/unrelated-document
             // filtering performed inside RefreshResourceBindingsIfOpenAsync.
@@ -776,6 +790,10 @@ public sealed class HlslLspActivator :
             return;
         }
         await host.RefreshEntryPointDataFlowIfOpenAsync(null, cancellationToken);
+        await host.RefreshMemoryLayoutIfOpenAsync(null, cancellationToken);
+        await host.RefreshCompilationInfoIfOpenAsync(null, cancellationToken);
+        await host.RefreshResourceBindingsIfOpenAsync(null, cancellationToken);
+        await host.RefreshPreprocessorExplorerIfOpenAsync(null, cancellationToken);
         await host.RefreshComputeVisualizationIfOpenAsync(null, cancellationToken);
         // The Call Hierarchy window is refreshed independently on the same
         // debounced trigger, matching the same non-file/unrelated-document
@@ -783,6 +801,7 @@ public sealed class HlslLspActivator :
         // re-runs prepareCallHierarchy at the original root position rather
         // than trusting the possibly now-stale current item).
         await host.RefreshCallHierarchyIfOpenAsync(null, cancellationToken);
+        host.ScheduleEffectiveContextIndicatorRefresh();
     }
 
     private void DemoteOpenDocuments()
@@ -889,6 +908,7 @@ public sealed class HlslLspActivator :
         if (elementId == (uint)VSConstants.VSSELELEMID.SEID_DocumentFrame)
         {
             ScheduleNavigationBarAttachment();
+            host.ScheduleEffectiveContextIndicatorRefresh();
         }
         return VSConstants.S_OK;
     }

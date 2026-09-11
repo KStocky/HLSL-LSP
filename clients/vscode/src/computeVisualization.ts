@@ -1,4 +1,8 @@
 import { escapeHtml } from "./compilationInfo";
+import {
+  EffectiveShaderContext,
+  effectiveContextHeaderHtml,
+} from "./effectiveContext";
 import { RefreshOutcome } from "./panelController";
 
 export interface ComputeDimensions {
@@ -91,6 +95,7 @@ export interface ComputeOccupancy {
 }
 
 export interface ComputeVisualization {
+  readonly context?: EffectiveShaderContext;
   readonly applicable: boolean;
   readonly explanation: string;
   readonly entryPoint: string;
@@ -383,7 +388,7 @@ th { color: var(--vscode-descriptionForeground); }
 </head>
 <body>
 <h1>Compute Visualization: ${label}</h1>
-<p class="muted">Entry point: ${escapeHtml(report.entryPoint || "(not resolved)")} | Target: ${escapeHtml(report.targetProfile || "(not configured)")}</p>
+${effectiveContextHeaderHtml(report.context)}
 <p><a href="command:${configureComputeVisualizationCommand}">Configure logical workload and hardware profile</a></p>
 ${body}
 </body>

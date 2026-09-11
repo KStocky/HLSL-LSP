@@ -115,23 +115,15 @@ internal sealed class CompilationInfoControl : UserControl
 
     private void AddHeader(CompilationInfoModel info)
     {
-        var title = string.IsNullOrEmpty(info.EntryPoint)
-            ? info.TargetProfile
-            : $"{info.EntryPoint} ({info.TargetProfile})";
+        EffectiveShaderContextDisplay.AddHeader(
+            content,
+            "Shader Compilation",
+            info.Context);
         content.Children.Add(new TextBlock
         {
-            Text = string.IsNullOrEmpty(title) ? "Shader compilation" : title,
-            FontSize = 18,
-            FontWeight = FontWeights.SemiBold,
-        });
-        var variant = string.IsNullOrEmpty(info.ActiveVariant)
-            ? "(none)"
-            : info.ActiveVariant;
-        content.Children.Add(new TextBlock
-        {
-            Text = $"Stage {info.Stage} · language version {info.LanguageVersion} · " +
-                   $"active variant {variant}",
-            Margin = new Thickness(0, 3, 0, 12),
+            Text = $"Stage: {EffectiveShaderContextDisplay.Value(info.Stage)} · " +
+                   $"Language version: {EffectiveShaderContextDisplay.Value(info.LanguageVersion)}",
+            Margin = new Thickness(0, 0, 0, 12),
             Opacity = 0.75,
         });
     }

@@ -8,6 +8,8 @@ namespace HlslLsp.VisualStudio.Bootstrap;
 
 public sealed class PreprocessorExplorerModel
 {
+    public EffectiveShaderContextModel Context { get; set; }
+
     public string RootUri { get; set; }
 
     public IReadOnlyList<PreprocessorFileModel> Files { get; set; } =

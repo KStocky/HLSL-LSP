@@ -1,4 +1,8 @@
 import { escapeHtml } from "./compilationInfo";
+import {
+  EffectiveShaderContext,
+  effectiveContextHeaderHtml,
+} from "./effectiveContext";
 
 // Renders the `hlsl/entryPointDataFlow` response: the whole-program
 // reachability walk from the document's already-configured entry point,
@@ -41,6 +45,7 @@ export interface CallHierarchyItemData {
   // navigation command or a standard `callHierarchy/outgoingCalls`
   // request).
   readonly generation: number;
+  readonly context: EffectiveShaderContext;
   readonly path: string;
   readonly line: number;
   readonly column: number;
@@ -90,6 +95,7 @@ export interface GlobalAccessEntry extends NavigableSymbol {
 }
 
 export interface EntryPointDataFlow {
+  readonly context?: EffectiveShaderContext;
   // False when no entry point is configured, or a configured entry point
   // name does not resolve to any function definition in the current
   // unsaved snapshot; every other array is then empty and `explanation` is
@@ -450,6 +456,7 @@ function headerSection(flow: EntryPointDataFlow, documentUri: string): string {
   const label = escapeHtml(documentLabel(documentUri));
   if (!flow.found) {
     return `<h1>Entry-Point Data Flow: ${label}</h1>
+${effectiveContextHeaderHtml(flow.context)}
 <p class="not-found">${escapeHtml(flow.explanation || "No entry point is configured for this document.")}</p>`;
   }
   const entryPointLine =
@@ -462,6 +469,7 @@ function headerSection(flow: EntryPointDataFlow, documentUri: string): string {
       ? `<p class="truncated">Analysis was truncated: ${causes.join("; ")}. Functions visited before truncation: ${String(flow.functionsVisited)}.</p>`
       : `<p class="muted">Functions visited: ${String(flow.functionsVisited)}</p>`;
   return `<h1>Entry-Point Data Flow: ${label}</h1>
+${effectiveContextHeaderHtml(flow.context)}
 ${entryPointLine}
 ${truncatedBanner}`;
 }
