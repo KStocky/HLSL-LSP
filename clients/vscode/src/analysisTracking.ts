@@ -2,10 +2,7 @@ import { AnalysisTrackingMode } from "./analysisFreshness";
 
 export const defaultAnalysisTrackingMode: AnalysisTrackingMode = "pinned";
 
-export type AnalysisTargetTransition =
-  | "unchanged"
-  | "retarget"
-  | "unavailable";
+export type AnalysisTargetTransition = "unchanged" | "retarget" | "unavailable";
 
 export function analysisTargetTransition(
   mode: AnalysisTrackingMode,

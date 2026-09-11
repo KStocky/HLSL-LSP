@@ -55,12 +55,7 @@ void test("follow mode retargets only for a different or newly available shader"
 
 void test("follow mode reports an unavailable active target", () => {
   assert.equal(
-    analysisTargetTransition(
-      "follow",
-      "file:///old.hlsl",
-      undefined,
-      true,
-    ),
+    analysisTargetTransition("follow", "file:///old.hlsl", undefined, true),
     "unavailable",
   );
 });

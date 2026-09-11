@@ -385,8 +385,7 @@ function persistedAnalysisPanel(
   return {
     mode: candidate.mode,
     uri: candidate.uri,
-    ...(Number.isSafeInteger(candidate.line) &&
-    (candidate.line as number) >= 0
+    ...(Number.isSafeInteger(candidate.line) && (candidate.line as number) >= 0
       ? { line: candidate.line as number }
       : {}),
     ...(Number.isSafeInteger(candidate.character) &&
@@ -1062,20 +1061,12 @@ async function restoreOpenedAnalysisTargets(
       }
       case "compilationInfo":
         tasks.push(
-          refreshCompilationInfo(
-            lifecycle,
-            state.uri,
-            "Active shader change",
-          ),
+          refreshCompilationInfo(lifecycle, state.uri, "Active shader change"),
         );
         break;
       case "resourceBindings":
         tasks.push(
-          refreshResourceBindings(
-            lifecycle,
-            state.uri,
-            "Active shader change",
-          ),
+          refreshResourceBindings(lifecycle, state.uri, "Active shader change"),
         );
         break;
       case "preprocessorExplorer":
@@ -1218,11 +1209,7 @@ async function retargetFollowingPanel(
       state.uri = uri;
       state.targetAvailable = true;
       persistAnalysisPanel(context, state);
-      await refreshPreprocessorExplorer(
-        lifecycle,
-        uri,
-        "Active shader change",
-      );
+      await refreshPreprocessorExplorer(lifecycle, uri, "Active shader change");
       return;
     }
     case "entryPointDataFlow": {
@@ -2268,8 +2255,7 @@ export async function activate(
   for (const [viewType, kind] of serializerKinds) {
     context.subscriptions.push(
       vscode.window.registerWebviewPanelSerializer(viewType, {
-        deserializeWebviewPanel: (panel) =>
-          restoreAnalysisPanel(kind, panel),
+        deserializeWebviewPanel: (panel) => restoreAnalysisPanel(kind, panel),
       }),
     );
   }
@@ -2349,10 +2335,7 @@ export async function activate(
       setAnalysisTrackingModeCommand,
       async (rawArgument: unknown) => {
         const command = parseAnalysisTrackingCommand(rawArgument);
-        if (
-          command === undefined ||
-          !isAnalysisPanelKind(command.panel)
-        ) {
+        if (command === undefined || !isAnalysisPanelKind(command.panel)) {
           return;
         }
         const state = analysisPanelState(command.panel);
@@ -2699,8 +2682,9 @@ export async function activate(
               // URIs, and this allowlists only navigation and this panel's
               // Refresh -- never `true` (which would let static HTML trigger
               // arbitrary commands).
-              enableCommandUris:
-                analysisPanelCommandUris("preprocessorExplorer"),
+              enableCommandUris: analysisPanelCommandUris(
+                "preprocessorExplorer",
+              ),
             },
           );
           panel.onDidDispose(() => {
