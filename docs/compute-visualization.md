@@ -1,5 +1,11 @@
 # Compute visualization protocol
 
+The editor views retain the last good result across refreshes and expose the
+shared tracked-document freshness/Refresh behavior described in
+[analysis result freshness](analysis-freshness.md). Manual Refresh reuses the
+last submitted workload and hardware-profile options rather than live,
+unapplied input text.
+
 `hlsl/computeVisualization` reports compiler-authoritative compute geometry
 for an open HLSL document's effective configured entry point and active
 variant. The client cannot select a different entry point, target, variant, or

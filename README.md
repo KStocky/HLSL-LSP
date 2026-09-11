@@ -71,6 +71,14 @@ status text.
 Every HLSL tool window follows Visual Studio's active foreground, background,
 hyperlink, control, scrollbar, and environment-font theme resources.
 
+Every reusable custom analysis view also shows the same unobtrusive
+**Current**, **Refreshing**, **Stale**, or **Refresh failed** indicator, with
+the invalidation cause when known and a **Refresh** action that reuses the
+view's tracked target rather than the active editor. Last good content remains
+visible while refreshing or after a failed refresh. See
+[analysis result freshness](docs/analysis-freshness.md) for the exact shared
+semantics and race-handling guarantees.
+
 ![Context-sensitive HLSL commands in the Visual Studio editor](art/contextual-commands.png)
 
 ### Shader variants

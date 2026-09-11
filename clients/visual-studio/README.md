@@ -86,6 +86,14 @@ custom HLSL tool window uses the same
 **Configuration origins** header (`Default` and `Not configured` are used
 consistently).
 
+Memory Layout, Shader Compilation, Resource Bindings, Preprocessor Explorer,
+Entry-Point Data Flow, Compute Visualization, and the custom Call Hierarchy
+window also share a compact **Current**, **Refreshing**, **Stale**, or
+**Refresh failed** header with a tracked-target **Refresh** button. Last good
+content stays visible during refresh/failure, and known causes are reported
+consistently. See
+[analysis result freshness](../../docs/analysis-freshness.md).
+
 Choose **HLSL > Shader Compilation** from the editor context menu to open a tool window with the active
 HLSL document's effective compiler configuration, compiler success/failure and
 diagnostics, output type and size, DXC reflection (signatures, resource

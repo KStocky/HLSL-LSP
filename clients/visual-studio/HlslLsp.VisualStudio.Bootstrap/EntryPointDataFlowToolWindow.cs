@@ -21,15 +21,18 @@ namespace HlslLsp.VisualStudio.Bootstrap;
 // PreprocessorExplorerToolWindow's/CompilationInfoToolWindow's structure
 // against a distinct protocol request. See docs/call-hierarchy.md.
 [Guid("4f5bd608-c0c5-4fe7-9a1e-b1946e2fc279")]
-public sealed class EntryPointDataFlowToolWindow : ToolWindowPane
+public sealed class EntryPointDataFlowToolWindow : ToolWindowPane, IAnalysisFreshnessView
 {
     private readonly EntryPointDataFlowControl control = new();
+    private readonly AnalysisFreshnessTracker freshness = new();
+    private readonly AnalysisFreshnessHeader freshnessHeader =
+        new(AnalysisViewKind.EntryPointDataFlow);
 
     public EntryPointDataFlowToolWindow()
         : base(null)
     {
         Caption = "HLSL Entry-Point Data Flow";
-        Content = control;
+        Content = AnalysisFreshnessHeader.Wrap(freshnessHeader, control);
     }
 
     // Tracks the document the window currently shows so external refresh
@@ -41,6 +44,8 @@ public sealed class EntryPointDataFlowToolWindow : ToolWindowPane
     {
         ThreadHelper.ThrowIfNotOnUIThread();
         DocumentUri = uri;
+        freshness.Succeed();
+        freshnessHeader.Update(freshness.State);
         control.SetReport(report);
     }
 
@@ -51,12 +56,22 @@ public sealed class EntryPointDataFlowToolWindow : ToolWindowPane
     // placeholder with an explicit error when there is no content yet.
     internal void SetError(Uri uri, string message, bool preserveSameDocumentContent)
     {
-        var preserveContent =
-            preserveSameDocumentContent &&
-            DocumentUri != null &&
-            DocumentUri.Equals(uri);
         DocumentUri = uri;
-        control.SetError(message, preserveContent);
+        freshness.Fail();
+        freshnessHeader.Update(freshness.State);
+        control.SetError(message, true);
+    }
+
+    public void BeginRefresh(AnalysisFreshnessCause cause)
+    {
+        freshness.Begin(cause);
+        freshnessHeader.Update(freshness.State);
+    }
+
+    public void MarkStale(AnalysisFreshnessCause cause, bool refreshPending = false)
+    {
+        freshness.Invalidate(cause, refreshPending);
+        freshnessHeader.Update(freshness.State);
     }
 }
 

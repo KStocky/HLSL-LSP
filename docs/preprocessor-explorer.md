@@ -1,5 +1,9 @@
 # HLSL preprocessor explorer
 
+The editor views retain the last good result across refreshes and expose the
+shared tracked-document freshness/Refresh behavior described in
+[analysis result freshness](analysis-freshness.md).
+
 HLSL-LSP exposes the active shader's include graph, skipped conditional
 regions, macro definitions, and effective compiler settings through the
 `hlsl/preprocessorExplorer` request. The report uses the current unsaved

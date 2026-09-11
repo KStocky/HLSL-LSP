@@ -9,9 +9,16 @@
 // payload, out-of-order suppression, document switching, debounce timing,
 // disposal) without an extension host.
 
+import {
+  AnalysisFreshness,
+  AnalysisFreshnessCause,
+  AnalysisFreshnessState,
+} from "./analysisFreshness";
+
 export interface PanelHost {
   setHtml(html: string): void;
   setTitle(title: string): void;
+  setFreshness(state: AnalysisFreshnessState): void;
 }
 
 export interface RefreshOutcome {
@@ -53,9 +60,7 @@ export interface PanelOpenResult {
 export class PanelController<TResult> {
   private uri: string | undefined;
   private hasContent = false;
-  private generation = 0;
   private debounceHandle: number | undefined;
-
   public constructor(
     private readonly host: PanelHost,
     private readonly request: (
@@ -64,6 +69,7 @@ export class PanelController<TResult> {
     private readonly resolve: ResolveRefresh<TResult>,
     private readonly scheduler: Scheduler = nodeScheduler,
     private readonly debounceMs = 500,
+    private readonly freshness: AnalysisFreshness = new AnalysisFreshness(),
   ) {}
 
   public get trackedUri(): string | undefined {
@@ -76,17 +82,12 @@ export class PanelController<TResult> {
 
   // Tracks `uri` as this panel's document. Returns whether this is a
   // switch to a different document than previously tracked: the caller
-  // should then replace on-screen content with its own loading
-  // placeholder, mirroring the "only a different document replaces
-  // on-screen content" contract (a same-document re-invocation keeps
-  // showing the last successful render until refresh() produces a new one
-  // or an explicit error).
+  // The caller may use switchingDocument for target-specific bookkeeping,
+  // but content is deliberately retained until an accepted replacement
+  // arrives.
   public open(uri: string): PanelOpenResult {
     const switchingDocument = this.uri !== uri;
     this.uri = uri;
-    if (switchingDocument) {
-      this.hasContent = false;
-    }
     return { switchingDocument };
   }
 
@@ -96,8 +97,12 @@ export class PanelController<TResult> {
   // tracked uri so a request for a document the panel has since switched
   // away from (or been disposed while in flight) is discarded rather than
   // misapplied.
-  public async refresh(uri: string): Promise<void> {
-    const generation = ++this.generation;
+  public async refresh(
+    uri: string,
+    cause: AnalysisFreshnessCause = "Manual refresh",
+  ): Promise<void> {
+    const generation = this.freshness.beginRefresh(cause);
+    this.host.setFreshness(this.freshness.state);
     let result: TResult | null | undefined;
     let failureMessage: string | undefined;
     try {
@@ -106,7 +111,14 @@ export class PanelController<TResult> {
       failureMessage =
         error instanceof Error ? error.message : "The request failed.";
     }
-    if (generation !== this.generation || this.uri !== uri) {
+    if (this.uri !== uri) {
+      return;
+    }
+    const accepted =
+      result !== null && result !== undefined
+        ? this.freshness.succeed(generation)
+        : this.freshness.fail(generation);
+    if (!accepted) {
       return;
     }
     const outcome = this.resolve(this.hasContent, uri, result, failureMessage);
@@ -117,6 +129,7 @@ export class PanelController<TResult> {
     if (outcome.html !== undefined) {
       this.host.setHtml(outcome.html);
     }
+    this.host.setFreshness(this.freshness.state);
   }
 
   // Refreshes the panel's own currently tracked document, if any. Used by
@@ -124,26 +137,44 @@ export class PanelController<TResult> {
   // enough to need debouncing. Returns undefined (rather than a
   // pre-resolved promise) when no document is tracked, so callers can tell
   // "nothing to do" apart from "refreshed".
-  public refreshTracked(): Promise<void> | undefined {
-    return this.uri === undefined ? undefined : this.refresh(this.uri);
+  public refreshTracked(
+    cause: AnalysisFreshnessCause = "Manual refresh",
+  ): Promise<void> | undefined {
+    return this.uri === undefined ? undefined : this.refresh(this.uri, cause);
   }
 
   // Schedules a debounced refresh of the panel's own tracked document,
   // canceling any previously pending one -- a burst of keystrokes triggers
   // one request, not a storm of them.
-  public scheduleDebouncedRefresh(): void {
+  public scheduleDebouncedRefresh(
+    cause: AnalysisFreshnessCause = "Source edit",
+  ): void {
     if (this.uri === undefined) {
       return;
     }
+    this.freshness.invalidate(cause, true);
+    this.host.setFreshness(this.freshness.state);
     if (this.debounceHandle !== undefined) {
       this.scheduler.clearTimeout(this.debounceHandle);
     }
     this.debounceHandle = this.scheduler.setTimeout(() => {
       this.debounceHandle = undefined;
       if (this.uri !== undefined) {
-        void this.refresh(this.uri);
+        void this.refresh(this.uri, cause);
       }
     }, this.debounceMs);
+  }
+
+  public markStale(cause: AnalysisFreshnessCause): void {
+    this.freshness.invalidate(cause);
+    this.host.setFreshness(this.freshness.state);
+  }
+
+  public cancelScheduledRefresh(): void {
+    if (this.debounceHandle !== undefined) {
+      this.scheduler.clearTimeout(this.debounceHandle);
+      this.debounceHandle = undefined;
+    }
   }
 
   // Cancels any pending debounce timer and clears tracked state so a
@@ -152,10 +183,7 @@ export class PanelController<TResult> {
   // never be resurrected by a stale debounce firing. Called when the
   // underlying webview panel itself is disposed (closed).
   public dispose(): void {
-    if (this.debounceHandle !== undefined) {
-      this.scheduler.clearTimeout(this.debounceHandle);
-      this.debounceHandle = undefined;
-    }
+    this.cancelScheduledRefresh();
     this.uri = undefined;
     this.hasContent = false;
   }

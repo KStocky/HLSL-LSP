@@ -14,10 +14,13 @@ using Microsoft.VisualStudio.TextManager.Interop;
 namespace HlslLsp.VisualStudio.Bootstrap;
 
 [Guid("495a0395-bc57-4591-a201-b278475d516e")]
-public sealed class ComputeVisualizationToolWindow : ToolWindowPane
+public sealed class ComputeVisualizationToolWindow : ToolWindowPane, IAnalysisFreshnessView
 {
     private readonly ComputeVisualizationControl control = new();
     private readonly ComputeVisualizationInteractionState interactionState = new();
+    private readonly AnalysisFreshnessTracker freshness = new();
+    private readonly AnalysisFreshnessHeader freshnessHeader =
+        new(AnalysisViewKind.ComputeVisualization);
 
     public ComputeVisualizationToolWindow()
         : base(null)
@@ -38,7 +41,7 @@ public sealed class ComputeVisualizationToolWindow : ToolWindowPane
                     "Open an HLSL document, then choose HLSL > Compute Visualization.");
             }
         };
-        Content = control;
+        Content = AnalysisFreshnessHeader.Wrap(freshnessHeader, control);
     }
 
     internal Uri DocumentUri => interactionState.RequestedDocumentUri;
@@ -61,6 +64,8 @@ public sealed class ComputeVisualizationToolWindow : ToolWindowPane
     {
         ThreadHelper.ThrowIfNotOnUIThread();
         interactionState.MarkDisplayed(uri);
+        freshness.Succeed();
+        freshnessHeader.Update(freshness.State);
         control.SetOptionsIfDocumentChanged(options);
         control.SetReport(report, options?.HardwareProfile);
     }
@@ -72,18 +77,29 @@ public sealed class ComputeVisualizationToolWindow : ToolWindowPane
         bool preserveSameDocumentContent)
     {
         ThreadHelper.ThrowIfNotOnUIThread();
-        var preserve =
-            preserveSameDocumentContent &&
-            interactionState.ShouldPreserveDisplayedContentOnFailure(uri);
         interactionState.TrackRequest(uri);
+        freshness.Fail();
+        freshnessHeader.Update(freshness.State);
         control.SetOptionsIfDocumentChanged(options);
-        control.SetError(message, preserve);
+        control.SetError(message, true);
     }
 
     internal void SetRequestError(string message)
     {
         ThreadHelper.ThrowIfNotOnUIThread();
         control.SetInputError(message);
+    }
+
+    public void BeginRefresh(AnalysisFreshnessCause cause)
+    {
+        freshness.Begin(cause);
+        freshnessHeader.Update(freshness.State);
+    }
+
+    public void MarkStale(AnalysisFreshnessCause cause, bool refreshPending = false)
+    {
+        freshness.Invalidate(cause, refreshPending);
+        freshnessHeader.Update(freshness.State);
     }
 }
 

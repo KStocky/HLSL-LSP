@@ -111,6 +111,7 @@ internal sealed class MemoryLayoutRefreshGate
     private readonly object gate = new();
     private int explicitRequestsInFlight;
     private bool refreshPending;
+    private AnalysisFreshnessCause pendingCause = AnalysisFreshnessCause.Unknown;
     private long requestGeneration;
 
     internal long EnterExplicitRequest()
@@ -122,7 +123,7 @@ internal sealed class MemoryLayoutRefreshGate
         }
     }
 
-    internal bool ExitExplicitRequest()
+    internal bool ExitExplicitRequest(out AnalysisFreshnessCause cause)
     {
         lock (gate)
         {
@@ -132,27 +133,43 @@ internal sealed class MemoryLayoutRefreshGate
             }
             if (explicitRequestsInFlight != 0 || !refreshPending)
             {
+                cause = AnalysisFreshnessCause.Unknown;
                 return false;
             }
             refreshPending = false;
+            cause = pendingCause;
+            pendingCause = AnalysisFreshnessCause.Unknown;
             return true;
         }
     }
 
-    internal bool TryBeginBackgroundRefresh(out long generation)
+    internal bool ExitExplicitRequest()
+        => ExitExplicitRequest(out _);
+
+    internal bool TryBeginBackgroundRefresh(
+        AnalysisFreshnessCause cause,
+        out long generation)
     {
         lock (gate)
         {
             if (explicitRequestsInFlight != 0)
             {
                 refreshPending = true;
+                pendingCause =
+                    AnalysisFreshnessCausePolicy.Coalesce(pendingCause, cause);
                 generation = 0;
                 return false;
             }
+
             generation = ++requestGeneration;
             return true;
         }
     }
+
+    internal bool TryBeginBackgroundRefresh(out long generation)
+        => TryBeginBackgroundRefresh(
+            AnalysisFreshnessCause.Unknown,
+            out generation);
 
     internal bool IsCurrent(long generation)
     {
@@ -161,6 +178,30 @@ internal sealed class MemoryLayoutRefreshGate
             return requestGeneration == generation;
         }
     }
+
+    internal void InvalidateForRefresh(
+        AnalysisFreshnessCause cause,
+        bool replacementPending)
+    {
+        lock (gate)
+        {
+            ++requestGeneration;
+            if (replacementPending && explicitRequestsInFlight != 0)
+            {
+                refreshPending = true;
+                pendingCause =
+                    AnalysisFreshnessCausePolicy.Coalesce(pendingCause, cause);
+            }
+        }
+    }
+
+    internal void InvalidateForRefresh()
+        => InvalidateForRefresh(
+            AnalysisFreshnessCause.Unknown,
+            true);
+
+    internal void InvalidateForRefresh(AnalysisFreshnessCause cause)
+        => InvalidateForRefresh(cause, true);
 }
 
 public static class MemoryLayoutBridge

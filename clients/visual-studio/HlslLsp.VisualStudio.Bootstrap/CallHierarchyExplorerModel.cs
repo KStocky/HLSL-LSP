@@ -6,6 +6,30 @@ using Newtonsoft.Json.Linq;
 
 namespace HlslLsp.VisualStudio.Bootstrap;
 
+internal static class CallHierarchyRefreshFreshness
+{
+    internal static AnalysisFreshnessState AfterNavigationMismatch(
+        AnalysisFreshnessState current,
+        AnalysisFreshnessCause cause)
+        => AnalysisFreshnessReducer.Reduce(
+            current,
+            new AnalysisFreshnessEvent(
+                AnalysisFreshnessEventKind.Invalidated,
+                cause));
+}
+
+internal static class CallHierarchyRootRefreshPolicy
+{
+    internal static (Uri DocumentUri, int Line, int Character)
+        TrackedTargetAfterFailedReplacement(
+            (Uri DocumentUri, int Line, int Character) displayedTarget,
+            (Uri DocumentUri, int Line, int Character) requestedTarget)
+    {
+        _ = requestedTarget;
+        return displayedTarget;
+    }
+}
+
 // A standard LSP CallHierarchyIncomingCall (see docs/call-hierarchy.md,
 // "callHierarchy/incomingCalls / callHierarchy/outgoingCalls"): the caller
 // item plus every call-site range within its own body, in source order.

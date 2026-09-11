@@ -24,15 +24,18 @@ namespace HlslLsp.VisualStudio.Bootstrap;
 // document via the existing CompilationInfoBridge; no new bridge/RPC is
 // introduced.
 [Guid("73727df0-3059-4eca-b7e8-23b64d3586f2")]
-public sealed class ResourceBindingsToolWindow : ToolWindowPane
+public sealed class ResourceBindingsToolWindow : ToolWindowPane, IAnalysisFreshnessView
 {
     private readonly ResourceBindingsControl control = new();
+    private readonly AnalysisFreshnessTracker freshness = new();
+    private readonly AnalysisFreshnessHeader freshnessHeader =
+        new(AnalysisViewKind.ResourceBindings);
 
     public ResourceBindingsToolWindow()
         : base(null)
     {
         Caption = "HLSL Resource Bindings";
-        Content = control;
+        Content = AnalysisFreshnessHeader.Wrap(freshnessHeader, control);
     }
 
     // Tracks the document the window currently shows so external refresh
@@ -44,6 +47,8 @@ public sealed class ResourceBindingsToolWindow : ToolWindowPane
     {
         ThreadHelper.ThrowIfNotOnUIThread();
         DocumentUri = uri;
+        freshness.Succeed();
+        freshnessHeader.Update(freshness.State);
         control.SetInfo(info);
     }
 
@@ -54,12 +59,22 @@ public sealed class ResourceBindingsToolWindow : ToolWindowPane
     // placeholder with an explicit error when there is no content yet.
     internal void SetError(Uri uri, string message, bool preserveSameDocumentContent)
     {
-        var preserveContent =
-            preserveSameDocumentContent &&
-            DocumentUri != null &&
-            DocumentUri.Equals(uri);
         DocumentUri = uri;
-        control.SetError(message, preserveContent);
+        freshness.Fail();
+        freshnessHeader.Update(freshness.State);
+        control.SetError(message, true);
+    }
+
+    public void BeginRefresh(AnalysisFreshnessCause cause)
+    {
+        freshness.Begin(cause);
+        freshnessHeader.Update(freshness.State);
+    }
+
+    public void MarkStale(AnalysisFreshnessCause cause, bool refreshPending = false)
+    {
+        freshness.Invalidate(cause, refreshPending);
+        freshnessHeader.Update(freshness.State);
     }
 }
 

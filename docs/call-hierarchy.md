@@ -1,5 +1,10 @@
 # Call hierarchy and entry-point data flow
 
+The custom editor views retain the last good result across refreshes and expose
+the shared tracked-root/document freshness/Refresh behavior described in
+[analysis result freshness](analysis-freshness.md). A not-callable or
+not-found response is still **Current**.
+
 HLSL-LSP implements the standard LSP call hierarchy (`textDocument/
 prepareCallHierarchy`, `callHierarchy/incomingCalls`,
 `callHierarchy/outgoingCalls`) plus one custom request,
