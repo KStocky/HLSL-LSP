@@ -1,7 +1,6 @@
 include_guard(GLOBAL)
 
-set(HLSL_DXC_WINDOWS_RELEASE "2609-kstocky.1")
-set(HLSL_DXC_LINUX_RELEASE "v1.9.2607")
+set(HLSL_DXC_RELEASE "2609-kstocky.2")
 set(DXC_INCLUDE_DIR "" CACHE PATH
     "Optional directory containing dxcisense.h; requires DXC_RUNTIME_DIR")
 set(DXC_RUNTIME_DIR "" CACHE PATH
@@ -16,48 +15,43 @@ endif()
 if(NOT DXC_INCLUDE_DIR)
     if(WIN32)
         set(HLSL_DXC_DESCRIPTION
-            "KStocky DXC release ${HLSL_DXC_WINDOWS_RELEASE}")
+            "KStocky DXC release ${HLSL_DXC_RELEASE}")
         FetchContent_Declare(
             hlsl_dxc_package
             URL
-                "https://github.com/KStocky/DirectXShaderCompiler/releases/download/${HLSL_DXC_WINDOWS_RELEASE}/Microsoft.Direct3D.DXC-x64.zip"
+                "https://github.com/KStocky/DirectXShaderCompiler/releases/download/${HLSL_DXC_RELEASE}/dxc_${HLSL_DXC_RELEASE}.x64.zip"
             URL_HASH
-                SHA256=217d6474cd381810a5dd92723a0c16b04740e72394806cb3acd0112d94129751
+                SHA256=6d7bee59f6a5df64ac28badc231298a5b0c0e2ab335183a0f091685514c208ea
             DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
         FetchContent_MakeAvailable(hlsl_dxc_package)
         set(DXC_INCLUDE_DIR
-            "${hlsl_dxc_package_SOURCE_DIR}/build/native/include")
+            "${hlsl_dxc_package_SOURCE_DIR}/inc")
         set(DXC_RUNTIME_DIR
-            "${hlsl_dxc_package_SOURCE_DIR}/build/native/bin/x64")
+            "${hlsl_dxc_package_SOURCE_DIR}/bin/x64")
         set(DXC_LICENSE_FILE
             "${hlsl_dxc_package_SOURCE_DIR}/LICENSE-LLVM.txt")
     elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND
            CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
         set(HLSL_DXC_DESCRIPTION
-            "official DXC Linux release ${HLSL_DXC_LINUX_RELEASE}")
+            "KStocky DXC release ${HLSL_DXC_RELEASE}")
         FetchContent_Declare(
             hlsl_dxc_package
             URL
-                "https://github.com/microsoft/DirectXShaderCompiler/releases/download/${HLSL_DXC_LINUX_RELEASE}/linux_dxc_2026_07_29.x86_x64.tar.gz"
+                "https://github.com/KStocky/DirectXShaderCompiler/releases/download/${HLSL_DXC_RELEASE}/linux_dxc_${HLSL_DXC_RELEASE}.x86_x64.tar.gz"
             URL_HASH
-                SHA256=55665c87824051ed4774ff3280a79ccbbb7d39243b9736ca5e98222134112d54
+                SHA256=1a1417fd24dced6ae7fb32097f029546b139167149f1c1ce22aaf5d6f9cfd93b
             DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
         FetchContent_MakeAvailable(hlsl_dxc_package)
-        set(DXC_INCLUDE_DIR "${hlsl_dxc_package_SOURCE_DIR}/include")
-        set(DXC_RUNTIME_DIR "${hlsl_dxc_package_SOURCE_DIR}/lib")
-        set(DXC_LICENSE_FILE
-            "${hlsl_dxc_package_SOURCE_DIR}/LICENSE-LLVM.txt")
-
-        # Microsoft's Linux release archive omits this non-Windows compatibility
-        # header even though dxcapi.h includes it.
-        if(NOT EXISTS "${DXC_INCLUDE_DIR}/WinAdapter.h")
-            file(DOWNLOAD
-                "https://raw.githubusercontent.com/microsoft/DirectXShaderCompiler/${HLSL_DXC_LINUX_RELEASE}/include/dxc/WinAdapter.h"
-                "${DXC_INCLUDE_DIR}/WinAdapter.h"
-                EXPECTED_HASH
-                    SHA256=f5688a1408a8de8c0c35176bc900f21d7679d492215da94da4ab643cb66867f4
-                TLS_VERIFY ON)
+        set(HLSL_DXC_LINUX_ROOT "${hlsl_dxc_package_SOURCE_DIR}")
+        set(HLSL_DXC_LINUX_ARCHIVE_ROOT
+            "${hlsl_dxc_package_SOURCE_DIR}/linux_dxc_${HLSL_DXC_RELEASE}.x86_x64")
+        if(EXISTS "${HLSL_DXC_LINUX_ARCHIVE_ROOT}/include")
+            set(HLSL_DXC_LINUX_ROOT "${HLSL_DXC_LINUX_ARCHIVE_ROOT}")
         endif()
+        set(DXC_INCLUDE_DIR "${HLSL_DXC_LINUX_ROOT}/include")
+        set(DXC_RUNTIME_DIR "${HLSL_DXC_LINUX_ROOT}/lib")
+        set(DXC_LICENSE_FILE
+            "${HLSL_DXC_LINUX_ROOT}/LICENSE-LLVM.txt")
     else()
         message(FATAL_ERROR
             "Automatic DXC acquisition supports Windows x64 and Linux x64. "

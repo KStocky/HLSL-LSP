@@ -1,20 +1,16 @@
 # Linux x64 runtime
 
-Linux support uses Microsoft's official
-[DXC v1.9.2607 release](https://github.com/microsoft/DirectXShaderCompiler/releases/tag/v1.9.2607),
-the July 2026 release. Windows instead uses KStocky's `2609-kstocky.1` fork
-release, which fixes the uninitialized `ExpandTokPastingArg` option in
-`IDxcIntelliSense`. That Windows-only distribution has no corresponding Linux
-asset, so the Linux runtime remains on Microsoft's checksum-pinned release.
+Linux and Windows use KStocky's
+[DXC `2609-kstocky.2` release](https://github.com/KStocky/DirectXShaderCompiler/releases/tag/2609-kstocky.2),
+which fixes the uninitialized `ExpandTokPastingArg` option in
+`IDxcIntelliSense`.
 
 CMake downloads
-`linux_dxc_2026_07_29.x86_x64.tar.gz` and requires SHA-256
-`55665c87824051ed4774ff3280a79ccbbb7d39243b9736ca5e98222134112d54`.
-The archive contains `dxcisense.h`, `libdxcompiler.so`, and the LLVM license,
-but omits `WinAdapter.h`. CMake obtains that header from the same pinned
-official tag and requires SHA-256
-`f5688a1408a8de8c0c35176bc900f21d7679d492215da94da4ab643cb66867f4`.
-No third-party DXC binaries are used.
+`linux_dxc_2609-kstocky.2.x86_x64.tar.gz` and requires SHA-256
+`1a1417fd24dced6ae7fb32097f029546b139167149f1c1ce22aaf5d6f9cfd93b`.
+The archive contains `dxcisense.h`, `WinAdapter.h`, `libdxcompiler.so`, and the
+LLVM license. The matching Windows archive is pinned independently by
+`cmake/Dxc.cmake`.
 
 The release's `libdxcompiler.so` exports `DxcCreateInstance`; the pinned DXC
 source registers `CLSID_DxcIntelliSense` on non-Windows platforms. The
@@ -76,10 +72,10 @@ server restarts, and an incompatible selection is reported without looping.
 
 ## Reparse limitation
 
-DXC `1.9.2607` native `IDxcTranslationUnit::Reparse` has been observed to crash
-on Linux. HLSL-LSP retains native `Reparse` on Windows but avoids that known
-failure by rebuilding the Linux translation unit through the same `IDxcIndex`,
-compiler arguments, and unsaved buffers inside the isolated worker.
+Native `IDxcTranslationUnit::Reparse` has been observed to crash on Linux in
+this DXC family. HLSL-LSP retains native `Reparse` on Windows but avoids that
+known failure by rebuilding the Linux translation unit through the same
+`IDxcIndex`, compiler arguments, and unsaved buffers inside the isolated worker.
 The Linux runtime integration test verifies edits to both a root shader and an
 unsaved include, including updated navigation, hover, signatures, and
 diagnostics. No signal handler or other unsafe crash workaround is used.

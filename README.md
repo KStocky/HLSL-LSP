@@ -198,7 +198,7 @@ array strides; a selected compilation variant can also be shown. Each category
 is independently configurable. See
 [`docs/inlay-hints.md`](docs/inlay-hints.md) for settings and guarantees.
 
-The bundled Windows DXC `2609-kstocky.1` API exposes no callable constructor
+The bundled DXC `2609-kstocky.2` API exposes no callable constructor
 overloads or parameter cursors. Scalar casts resolve to an unnamed initializer
 expression;
 `float4` and `float2x2` resolve to typedefs; and generic `vector` and `matrix`
@@ -457,10 +457,9 @@ testing, path behavior, and current platform limitations.
 - CMake 3.28 or newer
 - Internet access for CMake's first configuration
 
-CMake downloads checksum-verified DXC packages. Windows uses KStocky's
-`2609-kstocky.1` DXC fork release, which fixes the uninitialized
-`ExpandTokPastingArg` option in `IDxcIntelliSense`; Linux x64 uses Microsoft's
-official DXC `v1.9.2607` release and pinned compatibility header. See
+CMake downloads checksum-verified Windows x64 and Linux x86-64 packages from
+KStocky's `2609-kstocky.2` DXC fork release. Both packages fix the uninitialized
+`ExpandTokPastingArg` option in `IDxcIntelliSense`. See
 [`docs/linux.md`](docs/linux.md) for artifact hashes, ABI requirements,
 licensing, installation, runtime loading, and the safe reparse limitation.
 Production tracing, crash diagnostics, resource limits, fuzzing, compatibility,
