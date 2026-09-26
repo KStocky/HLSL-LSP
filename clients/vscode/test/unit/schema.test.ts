@@ -19,7 +19,7 @@ const schema = JSON.parse(packagedSchemaText) as {
 };
 const validate = new Ajv2020({ allErrors: true }).compile(schema);
 
-void test("shadertoolsconfig schema exposes root, fileGroups, and variants", () => {
+void test("shadertoolsconfig schema exposes root, fileGroups, variants, and pipelines", () => {
   assert.equal(
     schema.$id,
     "https://raw.githubusercontent.com/KStocky/HLSL-LSP/main/schemas/v1/shadertoolsconfig.schema.json",
@@ -27,8 +27,11 @@ void test("shadertoolsconfig schema exposes root, fileGroups, and variants", () 
   assert(schema.properties["hlsl.fileGroups"]);
   assert(schema.properties["hlsl.variantsVersion"]);
   assert(schema.properties["hlsl.variants"]);
+  assert(schema.properties["hlsl.pipelinesVersion"]);
+  assert(schema.properties["hlsl.pipelines"]);
   assert(schema.$defs.fileGroup);
   assert(schema.$defs.variant);
+  assert(schema.$defs.pipeline);
 });
 
 void test("packaged schema matches the authoritative repository schema", () => {
@@ -75,6 +78,25 @@ void test("shadertoolsconfig schema accepts representative supported settings", 
           "hlsl.dxcRuntimeDirectory": "tools/dxc",
         },
       ],
+      "hlsl.pipelinesVersion": 1,
+      "hlsl.pipelines": [
+        {
+          name: "Forward",
+          stages: {
+            vertex: {
+              file: "Shaders/Forward.hlsl",
+              variant: "Debug",
+              entryPoint: "VSMain",
+              targetProfile: "vs_6_7",
+            },
+            pixel: {
+              file: "Shaders/Forward.hlsl",
+              entryPoint: "PSMain",
+              targetProfile: "ps_6_7",
+            },
+          },
+        },
+      ],
     }),
     true,
     JSON.stringify(validate.errors),
@@ -107,6 +129,35 @@ void test("shadertoolsconfig schema rejects common structural mistakes", () => {
   assert.equal(
     validate({
       "hlsl.variants": [{ name: "Debug" }],
+    }),
+    false,
+  );
+  assert.equal(
+    validate({
+      "hlsl.pipelines": [
+        {
+          name: "Forward",
+          stages: {
+            vertex: { file: "shader.hlsl" },
+            pixel: { file: "shader.hlsl" },
+          },
+        },
+      ],
+    }),
+    false,
+  );
+  assert.equal(
+    validate({
+      "hlsl.pipelinesVersion": 1,
+      "hlsl.pipelines": [
+        {
+          name: "Forward",
+          stages: {
+            vertex: { file: "shader.hlsl", targetProfile: "ps_6_7" },
+            pixel: { file: "shader.hlsl" },
+          },
+        },
+      ],
     }),
     false,
   );

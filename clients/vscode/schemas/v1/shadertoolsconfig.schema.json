@@ -66,12 +66,24 @@
     },
     "hlsl.variants": {
       "$ref": "#/$defs/variants"
+    },
+    "hlsl.pipelinesVersion": {
+      "type": "integer",
+      "const": 1,
+      "description": "Declares the named-pipelines schema version."
+    },
+    "hlsl.pipelines": {
+      "$ref": "#/$defs/pipelines"
     }
   },
   "allOf": [
     {
       "if": { "required": ["hlsl.variants"] },
       "then": { "required": ["hlsl.variantsVersion"] }
+    },
+    {
+      "if": { "required": ["hlsl.pipelines"] },
+      "then": { "required": ["hlsl.pipelinesVersion"] }
     }
   ],
   "additionalProperties": false,
@@ -180,6 +192,101 @@
       },
       "required": ["name"],
       "additionalProperties": false
+    },
+    "pipelines": {
+      "type": "array",
+      "description": "Named classic graphics pipelines used for cross-stage validation.",
+      "items": { "$ref": "#/$defs/pipeline" }
+    },
+    "pipeline": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "stages": {
+          "type": "object",
+          "properties": {
+            "vertex": { "$ref": "#/$defs/pipelineVertexStage" },
+            "hull": { "$ref": "#/$defs/pipelineHullStage" },
+            "domain": { "$ref": "#/$defs/pipelineDomainStage" },
+            "geometry": { "$ref": "#/$defs/pipelineGeometryStage" },
+            "pixel": { "$ref": "#/$defs/pipelinePixelStage" }
+          },
+          "required": ["vertex", "pixel"],
+          "dependentRequired": {
+            "hull": ["domain"],
+            "domain": ["hull"]
+          },
+          "additionalProperties": false
+        }
+      },
+      "required": ["name", "stages"],
+      "additionalProperties": false
+    },
+    "pipelineStage": {
+      "type": "object",
+      "properties": {
+        "file": { "type": "string", "minLength": 1 },
+        "variant": { "type": "string", "minLength": 1 },
+        "entryPoint": { "type": "string", "minLength": 1 },
+        "targetProfile": { "type": "string", "minLength": 1 }
+      },
+      "required": ["file"],
+      "additionalProperties": false
+    },
+    "pipelineVertexStage": {
+      "allOf": [
+        { "$ref": "#/$defs/pipelineStage" },
+        {
+          "type": "object",
+          "properties": {
+            "targetProfile": { "type": "string", "pattern": "^vs_" }
+          }
+        }
+      ]
+    },
+    "pipelineHullStage": {
+      "allOf": [
+        { "$ref": "#/$defs/pipelineStage" },
+        {
+          "type": "object",
+          "properties": {
+            "targetProfile": { "type": "string", "pattern": "^hs_" }
+          }
+        }
+      ]
+    },
+    "pipelineDomainStage": {
+      "allOf": [
+        { "$ref": "#/$defs/pipelineStage" },
+        {
+          "type": "object",
+          "properties": {
+            "targetProfile": { "type": "string", "pattern": "^ds_" }
+          }
+        }
+      ]
+    },
+    "pipelineGeometryStage": {
+      "allOf": [
+        { "$ref": "#/$defs/pipelineStage" },
+        {
+          "type": "object",
+          "properties": {
+            "targetProfile": { "type": "string", "pattern": "^gs_" }
+          }
+        }
+      ]
+    },
+    "pipelinePixelStage": {
+      "allOf": [
+        { "$ref": "#/$defs/pipelineStage" },
+        {
+          "type": "object",
+          "properties": {
+            "targetProfile": { "type": "string", "pattern": "^ps_" }
+          }
+        }
+      ]
     }
   }
 }
