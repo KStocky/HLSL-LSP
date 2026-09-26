@@ -24,6 +24,7 @@ with:
 - Workspace symbol support for Visual Studio's All-In-One Search
 - Hierarchical `shadertoolsconfig.json` compiler configuration with a shared versioned JSON Schema
 - Named compilation variants selectable per document from either editor
+- Named graphics pipelines with cross-stage interface and shared-resource diagnostics
 - Selectable DXC runtime: the bundled default or an explicit compatible runtime
 - Transitive, virtual, open-buffer, and dependency-aware include handling
 - Bounded, cancellable, version-coalesced background analysis

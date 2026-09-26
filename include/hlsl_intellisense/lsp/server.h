@@ -1,6 +1,7 @@
 #pragma once
 
 #include <hlsl_intellisense/analysis/manager.h>
+#include <hlsl_intellisense/analysis/pipeline_validation.h>
 #include <hlsl_intellisense/json_rpc/dispatcher.h>
 #include <hlsl_intellisense/workspace/configuration.h>
 #include <hlsl_intellisense/workspace/document_store.h>
@@ -170,6 +171,27 @@ class Server final {
         std::vector<dxc::Diagnostic> diagnostics;
     };
 
+    struct PipelineDiagnostic {
+        analysis::PipelineIssueCode code{};
+        std::string message;
+        std::optional<dxc::SourceLocation> location;
+    };
+
+    struct PendingPipelineValidation {
+        std::uint64_t generation{};
+        std::uint64_t context_revision{};
+        workspace::ResolvedPipeline pipeline;
+        std::vector<workspace::SourceSnapshot> snapshots;
+        std::vector<std::optional<analysis::PipelineStageSnapshot>> stages;
+        std::vector<std::optional<std::string>> unavailable_reasons;
+    };
+
+    struct PipelineStageRequest {
+        std::string pipeline_key;
+        std::uint64_t generation{};
+        std::size_t stage_index{};
+    };
+
     enum class State { uninitialized, awaiting_initialized, running, shutdown };
 
     void register_handlers();
@@ -250,6 +272,12 @@ class Server final {
     };
 
     AnalysisSubmission analyze_and_publish(std::string_view uri);
+    void schedule_pipeline_validations(const workspace::SourceSnapshot& changed,
+                                       const std::vector<workspace::ResolvedPipeline>& pipelines);
+    void pipeline_analysis_completed(std::string_view analysis_identity,
+                                     const workspace::SourceSnapshot& snapshot,
+                                     dxc::CompilationInfo compilation, std::uint64_t generation,
+                                     std::uint64_t content_generation);
     void require_current_submission(std::string_view root_identity, std::uint64_t generation,
                                     std::string_view message) const;
     void require_current_submission(std::string_view root_identity, std::uint64_t generation,
@@ -387,6 +415,12 @@ class Server final {
     // identity), used exclusively to derive textDocument/codeAction results.
     // Never populated from, or trusted against, a client-supplied payload.
     std::unordered_map<std::string, DiagnosticsRecord> diagnostics_by_identity_;
+    std::unordered_map<std::string,
+                       std::unordered_map<std::string, std::vector<PipelineDiagnostic>>>
+        pipeline_diagnostics_by_identity_;
+    std::unordered_map<std::string, std::uint64_t> pipeline_generations_;
+    std::unordered_map<std::string, PendingPipelineValidation> pending_pipeline_validations_;
+    std::unordered_map<std::string, PipelineStageRequest> pipeline_stage_requests_;
     // The generation for which a dedicated analysis-unavailable diagnostic is
     // currently displayed. A successful analysis always replaces it, even
     // when the compiler diagnostics themselves are still empty.

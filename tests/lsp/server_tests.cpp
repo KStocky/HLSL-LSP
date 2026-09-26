@@ -1526,6 +1526,287 @@ TEST_CASE("Inlay parameter scanning carries call state across bounded chunks",
     CHECK(result->result[0]["position"] == position_at(source, second_argument));
 }
 
+TEST_CASE("Pipeline validation publishes and clears diagnostics for both stage documents",
+          "[lsp][pipeline-validation]") {
+    TestDirectory directory;
+    const auto vertex_path = directory.path() / "pipeline.vert.hlsl";
+    const auto pixel_path = directory.path() / "pipeline.frag.hlsl";
+    const auto vertex_uri =
+        hlsl_intellisense::workspace::DocumentUri::from_path(vertex_path.string());
+    const auto pixel_uri =
+        hlsl_intellisense::workspace::DocumentUri::from_path(pixel_path.string());
+    const std::string vertex_source = R"(
+struct VertexOutput
+{
+    float4 position : SV_Position;
+    float2 uv : TEXCOORD0;
+};
+
+VertexOutput VSMain()
+{
+    VertexOutput output;
+    output.position = 0.0;
+    output.uv = 0.0;
+    return output;
+}
+)";
+    const std::string incompatible_pixel_source = R"(
+float4 PSMain(float3 uv : TEXCOORD0) : SV_Target
+{
+    return float4(uv, 1.0);
+}
+)";
+    const std::string compatible_pixel_source = R"(
+float4 PSMain(float2 uv : TEXCOORD0) : SV_Target
+{
+    return float4(uv, 0.0, 1.0);
+}
+)";
+    const auto write = [](const std::filesystem::path& path, std::string_view contents) {
+        std::ofstream file{path};
+        REQUIRE(file);
+        file << contents;
+        REQUIRE(file);
+    };
+    write(vertex_path, vertex_source);
+    write(pixel_path, incompatible_pixel_source);
+    write(directory.path() / "shadertoolsconfig.json",
+          R"({
+  "hlsl.pipelinesVersion": 1,
+  "hlsl.pipelines": [
+    {
+      "name": "Forward",
+      "stages": {
+        "vertex": {
+          "file": "pipeline.vert.hlsl",
+          "entryPoint": "VSMain",
+          "targetProfile": "vs_6_7"
+        },
+        "pixel": {
+          "file": "pipeline.frag.hlsl",
+          "entryPoint": "PSMain",
+          "targetProfile": "ps_6_7"
+        }
+      }
+    }
+  ]
+})");
+
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    hlsl_intellisense::lsp::Server server{
+        [&notifications](const auto& value) { notifications.push_back(value); }};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(
+        hlsl_intellisense::json_rpc::Notification{.method = "textDocument/didOpen",
+                                                  .params = Json{{"textDocument",
+                                                                  {{"uri", vertex_uri.uri()},
+                                                                   {"languageId", "hlsl"},
+                                                                   {"version", 1},
+                                                                   {"text", vertex_source}}}}}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params = Json{{"textDocument",
+                        {{"uri", pixel_uri.uri()},
+                         {"languageId", "hlsl"},
+                         {"version", 1},
+                         {"text", incompatible_pixel_source}}}}}));
+    server.wait_for_analysis();
+
+    const auto latest_pipeline_diagnostics = [&notifications](std::string_view uri) {
+        Json diagnostics = Json::array();
+        for (const auto& notification : notifications) {
+            if (notification.method == "textDocument/publishDiagnostics" &&
+                notification.params.has_value() &&
+                notification.params->at("uri").get<std::string>() == uri) {
+                diagnostics = notification.params->at("diagnostics");
+            }
+        }
+        return diagnostics;
+    };
+    const auto contains_mask_mismatch = [](const Json& diagnostics) {
+        return std::ranges::any_of(diagnostics, [](const auto& diagnostic) {
+            return diagnostic.value("source", "") == "hlsl-lsp" &&
+                   diagnostic.value("code", "") == "hlsl-lsp/pipeline/component-mask-mismatch";
+        });
+    };
+
+    REQUIRE(contains_mask_mismatch(latest_pipeline_diagnostics(vertex_uri.uri())));
+    REQUIRE(contains_mask_mismatch(latest_pipeline_diagnostics(pixel_uri.uri())));
+
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didChange",
+        .params =
+            Json{{"textDocument", {{"uri", pixel_uri.uri()}, {"version", 2}}},
+                 {"contentChanges", Json::array({Json{{"text", compatible_pixel_source}}})}}}));
+    server.wait_for_analysis();
+
+    CHECK_FALSE(contains_mask_mismatch(latest_pipeline_diagnostics(vertex_uri.uri())));
+    CHECK_FALSE(contains_mask_mismatch(latest_pipeline_diagnostics(pixel_uri.uri())));
+
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didClose",
+        .params = Json{{"textDocument", {{"uri", pixel_uri.uri()}}}}}));
+    server.wait_for_analysis();
+
+    CHECK(contains_mask_mismatch(latest_pipeline_diagnostics(vertex_uri.uri())));
+    CHECK(latest_pipeline_diagnostics(pixel_uri.uri()).empty());
+
+    write(pixel_path, compatible_pixel_source);
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "workspace/didChangeWatchedFiles",
+        .params = Json{{"changes", Json::array({Json{{"uri", pixel_uri.uri()}, {"type", 2}}})}}}));
+    server.wait_for_analysis();
+
+    CHECK_FALSE(contains_mask_mismatch(latest_pipeline_diagnostics(vertex_uri.uri())));
+
+    write(pixel_path, incompatible_pixel_source);
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "workspace/didChangeWatchedFiles",
+        .params = Json{{"changes", Json::array({Json{{"uri", pixel_uri.uri()}, {"type", 2}}})}}}));
+    server.wait_for_analysis();
+    REQUIRE(contains_mask_mismatch(latest_pipeline_diagnostics(vertex_uri.uri())));
+
+    const auto configuration_path = directory.path() / "shadertoolsconfig.json";
+    const auto configuration_uri =
+        hlsl_intellisense::workspace::DocumentUri::from_path(configuration_path.string());
+    write(configuration_path, "{}");
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "workspace/didChangeWatchedFiles",
+        .params = Json{
+            {"changes", Json::array({Json{{"uri", configuration_uri.uri()}, {"type", 2}}})}}}));
+    server.wait_for_analysis();
+
+    CHECK_FALSE(contains_mask_mismatch(latest_pipeline_diagnostics(vertex_uri.uri())));
+
+    write(configuration_path, R"({
+  "hlsl.pipelinesVersion": 1,
+  "hlsl.pipelines": [
+    {
+      "name": "Forward",
+      "stages": {
+        "vertex": {
+          "file": "pipeline.vert.hlsl",
+          "variant": "Missing",
+          "entryPoint": "VSMain",
+          "targetProfile": "vs_6_7"
+        },
+        "pixel": {
+          "file": "pipeline.frag.hlsl",
+          "entryPoint": "PSMain",
+          "targetProfile": "ps_6_7"
+        }
+      }
+    }
+  ]
+})");
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "workspace/didChangeWatchedFiles",
+        .params = Json{
+            {"changes", Json::array({Json{{"uri", configuration_uri.uri()}, {"type", 2}}})}}}));
+    server.wait_for_analysis();
+
+    const auto unavailable = latest_pipeline_diagnostics(vertex_uri.uri());
+    REQUIRE(std::ranges::any_of(unavailable, [](const auto& diagnostic) {
+        return diagnostic.value("code", "") == "hlsl-lsp/pipeline/analysis-unavailable";
+    }));
+    CHECK(std::ranges::any_of(unavailable, [](const auto& diagnostic) {
+        return diagnostic.value("message", "").find("variant 'Missing' is not defined") !=
+               std::string::npos;
+    }));
+}
+
+TEST_CASE("Pipeline validation compiles distinct stages from the same document",
+          "[lsp][pipeline-validation]") {
+    TestDirectory directory;
+    const auto shader_path = directory.path() / "pipeline.hlsl";
+    const auto shader_uri =
+        hlsl_intellisense::workspace::DocumentUri::from_path(shader_path.string());
+    const std::string source = R"(
+struct VertexOutput
+{
+    float4 position : SV_Position;
+    float2 uv : TEXCOORD0;
+};
+
+VertexOutput VSMain()
+{
+    VertexOutput output;
+    output.position = 0.0;
+    output.uv = 0.0;
+    return output;
+}
+
+float4 PSMain(float3 uv : TEXCOORD0) : SV_Target
+{
+    return float4(uv, 1.0);
+}
+)";
+    {
+        std::ofstream shader{shader_path};
+        REQUIRE(shader);
+        shader << source;
+        REQUIRE(shader);
+    }
+    {
+        std::ofstream configuration{directory.path() / "shadertoolsconfig.json"};
+        REQUIRE(configuration);
+        configuration << R"({
+  "hlsl.pipelinesVersion": 1,
+  "hlsl.pipelines": [
+    {
+      "name": "Forward",
+      "stages": {
+        "vertex": {
+          "file": "pipeline.hlsl",
+          "entryPoint": "VSMain",
+          "targetProfile": "vs_6_7"
+        },
+        "pixel": {
+          "file": "pipeline.hlsl",
+          "entryPoint": "PSMain",
+          "targetProfile": "ps_6_7"
+        }
+      }
+    }
+  ]
+})";
+        REQUIRE(configuration);
+    }
+
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    hlsl_intellisense::lsp::Server server{
+        [&notifications](const auto& value) { notifications.push_back(value); }};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(
+        hlsl_intellisense::json_rpc::Notification{.method = "textDocument/didOpen",
+                                                  .params = Json{{"textDocument",
+                                                                  {{"uri", shader_uri.uri()},
+                                                                   {"languageId", "hlsl"},
+                                                                   {"version", 1},
+                                                                   {"text", source}}}}}));
+    server.wait_for_analysis();
+
+    const hlsl_intellisense::json_rpc::Notification* published{};
+    for (const auto& notification : notifications) {
+        if (notification.method == "textDocument/publishDiagnostics" &&
+            notification.params.has_value() && notification.params->at("uri") == shader_uri.uri()) {
+            published = &notification;
+        }
+    }
+    REQUIRE(published != nullptr);
+    const auto& diagnostics = published->params->at("diagnostics");
+    const auto mismatch_count = std::ranges::count_if(diagnostics, [](const auto& diagnostic) {
+        return diagnostic.value("code", "") == "hlsl-lsp/pipeline/component-mask-mismatch";
+    });
+    CHECK(mismatch_count == 2);
+}
+
 TEST_CASE("Inlay hints reject settings generations superseded during analysis",
           "[lsp][inlay-hints][stale][concurrency]") {
     const auto check_superseded = [](bool change_variant) {

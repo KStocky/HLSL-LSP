@@ -118,7 +118,11 @@ input(const workspace::DocumentUri& uri, std::int64_t version, std::string text,
                      std::make_move_iterator(extra_open_documents.end()));
     return {.root = std::move(root),
             .open_documents = std::move(documents),
-            .configuration = std::move(configuration)};
+            .configuration = std::move(configuration),
+            .generation = 0,
+            .analysis_identity = {},
+            .publish_diagnostics = true,
+            .request_compilation_info = false};
 }
 
 [[nodiscard]] std::string shader(std::string_view value = "1.0.xxxx") {
@@ -183,6 +187,37 @@ TEST_CASE("Manager runtime information is queried through an isolated worker",
     const auto runtime = manager.dxc_runtime_info();
     CHECK_FALSE(runtime.library_path.empty());
     CHECK_FALSE(runtime.version.empty());
+}
+
+TEST_CASE("Synthetic compilation analyses stay out of workspace root metadata",
+          "[analysis][pipeline]") {
+    TestDirectory directory;
+    const auto uri =
+        workspace::DocumentUri::from_path((directory.path() / "pipeline.hlsl").string());
+    std::vector<std::string> completed;
+    analysis::Manager manager{[](const auto&, const auto&, std::uint64_t) {},
+                              test_options(),
+                              {},
+                              {},
+                              {},
+                              [&completed](std::string_view identity, const auto&, auto compilation,
+                                           std::uint64_t, std::uint64_t) {
+                                  CHECK(compilation.success);
+                                  completed.emplace_back(identity);
+                              }};
+    auto request = input(uri, 1, shader());
+    request.configuration.target_profile = "ps_6_6";
+    request.configuration.entry_point = "main";
+    request.analysis_identity = "$pipeline\nForward\n1";
+    request.publish_diagnostics = false;
+    request.request_compilation_info = true;
+
+    REQUIRE(manager.analyze(std::move(request)));
+    manager.wait_idle();
+
+    CHECK(completed == std::vector<std::string>{"$pipeline\nForward\n1"});
+    CHECK(manager.roots().empty());
+    CHECK(manager.dependent_root_uris({uri.identity()}).empty());
 }
 
 TEST_CASE("Translation-unit cache evicts the least recently used idle root",

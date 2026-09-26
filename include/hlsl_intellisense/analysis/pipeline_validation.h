@@ -25,6 +25,7 @@ enum class PipelineIssueCode {
 struct PipelineStageSnapshot {
     workspace::PipelineStage stage;
     dxc::CompilationInfo compilation;
+    std::optional<std::string> unavailable_reason;
 };
 
 struct PipelineIssue {

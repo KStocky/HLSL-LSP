@@ -18,6 +18,7 @@
 #include <fstream>
 #include <iterator>
 #include <limits>
+#include <map>
 #include <stdexcept>
 #include <thread>
 #include <tuple>
@@ -1837,6 +1838,28 @@ struct InlayCallSite {
     return item;
 }
 
+[[nodiscard]] std::string_view pipeline_issue_code(analysis::PipelineIssueCode code) {
+    switch (code) {
+    case analysis::PipelineIssueCode::analysis_unavailable:
+        return "analysis-unavailable";
+    case analysis::PipelineIssueCode::missing_producer_output:
+        return "missing-producer-output";
+    case analysis::PipelineIssueCode::component_type_mismatch:
+        return "component-type-mismatch";
+    case analysis::PipelineIssueCode::component_mask_mismatch:
+        return "component-mask-mismatch";
+    case analysis::PipelineIssueCode::interpolation_mismatch:
+        return "interpolation-mismatch";
+    case analysis::PipelineIssueCode::system_value_mismatch:
+        return "system-value-mismatch";
+    case analysis::PipelineIssueCode::resource_binding_mismatch:
+        return "resource-binding-mismatch";
+    case analysis::PipelineIssueCode::resource_type_mismatch:
+        return "resource-type-mismatch";
+    }
+    return "unknown";
+}
+
 [[nodiscard]] std::string workspace_folder_identity(const Json& folder) {
     try {
         return workspace::DocumentUri::from_uri(string_member(folder, "uri")).identity();
@@ -2221,10 +2244,16 @@ Server::Server(NotificationSender sender, Logger logger, ServerOptions options,
       analysis_{[this](const auto& snapshot, const auto& diagnostics, std::uint64_t generation) {
                     analysis_completed(snapshot, diagnostics, generation);
                 },
-                options_.analysis, options_.analysis_hooks,
+                options_.analysis,
+                options_.analysis_hooks,
                 [this](std::string_view message) { log(message); },
                 [this](const auto& snapshot, const auto& unavailable, std::uint64_t generation) {
                     analysis_unavailable(snapshot, unavailable, generation);
+                },
+                [this](std::string_view identity, const auto& snapshot, auto compilation,
+                       std::uint64_t generation, std::uint64_t content_generation) {
+                    pipeline_analysis_completed(identity, snapshot, std::move(compilation),
+                                                generation, content_generation);
                 }} {
     if (!sender_) {
         throw std::invalid_argument{"The LSP server requires a notification sender"};
@@ -5104,6 +5133,12 @@ void Server::did_close(const std::optional<Json>& params) {
             std::scoped_lock state_lock{state_mutex_};
             return documents_.snapshot(uri);
         }();
+        std::vector<workspace::ResolvedPipeline> pipelines;
+        try {
+            pipelines = configuration_for(snapshot, snapshot_configuration_state()).pipelines;
+        } catch (const workspace::ConfigurationError& error) {
+            log(error.what());
+        }
         const std::unordered_set changed{snapshot.document_uri().identity()};
         auto affected_roots =
             analysis_.dependent_root_uris(changed, snapshot.document_uri().identity());
@@ -5122,6 +5157,10 @@ void Server::did_close(const std::optional<Json>& params) {
         refresh_inlay_hints = true;
         for (const auto& root_uri : affected_roots) {
             analyze_and_publish(root_uri);
+        }
+        schedule_pipeline_validations(snapshot, pipelines);
+        if (!options_.background_analysis) {
+            analysis_.wait_idle();
         }
         sender_(json_rpc::Notification{
             .method = "textDocument/publishDiagnostics",
@@ -5340,6 +5379,7 @@ void Server::did_change_watched_files(const std::optional<Json>& params) {
         }
 
         std::unordered_set<std::string> changed_identities;
+        std::vector<workspace::DocumentUri> changed_documents;
         std::vector<std::string> changed_configuration_directories;
         for (const auto& change : changes) {
             try {
@@ -5381,6 +5421,7 @@ void Server::did_change_watched_files(const std::optional<Json>& params) {
                             .identity());
                 }
                 changed_identities.insert(changed.identity());
+                changed_documents.push_back(changed);
             } catch (const workspace::DocumentError& error) {
                 invalid_params(error.what());
             }
@@ -5433,6 +5474,35 @@ void Server::did_change_watched_files(const std::optional<Json>& params) {
         }
         for (const auto& root_uri : affected_roots) {
             analyze_and_publish(root_uri);
+        }
+        const auto configuration_state = snapshot_configuration_state();
+        for (const auto& changed : changed_documents) {
+            std::map<std::string, workspace::ResolvedPipeline, std::less<>> relevant_pipelines;
+            for (const auto& document : open_documents) {
+                const auto configuration = configuration_for(document, configuration_state);
+                for (const auto& pipeline : configuration.pipelines) {
+                    const bool contains_changed_stage =
+                        std::ranges::any_of(pipeline.stages, [&changed](const auto& stage) {
+                            return workspace::DocumentUri::from_path(stage.file.string())
+                                       .identity() == changed.identity();
+                        });
+                    if (contains_changed_stage) {
+                        const auto key =
+                            workspace::DocumentUri::from_path(pipeline.declaring_file.string())
+                                .identity() +
+                            "\n" + pipeline.name;
+                        relevant_pipelines.insert_or_assign(key, pipeline);
+                    }
+                }
+            }
+            std::vector<workspace::ResolvedPipeline> pipelines;
+            pipelines.reserve(relevant_pipelines.size());
+            for (auto& [key, pipeline] : relevant_pipelines) {
+                static_cast<void>(key);
+                pipelines.push_back(std::move(pipeline));
+            }
+            schedule_pipeline_validations(workspace::SourceSnapshot{changed, "hlsl", 0, {}},
+                                          pipelines);
         }
     } catch (const std::exception& error) {
         log(error.what());
@@ -5490,6 +5560,8 @@ Server::AnalysisSubmission Server::analyze_and_publish(std::string_view uri) {
     std::scoped_lock submission_lock{analysis_submission_mutex_};
     AnalysisSubmission submission;
     std::string root_identity;
+    std::optional<workspace::SourceSnapshot> root_snapshot;
+    std::vector<workspace::ResolvedPipeline> pipelines;
     analysis::AnalysisInput input = [&] {
         std::scoped_lock state_lock{state_mutex_};
         const auto& state = documents_.document(uri);
@@ -5509,6 +5581,33 @@ Server::AnalysisSubmission Server::analyze_and_publish(std::string_view uri) {
                                .workspace_folders = workspace_folders_};
         auto configuration =
             configuration_for(snapshot, configuration_state, &active_variant_selection);
+        pipelines = configuration.pipelines;
+        root_snapshot = snapshot;
+        std::unordered_set<std::string> active_pipeline_keys;
+        for (const auto& pipeline : pipelines) {
+            const bool contains_root = std::ranges::any_of(pipeline.stages, [&](const auto& stage) {
+                return workspace::DocumentUri::from_path(stage.file.string()).identity() ==
+                       root_identity;
+            });
+            if (contains_root) {
+                active_pipeline_keys.insert(
+                    workspace::DocumentUri::from_path(pipeline.declaring_file.string()).identity() +
+                    "\n" + pipeline.name);
+            }
+        }
+        if (const auto existing = pipeline_diagnostics_by_identity_.find(root_identity);
+            existing != pipeline_diagnostics_by_identity_.end()) {
+            const auto removed =
+                std::erase_if(existing->second, [&active_pipeline_keys](const auto& item) {
+                    return !active_pipeline_keys.contains(item.first);
+                });
+            if (removed != 0) {
+                diagnostics_by_identity_.erase(root_identity);
+            }
+            if (existing->second.empty()) {
+                pipeline_diagnostics_by_identity_.erase(existing);
+            }
+        }
         const auto effective_target = effective_shader_target(configuration);
         submission = {
             .generation = generation,
@@ -5521,7 +5620,10 @@ Server::AnalysisSubmission Server::analyze_and_publish(std::string_view uri) {
         return analysis::AnalysisInput{.root = snapshot,
                                        .open_documents = documents_.open_snapshots(),
                                        .configuration = std::move(configuration),
-                                       .generation = generation};
+                                       .generation = generation,
+                                       .analysis_identity = root_identity,
+                                       .publish_diagnostics = true,
+                                       .request_compilation_info = false};
     }();
     if (!analysis_.analyze(std::move(input))) {
         throw HandlerError{json_rpc::content_modified_code, "Analysis request was not queued"};
@@ -5535,10 +5637,249 @@ Server::AnalysisSubmission Server::analyze_and_publish(std::string_view uri) {
         }
         analysis_submissions_[root_identity] = submission;
     }
+    schedule_pipeline_validations(*root_snapshot, pipelines);
     if (!options_.background_analysis) {
         analysis_.wait_idle();
     }
     return submission;
+}
+
+void Server::schedule_pipeline_validations(
+    const workspace::SourceSnapshot& changed,
+    const std::vector<workspace::ResolvedPipeline>& pipelines) {
+    if (pipelines.empty()) {
+        return;
+    }
+
+    const auto configuration_state = snapshot_configuration_state();
+    std::vector<workspace::SourceSnapshot> open_documents;
+    {
+        std::scoped_lock state_lock{state_mutex_};
+        open_documents = documents_.open_snapshots();
+    }
+    const auto changed_identity = changed.document_uri().identity();
+    const auto snapshot_for_stage =
+        [&open_documents](const workspace::PipelineStage& stage) -> workspace::SourceSnapshot {
+        const auto uri = workspace::DocumentUri::from_path(stage.file.string());
+        const auto open = std::ranges::find_if(open_documents, [&uri](const auto& document) {
+            return document.document_uri().identity() == uri.identity();
+        });
+        if (open != open_documents.end()) {
+            return *open;
+        }
+        std::ifstream stream{stage.file, std::ios::binary};
+        std::string text;
+        if (stream) {
+            text.assign(std::istreambuf_iterator<char>{stream}, std::istreambuf_iterator<char>{});
+        }
+        return workspace::SourceSnapshot{uri, "hlsl", 0, std::move(text)};
+    };
+
+    for (const auto& pipeline : pipelines) {
+        const bool relevant = std::ranges::any_of(pipeline.stages, [&](const auto& stage) {
+            return workspace::DocumentUri::from_path(stage.file.string()).identity() ==
+                   changed_identity;
+        });
+        if (!relevant) {
+            continue;
+        }
+
+        const auto declaring_identity =
+            workspace::DocumentUri::from_path(pipeline.declaring_file.string()).identity();
+        const auto pipeline_key = declaring_identity + "\n" + pipeline.name;
+        PendingPipelineValidation pending{
+            .generation = 0,
+            .context_revision = 0,
+            .pipeline = pipeline,
+            .snapshots = {},
+            .stages =
+                std::vector<std::optional<analysis::PipelineStageSnapshot>>(pipeline.stages.size()),
+            .unavailable_reasons = std::vector<std::optional<std::string>>(pipeline.stages.size())};
+        std::vector<analysis::AnalysisInput> inputs;
+        inputs.reserve(pipeline.stages.size());
+        pending.snapshots.reserve(pipeline.stages.size());
+
+        for (std::size_t index = 0; index < pipeline.stages.size(); ++index) {
+            const auto& stage = pipeline.stages[index];
+            auto snapshot = snapshot_for_stage(stage);
+            auto configuration = base_configuration_for(
+                snapshot, configuration_state.client_default_language_version);
+            std::optional<std::string> selected_variant;
+            auto variant_selection = workspace::VariantSelection::applied;
+            if (stage.variant) {
+                selected_variant = stage.variant;
+                variant_selection = workspace::apply_variant(configuration, *stage.variant);
+            } else if (configuration_state.active_variant) {
+                selected_variant = configuration_state.active_variant;
+                variant_selection =
+                    workspace::apply_variant(configuration, *configuration_state.active_variant);
+            }
+            if (selected_variant && variant_selection != workspace::VariantSelection::applied) {
+                pending.unavailable_reasons[index] =
+                    "variant '" + *selected_variant +
+                    (variant_selection == workspace::VariantSelection::undefined
+                         ? "' is not defined for this stage"
+                         : "' does not apply to this stage");
+            }
+            configuration = workspace::apply_configuration_overrides(
+                std::move(configuration), configuration_state.editor_settings,
+                configuration_base_directory(snapshot.path(),
+                                             configuration_state.workspace_folders));
+            if (stage.entry_point) {
+                configuration.entry_point = stage.entry_point;
+            }
+            if (stage.target_profile) {
+                configuration.target_profile = stage.target_profile;
+            }
+
+            const auto analysis_identity =
+                "$pipeline\n" + pipeline_key + "\n" + std::to_string(index);
+            pending.snapshots.push_back(snapshot);
+            inputs.push_back(analysis::AnalysisInput{.root = std::move(snapshot),
+                                                     .open_documents = open_documents,
+                                                     .configuration = std::move(configuration),
+                                                     .generation = 0,
+                                                     .analysis_identity = analysis_identity,
+                                                     .publish_diagnostics = false,
+                                                     .request_compilation_info = true});
+        }
+
+        {
+            std::scoped_lock state_lock{state_mutex_};
+            pending.generation = ++pipeline_generations_[pipeline_key];
+            pending.context_revision = effective_context_revision_;
+            for (std::size_t index = 0; index < inputs.size(); ++index) {
+                inputs[index].generation = pending.generation;
+                pipeline_stage_requests_.insert_or_assign(
+                    inputs[index].analysis_identity,
+                    PipelineStageRequest{.pipeline_key = pipeline_key,
+                                         .generation = pending.generation,
+                                         .stage_index = index});
+            }
+            pending_pipeline_validations_.insert_or_assign(pipeline_key, std::move(pending));
+        }
+
+        for (auto& input : inputs) {
+            const auto analysis_identity = input.analysis_identity;
+            const auto snapshot = input.root;
+            const auto generation = input.generation;
+            if (!analysis_.analyze(std::move(input))) {
+                log("Pipeline stage analysis was not queued");
+                pipeline_analysis_completed(analysis_identity, snapshot, {}, generation, 0);
+            }
+        }
+    }
+}
+
+void Server::pipeline_analysis_completed(std::string_view analysis_identity,
+                                         const workspace::SourceSnapshot& snapshot,
+                                         dxc::CompilationInfo compilation, std::uint64_t generation,
+                                         std::uint64_t content_generation) {
+    static_cast<void>(content_generation);
+    std::optional<PendingPipelineValidation> completed;
+    std::string pipeline_key;
+    {
+        std::scoped_lock state_lock{state_mutex_};
+        const auto request_iterator = pipeline_stage_requests_.find(std::string{analysis_identity});
+        if (request_iterator == pipeline_stage_requests_.end() ||
+            request_iterator->second.generation != generation) {
+            return;
+        }
+        const auto request = request_iterator->second;
+        pipeline_stage_requests_.erase(request_iterator);
+        pipeline_key = request.pipeline_key;
+        const auto pending = pending_pipeline_validations_.find(pipeline_key);
+        if (pending == pending_pipeline_validations_.end() ||
+            pending->second.generation != generation) {
+            return;
+        }
+        if (pending->second.context_revision != effective_context_revision_ ||
+            request.stage_index >= pending->second.stages.size() ||
+            pending->second.snapshots[request.stage_index].uri() != snapshot.uri() ||
+            pending->second.snapshots[request.stage_index].version() != snapshot.version()) {
+            pending_pipeline_validations_.erase(pending);
+            return;
+        }
+        pending->second.stages[request.stage_index] = analysis::PipelineStageSnapshot{
+            .stage = pending->second.pipeline.stages[request.stage_index],
+            .compilation = std::move(compilation),
+            .unavailable_reason =
+                std::move(pending->second.unavailable_reasons[request.stage_index])};
+        if (std::ranges::all_of(pending->second.stages,
+                                [](const auto& stage) { return stage.has_value(); })) {
+            completed = std::move(pending->second);
+            pending_pipeline_validations_.erase(pending);
+        }
+    }
+    if (!completed) {
+        return;
+    }
+
+    std::vector<analysis::PipelineStageSnapshot> stages;
+    stages.reserve(completed->stages.size());
+    for (auto& stage : completed->stages) {
+        stages.push_back(std::move(*stage));
+    }
+    const auto issues = analysis::validate_pipeline(completed->pipeline, stages);
+
+    std::vector<std::vector<PipelineDiagnostic>> diagnostics(completed->snapshots.size());
+    const auto add_endpoint = [&](std::size_t index,
+                                  const std::optional<dxc::SourceLocation>& location,
+                                  const analysis::PipelineIssue& issue) {
+        if (index >= diagnostics.size()) {
+            return;
+        }
+        diagnostics[index].push_back(
+            PipelineDiagnostic{.code = issue.code, .message = issue.message, .location = location});
+    };
+    for (const auto& issue : issues) {
+        add_endpoint(issue.consumer_stage, issue.consumer_location, issue);
+        if (issue.producer_stage != issue.consumer_stage &&
+            issue.code != analysis::PipelineIssueCode::missing_producer_output) {
+            add_endpoint(issue.producer_stage, issue.producer_location, issue);
+        }
+    }
+
+    std::map<std::string, std::vector<PipelineDiagnostic>, std::less<>> diagnostics_by_document;
+    std::map<std::string, workspace::SourceSnapshot, std::less<>> snapshots_by_document;
+    for (std::size_t index = 0; index < completed->snapshots.size(); ++index) {
+        const auto& captured = completed->snapshots[index];
+        const auto identity = captured.document_uri().identity();
+        auto& destination = diagnostics_by_document[identity];
+        auto& source = diagnostics[index];
+        destination.insert(destination.end(), std::make_move_iterator(source.begin()),
+                           std::make_move_iterator(source.end()));
+        snapshots_by_document.insert_or_assign(identity, captured);
+    }
+
+    std::scoped_lock state_lock{state_mutex_};
+    const auto current_generation = pipeline_generations_.find(pipeline_key);
+    if (current_generation == pipeline_generations_.end() ||
+        current_generation->second != completed->generation) {
+        return;
+    }
+    for (auto& [identity, pipeline_diagnostics] : diagnostics_by_document) {
+        const auto& captured = snapshots_by_document.at(identity);
+        pipeline_diagnostics_by_identity_[identity].insert_or_assign(
+            pipeline_key, std::move(pipeline_diagnostics));
+        if (!documents_.contains(captured.uri()) || !documents_.document(captured.uri()).open) {
+            continue;
+        }
+        const auto latest = documents_.snapshot(captured.uri());
+        if (latest.version() != captured.version()) {
+            continue;
+        }
+        const auto compiler = diagnostics_by_identity_.find(identity);
+        const auto analysis_generation = analysis_generations_.find(identity);
+        const std::vector<dxc::Diagnostic> empty;
+        publish_diagnostics(
+            latest,
+            compiler != diagnostics_by_identity_.end() &&
+                    compiler->second.version == latest.version()
+                ? compiler->second.diagnostics
+                : empty,
+            analysis_generation != analysis_generations_.end() ? analysis_generation->second : 0);
+    }
 }
 
 void Server::require_current_submission(std::string_view root_identity, std::uint64_t generation,
@@ -6534,6 +6875,33 @@ void Server::publish_diagnostics(const workspace::SourceSnapshot& snapshot,
     Json items = Json::array();
     for (std::size_t index = 0; index < diagnostics.size(); ++index) {
         items.push_back(diagnostic_json(snapshot, diagnostics[index], generation, index));
+    }
+    const auto identity = snapshot.document_uri().identity();
+    if (const auto document = pipeline_diagnostics_by_identity_.find(identity);
+        document != pipeline_diagnostics_by_identity_.end()) {
+        std::vector<std::string> pipeline_keys;
+        pipeline_keys.reserve(document->second.size());
+        for (const auto& [key, values] : document->second) {
+            static_cast<void>(values);
+            pipeline_keys.push_back(key);
+        }
+        std::ranges::sort(pipeline_keys);
+        for (const auto& key : pipeline_keys) {
+            for (const auto& diagnostic : document->second.at(key)) {
+                dxc::Diagnostic location;
+                location.location =
+                    diagnostic.location &&
+                            same_document_path(diagnostic.location->path, snapshot.path())
+                        ? *diagnostic.location
+                        : dxc::SourceLocation{.path = snapshot.path(), .line = 1, .column = 1};
+                items.push_back({{"range", lsp_range(diagnostic_range(snapshot, location))},
+                                 {"severity", 1},
+                                 {"code", "hlsl-lsp/pipeline/" +
+                                              std::string{pipeline_issue_code(diagnostic.code)}},
+                                 {"source", "hlsl-lsp"},
+                                 {"message", diagnostic.message}});
+            }
+        }
     }
     sender_(json_rpc::Notification{.method = "textDocument/publishDiagnostics",
                                    .params = Json{{"uri", snapshot.uri()},

@@ -17,25 +17,28 @@ signature(std::string name, std::uint32_t index = 0, std::string type = "float32
           std::uint8_t mask = 0xf,
           dxc::InterpolationMode interpolation = dxc::InterpolationMode::linear,
           std::string system_value = "undefined") {
-    return {.semantic_name = std::move(name),
-            .semantic_index = index,
-            .system_value = std::move(system_value),
-            .component_type = std::move(type),
-            .mask = mask,
-            .interpolation = interpolation};
+    dxc::CompilationSignatureParameter result;
+    result.semantic_name = std::move(name);
+    result.semantic_index = index;
+    result.system_value = std::move(system_value);
+    result.component_type = std::move(type);
+    result.mask = mask;
+    result.interpolation = interpolation;
+    return result;
 }
 
 [[nodiscard]] dxc::CompilationResourceBinding resource(std::string name, std::uint32_t binding,
                                                        std::string type = "texture") {
-    return {.name = std::move(name),
-            .type = std::move(type),
-            .bind_point = binding,
-            .bind_count = 1,
-            .space = 0,
-            .dimension = "texture2d",
-            .return_type = "float",
-            .register_class = dxc::ResourceRegisterClass::srv,
-            .sample_count = 0xffffffffU};
+    dxc::CompilationResourceBinding result;
+    result.name = std::move(name);
+    result.type = std::move(type);
+    result.bind_point = binding;
+    result.bind_count = 1;
+    result.dimension = "texture2d";
+    result.return_type = "float";
+    result.register_class = dxc::ResourceRegisterClass::srv;
+    result.sample_count = 0xffffffffU;
+    return result;
 }
 
 [[nodiscard]] analysis::PipelineStageSnapshot
@@ -44,14 +47,21 @@ stage(workspace::PipelineStageKind kind, std::vector<dxc::CompilationSignaturePa
       std::vector<dxc::CompilationResourceBinding> resources = {}) {
     dxc::CompilationInfo compilation;
     compilation.success = true;
-    compilation.reflection = dxc::CompilationReflection{.input_signature = std::move(inputs),
-                                                        .output_signature = std::move(outputs),
-                                                        .resources = std::move(resources)};
-    return {.stage = workspace::PipelineStage{.kind = kind}, .compilation = std::move(compilation)};
+    dxc::CompilationReflection reflection;
+    reflection.input_signature = std::move(inputs);
+    reflection.output_signature = std::move(outputs);
+    reflection.resources = std::move(resources);
+    compilation.reflection = std::move(reflection);
+    workspace::PipelineStage pipeline_stage;
+    pipeline_stage.kind = kind;
+    return {.stage = std::move(pipeline_stage),
+            .compilation = std::move(compilation),
+            .unavailable_reason = std::nullopt};
 }
 
 [[nodiscard]] workspace::ResolvedPipeline pipeline(std::size_t stage_count = 2) {
-    workspace::ResolvedPipeline result{.name = "Forward"};
+    workspace::ResolvedPipeline result;
+    result.name = "Forward";
     result.stages.resize(stage_count);
     return result;
 }
@@ -133,4 +143,17 @@ TEST_CASE("Pipeline validation reports unavailable stage analysis", "[analysis][
     const auto issues = analysis::validate_pipeline(pipeline(), stages);
     REQUIRE(issues.size() == 1);
     CHECK(issues.front().code == analysis::PipelineIssueCode::analysis_unavailable);
+}
+
+TEST_CASE("Pipeline validation reports unsupported hull-to-domain patch signatures",
+          "[analysis][pipeline]") {
+    const std::vector stages{stage(workspace::PipelineStageKind::vertex, {}, {}),
+                             stage(workspace::PipelineStageKind::hull, {}, {}),
+                             stage(workspace::PipelineStageKind::domain, {}, {}),
+                             stage(workspace::PipelineStageKind::pixel, {}, {})};
+
+    const auto issues = analysis::validate_pipeline(pipeline(stages.size()), stages);
+    REQUIRE(issues.size() == 1);
+    CHECK(issues.front().code == analysis::PipelineIssueCode::analysis_unavailable);
+    CHECK(issues.front().message.find("patch-constant") != std::string::npos);
 }

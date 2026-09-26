@@ -68,6 +68,9 @@ struct AnalysisInput {
     std::vector<workspace::SourceSnapshot> open_documents;
     workspace::WorkspaceConfiguration configuration;
     std::uint64_t generation{};
+    std::string analysis_identity;
+    bool publish_diagnostics{true};
+    bool request_compilation_info{};
 };
 
 enum class AnalysisUnavailableReason : std::uint8_t {
@@ -167,10 +170,13 @@ class Manager final {
     using ErrorHandler = std::function<void(std::string_view)>;
     using UnavailableHandler = std::function<void(const workspace::SourceSnapshot&,
                                                   const AnalysisUnavailable&, std::uint64_t)>;
+    using CompilationHandler =
+        std::function<void(std::string_view, const workspace::SourceSnapshot&, dxc::CompilationInfo,
+                           std::uint64_t, std::uint64_t)>;
 
     explicit Manager(DiagnosticsHandler diagnostics, AnalysisOptions options = {},
                      std::shared_ptr<AnalysisHooks> hooks = {}, ErrorHandler errors = {},
-                     UnavailableHandler unavailable = {});
+                     UnavailableHandler unavailable = {}, CompilationHandler compilation = {});
     Manager(const Manager&) = delete;
     Manager& operator=(const Manager&) = delete;
     ~Manager();

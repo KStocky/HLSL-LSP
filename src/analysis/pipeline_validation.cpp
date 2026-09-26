@@ -184,21 +184,46 @@ auto validate_pipeline(const workspace::ResolvedPipeline& pipeline,
             .code = PipelineIssueCode::analysis_unavailable,
             .pipeline_name = pipeline.name,
             .message = "Pipeline '" + pipeline.name +
-                       "' could not be validated because one or more stage analyses are missing."});
+                       "' could not be validated because one or more stage analyses are missing.",
+            .producer_stage = 0,
+            .consumer_stage = 0,
+            .producer_location = std::nullopt,
+            .consumer_location = std::nullopt});
         return issues;
     }
     for (std::size_t index = 0; index < stages.size(); ++index) {
         const auto& compilation = stages[index].compilation;
-        if (!compilation.success || !compilation.reflection || !compilation.reflection->available) {
-            issues.push_back(PipelineIssue{.code = PipelineIssueCode::analysis_unavailable,
-                                           .pipeline_name = pipeline.name,
-                                           .message = "Pipeline '" + pipeline.name +
-                                                      "' stage analysis is unavailable.",
-                                           .producer_stage = index,
-                                           .consumer_stage = index});
+        if (stages[index].unavailable_reason || !compilation.success || !compilation.reflection ||
+            !compilation.reflection->available) {
+            issues.push_back(PipelineIssue{
+                .code = PipelineIssueCode::analysis_unavailable,
+                .pipeline_name = pipeline.name,
+                .message =
+                    "Pipeline '" + pipeline.name + "' stage analysis is unavailable" +
+                    (stages[index].unavailable_reason ? ": " + *stages[index].unavailable_reason
+                                                      : std::string{}) +
+                    ".",
+                .producer_stage = index,
+                .consumer_stage = index,
+                .producer_location = std::nullopt,
+                .consumer_location = std::nullopt});
         }
     }
     for (std::size_t index = 0; index + 1 < stages.size(); ++index) {
+        if (stages[index].stage.kind == workspace::PipelineStageKind::hull &&
+            stages[index + 1].stage.kind == workspace::PipelineStageKind::domain) {
+            issues.push_back(PipelineIssue{
+                .code = PipelineIssueCode::analysis_unavailable,
+                .pipeline_name = pipeline.name,
+                .message = "Pipeline '" + pipeline.name +
+                           "' hull-to-domain validation is unavailable because DXC patch-constant "
+                           "signature reflection is not exposed yet.",
+                .producer_stage = index,
+                .consumer_stage = index + 1,
+                .producer_location = std::nullopt,
+                .consumer_location = std::nullopt});
+            continue;
+        }
         validate_interface(pipeline, stages, index, issues);
     }
     validate_resources(pipeline, stages, issues);

@@ -93,11 +93,14 @@ estimate_sources(const workspace::IncludeResolution& resolution) noexcept {
 
 [[nodiscard]] std::shared_ptr<AnalysisInput>
 make_recovery_input(const AnalysisInput& input, const workspace::IncludeResolution& resolution) {
-    auto recovery =
-        std::make_shared<AnalysisInput>(AnalysisInput{.root = input.root,
-                                                      .open_documents = {},
-                                                      .configuration = input.configuration,
-                                                      .generation = input.generation});
+    auto recovery = std::make_shared<AnalysisInput>(
+        AnalysisInput{.root = input.root,
+                      .open_documents = {},
+                      .configuration = input.configuration,
+                      .generation = input.generation,
+                      .analysis_identity = input.analysis_identity,
+                      .publish_diagnostics = input.publish_diagnostics,
+                      .request_compilation_info = input.request_compilation_info});
     recovery->open_documents.reserve(input.open_documents.size());
     for (const auto& document : input.open_documents) {
         if (resolution.has_dynamic_includes ||
@@ -280,10 +283,11 @@ struct Manager::Impl final {
 
     Impl(DiagnosticsHandler diagnostics_handler, AnalysisOptions value,
          std::shared_ptr<AnalysisHooks> analysis_hooks, ErrorHandler error_handler,
-         UnavailableHandler unavailable_handler)
+         UnavailableHandler unavailable_handler, CompilationHandler compilation_handler)
         : diagnostics{std::move(diagnostics_handler)}, errors{std::move(error_handler)},
-          unavailable{std::move(unavailable_handler)}, options{validate_options(std::move(value))},
-          hooks{std::move(analysis_hooks)}, worker_states(options.scheduler.worker_count),
+          unavailable{std::move(unavailable_handler)}, compilation{std::move(compilation_handler)},
+          options{validate_options(std::move(value))}, hooks{std::move(analysis_hooks)},
+          worker_states(options.scheduler.worker_count),
           scheduler{options.scheduler,
                     [this](std::size_t index) { worker_states[index].reset(); }} {
         if (!diagnostics) {
@@ -480,13 +484,14 @@ struct Manager::Impl final {
     void publish_unavailable(const AnalysisInput& input, std::uint64_t epoch,
                              const WorkerProcessError& error,
                              const json_rpc::CancellationToken& cancellation) {
-        if (!unavailable || error.code() == WorkerProcessErrorCode::cancelled ||
-            !is_current(input.root.document_uri().identity(), epoch, cancellation)) {
+        const auto& root_identity = input.analysis_identity;
+        if (!input.publish_diagnostics || !unavailable ||
+            error.code() == WorkerProcessErrorCode::cancelled ||
+            !is_current(root_identity, epoch, cancellation)) {
             return;
         }
         {
             std::scoped_lock lock{metadata_mutex};
-            const auto root_identity = input.root.document_uri().identity();
             const auto previous = unavailable_generations.find(root_identity);
             if (previous != unavailable_generations.end() && previous->second == input.generation) {
                 return;
@@ -514,12 +519,12 @@ struct Manager::Impl final {
         std::optional<Entry> candidate;
         try {
             if (hooks && hooks->before_analysis) {
-                hooks->before_analysis(input.root.document_uri().identity(), input.root.version());
+                hooks->before_analysis(input.analysis_identity, input.root.version());
             }
             cancellation.throw_if_cancellation_requested();
 
             worker_state = &state(worker);
-            const auto root_identity = input.root.document_uri().identity();
+            const auto& root_identity = input.analysis_identity;
             if (!recovery) {
                 if (const auto current = worker_state->entries.find(root_identity);
                     current != worker_state->entries.end()) {
@@ -589,14 +594,17 @@ struct Manager::Impl final {
                               .epoch = epoch,
                               .recovery_input = std::move(recovery_input)};
 
-            update_metadata(root_identity, epoch,
-                            RootMetadata{.root_uri = root_uri,
-                                         .root_identity = root_identity,
-                                         .version = input.root.version(),
-                                         .configuration_fingerprint = configuration,
-                                         .dependency_identities = resolution.dependency_identities,
-                                         .has_dynamic_includes = resolution.has_dynamic_includes},
-                            cancellation);
+            if (input.publish_diagnostics) {
+                update_metadata(
+                    root_identity, epoch,
+                    RootMetadata{.root_uri = root_uri,
+                                 .root_identity = root_identity,
+                                 .version = input.root.version(),
+                                 .configuration_fingerprint = configuration,
+                                 .dependency_identities = resolution.dependency_identities,
+                                 .has_dynamic_includes = resolution.has_dynamic_includes},
+                    cancellation);
+            }
 
             const auto started = Clock::now();
             auto worker_sources = expected_kind == WorkerAnalysisKind::cache_hit
@@ -648,20 +656,31 @@ struct Manager::Impl final {
                     cancellation.is_cancellation_requested()) {
                     return;
                 }
-                metadata.insert_or_assign(
-                    root_identity, RootMetadata{.root_uri = root_uri,
-                                                .root_identity = root_identity,
-                                                .version = input.root.version(),
-                                                .configuration_fingerprint = configuration,
-                                                .dependency_identities = dependencies,
-                                                .has_dynamic_includes = has_dynamic_includes});
+                if (input.publish_diagnostics) {
+                    metadata.insert_or_assign(
+                        root_identity, RootMetadata{.root_uri = root_uri,
+                                                    .root_identity = root_identity,
+                                                    .version = input.root.version(),
+                                                    .configuration_fingerprint = configuration,
+                                                    .dependency_identities = dependencies,
+                                                    .has_dynamic_includes = has_dynamic_includes});
+                }
             }
             cancellation.throw_if_cancellation_requested();
             if (hooks && hooks->after_diagnostics) {
                 hooks->after_diagnostics(diagnostics_result);
             }
             clear_unavailable(root_identity);
-            diagnostics(input.root, diagnostics_result, input.generation);
+            if (input.request_compilation_info && compilation) {
+                auto compilation_result = worker_state->worker.compilation_info(
+                    root_identity, options.budgets.background_timeout, cancellation);
+                cancellation.throw_if_cancellation_requested();
+                compilation(root_identity, input.root, std::move(compilation_result),
+                            input.generation, stored->second.generation);
+            }
+            if (input.publish_diagnostics) {
+                diagnostics(input.root, diagnostics_result, input.generation);
+            }
         } catch (const WorkerProcessError& error) {
             std::vector<Recovery> recoveries;
             if (worker_state != nullptr) {
@@ -669,7 +688,7 @@ struct Manager::Impl final {
                     candidate->recovery_attempted =
                         recovery || !automatically_recoverable(error.code());
                 }
-                const auto current_identity = input.root.document_uri().identity();
+                const auto& current_identity = input.analysis_identity;
                 recoveries = invalidate_worker(*worker_state,
                                                candidate ? current_identity : std::string_view{});
                 if (candidate) {
@@ -698,6 +717,15 @@ struct Manager::Impl final {
                 cancellation.is_cancellation_requested()) {
                 schedule_recoveries(std::move(recoveries));
                 return;
+            }
+            const bool recovering_current =
+                std::ranges::any_of(recoveries, [&input, epoch](const Recovery& recovery_value) {
+                    return recovery_value.root_identity == input.analysis_identity &&
+                           recovery_value.epoch == epoch;
+                });
+            if (input.request_compilation_info && compilation && !recovering_current &&
+                is_current(input.analysis_identity, epoch, cancellation)) {
+                compilation(input.analysis_identity, input.root, {}, input.generation, 0);
             }
             publish_unavailable(input, epoch, error, cancellation);
             if (errors) {
@@ -899,6 +927,7 @@ struct Manager::Impl final {
     DiagnosticsHandler diagnostics;
     ErrorHandler errors;
     UnavailableHandler unavailable;
+    CompilationHandler compilation;
     AnalysisOptions options;
     std::shared_ptr<AnalysisHooks> hooks;
     std::vector<std::unique_ptr<WorkerState>> worker_states;
@@ -932,18 +961,22 @@ struct Manager::Impl final {
 
 Manager::Manager(DiagnosticsHandler diagnostics, AnalysisOptions options,
                  std::shared_ptr<AnalysisHooks> hooks, ErrorHandler errors,
-                 UnavailableHandler unavailable)
+                 UnavailableHandler unavailable, CompilationHandler compilation)
     : implementation_{std::make_unique<Impl>(std::move(diagnostics), std::move(options),
                                              std::move(hooks), std::move(errors),
-                                             std::move(unavailable))} {}
+                                             std::move(unavailable), std::move(compilation))} {}
 
 Manager::~Manager() = default;
 
 bool Manager::analyze(AnalysisInput input) {
-    const auto root = input.root.document_uri().identity();
+    if (input.analysis_identity.empty()) {
+        input.analysis_identity = input.root.document_uri().identity();
+    }
+    const auto root = input.analysis_identity;
     const auto version = input.root.version();
     const auto root_uri = input.root.uri();
     const auto configuration = configuration_fingerprint(input.configuration);
+    const auto track_workspace = input.publish_diagnostics;
     const auto epoch = std::make_shared<std::uint64_t>();
     json_rpc::CancellationToken cancellation;
     const auto submitted = implementation_->scheduler.submit(
@@ -952,16 +985,19 @@ bool Manager::analyze(AnalysisInput input) {
          epoch](std::size_t worker, const json_rpc::CancellationToken& token) mutable {
             implementation->analyze(std::move(input), *epoch, worker, token);
         },
-        [implementation = implementation_.get(), root, root_uri, version, configuration, epoch] {
+        [implementation = implementation_.get(), root, root_uri, version, configuration, epoch,
+         track_workspace] {
             std::scoped_lock lock{implementation->metadata_mutex};
             *epoch = ++implementation->root_epochs[root];
-            implementation->metadata.insert_or_assign(
-                root, RootMetadata{.root_uri = root_uri,
-                                   .root_identity = root,
-                                   .version = version,
-                                   .configuration_fingerprint = configuration,
-                                   .dependency_identities = {},
-                                   .has_dynamic_includes = true});
+            if (track_workspace) {
+                implementation->metadata.insert_or_assign(
+                    root, RootMetadata{.root_uri = root_uri,
+                                       .root_identity = root,
+                                       .version = version,
+                                       .configuration_fingerprint = configuration,
+                                       .dependency_identities = {},
+                                       .has_dynamic_includes = true});
+            }
         });
     if (!submitted && implementation_->errors &&
         !implementation_->stopped.load(std::memory_order_acquire)) {
