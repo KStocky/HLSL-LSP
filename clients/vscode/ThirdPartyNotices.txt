@@ -1,15 +1,17 @@
 HLSL-LSP for Visual Studio Code contains third-party software.
 
-Microsoft DirectX Shader Compiler (DXC) 1.9.2607.13
----------------------------------------------------
+Microsoft DirectX Shader Compiler (DXC)
+--------------------------------------
 
-The Windows VSIX contains dxcompiler.dll and dxil.dll from the official
-Microsoft.Direct3D.DXC 1.9.2607.13 NuGet package. The Linux VSIX contains
-libdxcompiler.so from Microsoft's official DXC v1.9.2607 release asset
+The Windows VSIX contains dxcompiler.dll and dxil.dll from KStocky's
+DirectXShaderCompiler fork release 2609-kstocky.1, based on Microsoft's DirectX
+Shader Compiler. The Linux VSIX contains libdxcompiler.so from Microsoft's
+official DXC v1.9.2607 release asset
 linux_dxc_2026_07_29.x86_x64.tar.gz. cmake/Dxc.cmake pins SHA-256 checksums for
-both downloads. The NuGet ReleaseNotes.md states that LICENSE-LLVM.txt applies
-to all package files other than d3d12shader.h, which is not bundled. A verbatim
-copy of that license is included at licenses/dxc/LICENSE-LLVM.txt.
+both downloads. The Windows package's ReleaseNotes.md states that
+LICENSE-LLVM.txt applies to all package files other than d3d12shader.h, which is
+not bundled. A verbatim copy of that license is included at
+licenses/dxc/LICENSE-LLVM.txt.
 
 Production npm packages
 -----------------------

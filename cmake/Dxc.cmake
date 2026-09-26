@@ -1,6 +1,6 @@
 include_guard(GLOBAL)
 
-set(HLSL_DXC_VERSION "1.9.2607.13")
+set(HLSL_DXC_WINDOWS_RELEASE "2609-kstocky.1")
 set(HLSL_DXC_LINUX_RELEASE "v1.9.2607")
 set(DXC_INCLUDE_DIR "" CACHE PATH
     "Optional directory containing dxcisense.h; requires DXC_RUNTIME_DIR")
@@ -16,13 +16,13 @@ endif()
 if(NOT DXC_INCLUDE_DIR)
     if(WIN32)
         set(HLSL_DXC_DESCRIPTION
-            "official DXC NuGet package ${HLSL_DXC_VERSION}")
+            "KStocky DXC release ${HLSL_DXC_WINDOWS_RELEASE}")
         FetchContent_Declare(
             hlsl_dxc_package
             URL
-                "https://api.nuget.org/v3-flatcontainer/microsoft.direct3d.dxc/${HLSL_DXC_VERSION}/microsoft.direct3d.dxc.${HLSL_DXC_VERSION}.nupkg"
+                "https://github.com/KStocky/DirectXShaderCompiler/releases/download/${HLSL_DXC_WINDOWS_RELEASE}/Microsoft.Direct3D.DXC-x64.zip"
             URL_HASH
-                SHA256=5d6acd23089b2979a3c1d39b7e31227da989a47b5d9f3db57111ad4717ea537e
+                SHA256=217d6474cd381810a5dd92723a0c16b04740e72394806cb3acd0112d94129751
             DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
         FetchContent_MakeAvailable(hlsl_dxc_package)
         set(DXC_INCLUDE_DIR
