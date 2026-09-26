@@ -1327,6 +1327,34 @@ CompilationInfo compilation_info_from_compile(DxcCreateInstanceProc create_insta
     }
 
     CompilationReflection reflection_result;
+    reflection_result.statistics = CompilationStatistics{
+        .instruction_count = shader_desc.InstructionCount,
+        .temp_register_count = shader_desc.TempRegisterCount,
+        .temp_array_count = shader_desc.TempArrayCount,
+        .define_count = shader_desc.DefCount,
+        .declaration_count = shader_desc.DclCount,
+        .texture_normal_instruction_count = shader_desc.TextureNormalInstructions,
+        .texture_load_instruction_count = shader_desc.TextureLoadInstructions,
+        .texture_comparison_instruction_count = shader_desc.TextureCompInstructions,
+        .texture_bias_instruction_count = shader_desc.TextureBiasInstructions,
+        .texture_gradient_instruction_count = shader_desc.TextureGradientInstructions,
+        .float_instruction_count = shader_desc.FloatInstructionCount,
+        .int_instruction_count = shader_desc.IntInstructionCount,
+        .uint_instruction_count = shader_desc.UintInstructionCount,
+        .static_flow_control_count = shader_desc.StaticFlowControlCount,
+        .dynamic_flow_control_count = shader_desc.DynamicFlowControlCount,
+        .macro_instruction_count = shader_desc.MacroInstructionCount,
+        .array_instruction_count = shader_desc.ArrayInstructionCount,
+        .cut_instruction_count = shader_desc.CutInstructionCount,
+        .emit_instruction_count = shader_desc.EmitInstructionCount,
+        .geometry_shader_max_output_vertex_count = shader_desc.GSMaxOutputVertexCount,
+        .geometry_shader_instance_count = shader_desc.cGSInstanceCount,
+        .control_point_count = shader_desc.cControlPoints,
+        .patch_constant_parameter_count = shader_desc.PatchConstantParameters,
+        .barrier_instruction_count = shader_desc.cBarrierInstructions,
+        .interlocked_instruction_count = shader_desc.cInterlockedInstructions,
+        .texture_store_instruction_count = shader_desc.cTextureStoreInstructions,
+    };
     reflection_result.barrier_instruction_count = shader_desc.cBarrierInstructions;
     const auto psv_interpolations =
         extract_psv_signature_interpolations(*utils.get(), object_buffer);

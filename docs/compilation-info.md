@@ -85,6 +85,34 @@ shape:
   "reflection": {
     "available": true,
     "unavailableReason": "",
+    "statistics": {
+      "instructionCount": 42,
+      "tempRegisterCount": 3,
+      "tempArrayCount": 0,
+      "defineCount": 0,
+      "declarationCount": 5,
+      "floatInstructionCount": 18,
+      "intInstructionCount": 3,
+      "uintInstructionCount": 5,
+      "arrayInstructionCount": 0,
+      "macroInstructionCount": 0,
+      "textureNormalInstructionCount": 4,
+      "textureLoadInstructionCount": 1,
+      "textureComparisonInstructionCount": 2,
+      "textureBiasInstructionCount": 0,
+      "textureGradientInstructionCount": 1,
+      "textureStoreInstructionCount": 0,
+      "staticFlowControlCount": 2,
+      "dynamicFlowControlCount": 1,
+      "barrierInstructionCount": 0,
+      "interlockedInstructionCount": 0,
+      "cutInstructionCount": 0,
+      "emitInstructionCount": 0,
+      "geometryShaderMaxOutputVertexCount": 0,
+      "geometryShaderInstanceCount": 0,
+      "controlPointCount": 0,
+      "patchConstantParameterCount": 0
+    },
     "inputSignature": [
       {
         "semanticName": "SV_Position",
@@ -188,6 +216,36 @@ depends on the output:
 
 `threadGroupSize` is `null` for non-compute stages even when reflection is
 otherwise available.
+
+### Compiler statistics
+
+For reflected DXIL output, `reflection.statistics` contains exact counters
+reported by DXC through `D3D12_SHADER_DESC`. Both editor clients present these
+in a summary-first **Compiler statistics** section:
+
+- Total instructions, temporary registers, and temporary arrays.
+- Floating-point, signed-integer, unsigned-integer, array, and macro
+  instruction counts.
+- Normal, load, comparison, bias, gradient, and store texture operations.
+- Static and dynamic flow-control counts plus barrier and interlocked
+  instructions.
+- Compiler definition- and declaration-instruction counts.
+- Geometry cut/emit, maximum-output-vertex, and instance counts only for
+  geometry shaders.
+- Control-point and patch-constant-parameter counts only for hull and domain
+  shaders.
+
+These are compiler-authored properties of one compiled entry point, profile,
+variant, and source snapshot. They are useful for inspecting changes between
+otherwise comparable compilations, but they are **not** measurements or
+estimates of GPU execution time, occupancy, latency, or hardware performance.
+Counts can change with DXC version, optimization flags, target profile, or
+source structure, and should not be compared as if they were stable costs
+across different hardware or compilation settings.
+
+`statistics` is `null` when DXIL reflection is unavailable, including SPIR-V
+output and DXIL compiled with stripped reflection metadata. No client derives
+replacement counts by parsing source code or disassembly.
 
 ## Unsaved edits and active-variant refresh
 

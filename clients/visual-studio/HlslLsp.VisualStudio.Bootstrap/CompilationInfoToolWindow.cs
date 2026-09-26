@@ -140,6 +140,9 @@ internal sealed class CompilationInfoControl : UserControl
         {
             AddSection("Output", () => AddOutput(info.Output));
         }
+        AddSection(
+            "Compiler statistics",
+            () => AddCompilerStatistics(info.Stage, info.Reflection));
         AddSection("Disassembly", () => AddDisassembly(documentUri, info.Disassembly));
         AddSection("Reflection", () => AddReflection(info.Reflection));
         AnalysisViewPresentation.RestoreScrollOffset(scrollViewer, scrollOffset);
@@ -234,7 +237,7 @@ internal sealed class CompilationInfoControl : UserControl
             content,
             viewState,
             title,
-            title == "Output",
+            title == "Output" || title == "Compiler statistics",
             addBody);
 
     private void AddConfiguration(CompilationInfoModel info)
@@ -251,6 +254,52 @@ internal sealed class CompilationInfoControl : UserControl
     {
         AddKeyValue("Type", output.Type);
         AddKeyValue("Size", $"{output.Size} bytes");
+    }
+
+    private void AddCompilerStatistics(
+        string stage,
+        CompilationReflectionModel reflection)
+    {
+        if (reflection?.Available != true || reflection.Statistics == null)
+        {
+            content.Children.Add(new TextBlock
+            {
+                Text = reflection == null
+                    ? "Compiler statistics are unavailable because compilation " +
+                      "did not produce output."
+                    : string.IsNullOrEmpty(reflection.UnavailableReason)
+                        ? "DXC reflection did not provide shader statistics for this output."
+                        : reflection.UnavailableReason,
+                TextWrapping = TextWrapping.Wrap,
+                Foreground = reflection == null ? null : Brushes.Goldenrod,
+                Opacity = reflection == null ? 0.75 : 1.0,
+            });
+            return;
+        }
+
+        content.Children.Add(new TextBlock
+        {
+            Text = "Exact counts reported by DXC reflection. These are not GPU " +
+                   "timing, occupancy, latency, or hardware-performance estimates.",
+            TextWrapping = TextWrapping.Wrap,
+            Opacity = 0.75,
+            Margin = new Thickness(0, 0, 0, 6),
+        });
+        foreach (var group in CompilationStatisticsPresentation.Groups(
+                     stage,
+                     reflection.Statistics))
+        {
+            content.Children.Add(new TextBlock
+            {
+                Text = group.Title,
+                FontWeight = FontWeights.SemiBold,
+                Margin = new Thickness(0, 8, 0, 4),
+            });
+            foreach (var value in group.Values)
+            {
+                AddKeyValue(value.Key, value.Value.ToString());
+            }
+        }
     }
 
     // Renders the compiler-generated disassembly text produced by DXC's own

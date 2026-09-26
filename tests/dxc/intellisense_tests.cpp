@@ -1515,6 +1515,10 @@ TEST_CASE("Compilation info reflects effective configuration and DXIL resource r
     CHECK(info.disassembly->original_size == info.disassembly->displayed_size);
     REQUIRE(info.reflection.has_value());
     CHECK(info.reflection->available);
+    REQUIRE(info.reflection->statistics.has_value());
+    CHECK(info.reflection->statistics->instruction_count > 0);
+    CHECK(info.reflection->statistics->texture_normal_instruction_count > 0);
+    CHECK(info.reflection->statistics->barrier_instruction_count == 0);
 
     const auto find_resource = [&](std::string_view name) {
         return std::ranges::find(info.reflection->resources, name,
@@ -1609,6 +1613,9 @@ TEST_CASE("Compilation info exposes compute thread group size", "[dxc][compilati
     CHECK(info.reflection->thread_group_size->y == 4);
     CHECK(info.reflection->thread_group_size->z == 2);
     CHECK(info.reflection->barrier_instruction_count == 1);
+    REQUIRE(info.reflection->statistics.has_value());
+    CHECK(info.reflection->statistics->instruction_count > 0);
+    CHECK(info.reflection->statistics->barrier_instruction_count == 1);
     const auto output =
         std::ranges::find(info.reflection->resources, "Output",
                           &hlsl_intellisense::dxc::CompilationResourceBinding::name);
@@ -1893,6 +1900,7 @@ TEST_CASE("Compilation info reports SPIR-V output as successful without fabricat
     REQUIRE(info.reflection.has_value());
     CHECK_FALSE(info.reflection->available);
     CHECK_FALSE(info.reflection->unavailable_reason.empty());
+    CHECK_FALSE(info.reflection->statistics.has_value());
     CHECK(std::ranges::find(info.compiler_arguments, "-spirv") != info.compiler_arguments.end());
     // Root signatures are a Direct3D 12 binding-model concept with no SPIR-V
     // equivalent, so `root_signature` must still be non-null (reporting
@@ -2678,6 +2686,8 @@ float4 PSMain() : SV_Target { return psValue; }
     REQUIRE(vs_info.success);
     CHECK(vs_info.stage == "vertex");
     REQUIRE(vs_info.reflection.has_value());
+    REQUIRE(vs_info.reflection->statistics.has_value());
+    CHECK(vs_info.reflection->statistics->instruction_count > 0);
     REQUIRE(vs_info.reflection->resources.size() == 1);
     CHECK(vs_info.reflection->resources.front().name == "VSData");
     REQUIRE(vs_info.compatibility.has_value());

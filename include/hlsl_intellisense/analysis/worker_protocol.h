@@ -16,7 +16,7 @@
 namespace hlsl_intellisense::analysis {
 
 inline constexpr std::size_t analysis_worker_max_payload_size = std::size_t{64} * 1024U * 1024U;
-inline constexpr unsigned analysis_worker_protocol_version = 4;
+inline constexpr unsigned analysis_worker_protocol_version = 5;
 
 enum class WorkerAnalysisKind : std::uint8_t { cache_hit, parsed, reparsed };
 

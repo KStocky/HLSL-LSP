@@ -15,7 +15,8 @@ with:
 - Natural structure and constant-buffer memory layout inspection
 - Compiler-authoritative macro expansion at HLSL invocation sites
 - DXC-backed shader compilation inspection: effective configuration,
-  diagnostics, reflection, and compiler-generated disassembly
+  diagnostics, compiler statistics, reflection, and compiler-generated
+  disassembly
 - Resource binding inspection: register-space/class grouping, collisions,
   embedded root-signature state, and root-signature compatibility
 - DXC-backed semantic colouring and go-to-definition for symbols and include paths
@@ -150,8 +151,9 @@ limitations.
 
 A combined Shader Compilation view/command reports the effective compiler
 configuration, compiler success/failure and diagnostics, output type and
-size, DXC-generated disassembly with Copy and Save actions, DXC reflection
-(input/output signatures, resource bindings, and thread-group size), and
+size, compiler-authored instruction/resource-use statistics, DXC-generated
+disassembly with Copy and Save actions, DXC reflection (input/output
+signatures, resource bindings, and thread-group size), and
 include directories and resolved include paths for the active open HLSL
 document, backed by the cross-editor
 `hlsl/compilationInfo` protocol. It always reflects the document's current
