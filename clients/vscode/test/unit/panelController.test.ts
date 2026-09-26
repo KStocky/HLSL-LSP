@@ -181,6 +181,24 @@ void test("refresh() passes the request's thrown error through to resolve() as a
   assert.equal(controller.hasSuccessfulContent, false);
 });
 
+void test("refresh() reports request failures to the health surface", async () => {
+  const host = new RecordingHost();
+  const failures: unknown[] = [];
+  const controller = new PanelController<string>(
+    host,
+    () => Promise.reject(new Error("boom")),
+    testResolve,
+    new FakeScheduler(),
+    500,
+    undefined,
+    (error) => failures.push(error),
+  );
+  controller.open("file:///shader.hlsl");
+  await controller.refresh("file:///shader.hlsl");
+
+  assert.equal((failures[0] as Error).message, "boom");
+});
+
 void test("refresh() treats a non-Error thrown value with a generic failure message", async () => {
   const { controller, host } = makeController(() =>
     // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors

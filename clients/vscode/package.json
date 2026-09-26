@@ -33,6 +33,7 @@
     "onLanguage:hlsl",
     "onCommand:hlsl.restartServer",
     "onCommand:hlsl.stopServer",
+    "onCommand:hlsl.showStatus",
     "onCommand:hlsl.openEffectiveConfigurationFile",
     "onCommand:hlsl.showOutput",
     "onCommand:hlsl.showDiagnostics",
@@ -75,6 +76,12 @@
       }
     ],
     "commands": [
+      {
+        "command": "hlsl.showStatus",
+        "title": "HLSL: Show Status",
+        "shortTitle": "Status and Recovery",
+        "category": "HLSL"
+      },
       {
         "command": "hlsl.restartServer",
         "title": "HLSL: Restart Language Server",
@@ -166,24 +173,29 @@
       ],
       "hlsl.editorContext": [
         {
-          "command": "hlsl.openEffectiveConfigurationFile",
+          "command": "hlsl.showStatus",
           "when": "editorLangId == hlsl",
           "group": "1_configuration@0"
         },
         {
-          "command": "hlsl.selectVariant",
+          "command": "hlsl.openEffectiveConfigurationFile",
           "when": "editorLangId == hlsl",
           "group": "1_configuration@1"
         },
         {
-          "command": "hlsl.showCompilationInfo",
+          "command": "hlsl.selectVariant",
           "when": "editorLangId == hlsl",
           "group": "1_configuration@2"
         },
         {
-          "command": "hlsl.showPreprocessorExplorer",
+          "command": "hlsl.showCompilationInfo",
           "when": "editorLangId == hlsl",
           "group": "1_configuration@3"
+        },
+        {
+          "command": "hlsl.showPreprocessorExplorer",
+          "when": "editorLangId == hlsl",
+          "group": "1_configuration@4"
         },
         {
           "command": "hlsl.expandMacro",

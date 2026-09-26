@@ -278,6 +278,31 @@ public sealed class HlslLanguageClientCustomMessageTests : IDisposable
         Assert.True(await WaitOrTimeoutAsync(callbackInvoked.Task));
     }
 
+    [Fact]
+    public async Task ClientDxcRuntimeRequest_DeserializesRuntimeIdentity()
+    {
+        var client = new HlslLanguageClient(
+            "2021",
+            string.Empty,
+            string.Empty,
+            (_, _) => Task.CompletedTask,
+            _ => Task.CompletedTask);
+        using var serverRpc = new JsonRpc(
+            serverStream,
+            serverStream,
+            new DxcRuntimeTarget());
+        using var clientRpc = new JsonRpc(clientStream);
+        serverRpc.StartListening();
+        clientRpc.StartListening();
+        await client.AttachForCustomMessageAsync(clientRpc);
+
+        var runtime = await client.GetDxcRuntimeAsync(CancellationToken.None);
+
+        Assert.Equal("bundled", runtime.Source);
+        Assert.Equal("1.9.2607.13", runtime.Version);
+        Assert.False(runtime.RequiresRestart);
+    }
+
     private sealed class DidChangeActiveVariantCaptureTarget
     {
         private readonly TaskCompletionSource<string> received;
@@ -294,6 +319,20 @@ public sealed class HlslLanguageClientCustomMessageTests : IDisposable
         {
             received.TrySetResult(parameters?.Variant ?? string.Empty);
         }
+    }
+
+    private sealed class DxcRuntimeTarget
+    {
+        [JsonRpcMethod(
+            "hlsl/dxcRuntime",
+            UseSingleObjectParameterDeserialization = true)]
+        public HlslLsp.VisualStudio.Bootstrap.HlslDxcRuntimeModel DxcRuntime(
+            object parameters)
+            => new()
+            {
+                Source = "bundled",
+                Version = "1.9.2607.13",
+            };
     }
 
     private sealed class WatchedFileCaptureTarget

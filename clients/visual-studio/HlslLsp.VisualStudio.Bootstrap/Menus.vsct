@@ -48,6 +48,13 @@
           <ButtonText>Select Shader Variant</ButtonText>
         </Strings>
       </Button>
+      <Button guid="guidHlslLspCommands" id="ShowStatus" priority="0x00ff" type="Button">
+        <Parent guid="guidHlslLspCommands" id="HlslContextGroup"/>
+        <CommandFlag>DynamicVisibility</CommandFlag>
+        <Strings>
+          <ButtonText>HLSL Status</ButtonText>
+        </Strings>
+      </Button>
       <Button guid="guidHlslLspCommands" id="OpenEffectiveConfiguration" priority="0x0102" type="Button">
         <Parent guid="guidHlslLspCommands" id="HlslContextGroup"/>
         <CommandFlag>DynamicVisibility</CommandFlag>
@@ -117,6 +124,7 @@
       <IDSymbol name="ShowComputeVisualization" value="0x0107"/>
       <IDSymbol name="OpenEffectiveConfiguration" value="0x0108"/>
       <IDSymbol name="ExpandMacro" value="0x0109"/>
+      <IDSymbol name="ShowStatus" value="0x010a"/>
     </GuidSymbol>
   </Symbols>
 </CommandTable>

@@ -54,6 +54,12 @@ Visual Studio also exposes its custom call-hierarchy window there; Visual
 Studio Code keeps its native **Show Call Hierarchy** command. The submenu
 remains hidden in non-HLSL editors.
 
+Both clients expose **HLSL > Status and Recovery**, backed by a compact status
+indicator. It distinguishes server, DXC runtime, configuration, and analysis
+failures; shows the active shader context; and keeps Restart, Open Output, Open
+Configuration, and Copy Diagnostics actions beside the detected state. See
+[status and recovery](docs/status-and-recovery.md).
+
 The Visual Studio variant picker additionally recognizes configured custom
 shader extensions. Both clients remove variants that do not apply to the
 active document.

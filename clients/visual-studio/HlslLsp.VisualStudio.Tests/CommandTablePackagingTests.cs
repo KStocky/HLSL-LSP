@@ -51,6 +51,18 @@ public sealed class CommandTablePackagingTests
     }
 
     [Fact]
+    public void BootstrapAssembly_ContainsHlslStatusToolWindow()
+    {
+        var assemblyPath =
+            Path.Combine(AppContext.BaseDirectory, "HlslLsp.VisualStudio.Bootstrap.dll");
+        var assemblyBytes = File.ReadAllBytes(assemblyPath);
+        var metadata = Encoding.UTF8.GetString(assemblyBytes);
+
+        Assert.Contains("HlslStatusToolWindow", metadata);
+        Assert.Contains("ShowStatusAsync", metadata);
+    }
+
+    [Fact]
     public void CommandTable_RegistersAllShaderToolsInTheHlslContextMenu()
     {
         var commandTablePath = Path.GetFullPath(
@@ -72,6 +84,10 @@ public sealed class CommandTablePackagingTests
             Assert.Equal(label, (string)button.Descendants(ns + "ButtonText").Single());
         }
 
+        AssertContextCommand(
+            "ShowStatus",
+            "HlslContextGroup",
+            "HLSL Status");
         AssertContextCommand(
             "OpenEffectiveConfiguration",
             "HlslContextGroup",
@@ -120,6 +136,7 @@ public sealed class CommandTablePackagingTests
     [InlineData(0x0107, "ShowComputeVisualization", "ComputeVisualization")]
     [InlineData(0x0108, "OpenEffectiveConfiguration", "OpenEffectiveConfiguration")]
     [InlineData(0x0109, "ExpandMacro", "MacroExpansion")]
+    [InlineData(0x010a, "ShowStatus", "Status")]
     public void RuntimeCommandIds_PreserveExistingBindings(
         int commandId,
         string commandName,

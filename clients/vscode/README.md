@@ -17,11 +17,12 @@ code --install-extension hlsl-lsp-vscode.vsix
 The release VSIX contains the Windows x64 `hlsl-lsp.exe`, `dxcompiler.dll`, and
 `dxil.dll`, plus the Linux x64 `hlsl-lsp` and `libdxcompiler.so`. Opening an
 HLSL document starts the matching bundled server automatically.
-Right-click an HLSL editor to open the **HLSL** submenu for opening the
-effective configuration file, shader variants, compilation, resource bindings,
-preprocessor exploration, memory layout, compute visualization, and
-entry-point data flow. The same actions remain available from the Command
-Palette; call hierarchy uses VS Code's native **Show Call Hierarchy** action.
+Right-click an HLSL editor to open the **HLSL** submenu for status and recovery,
+opening the effective configuration file, shader variants, compilation,
+resource bindings, preprocessor exploration, memory layout, compute
+visualization, and entry-point data flow. The same actions remain available
+from the Command Palette; call hierarchy uses VS Code's native **Show Call
+Hierarchy** action.
 
 Additional extensions can be associated with the contributed `hlsl` language
 through VS Code's built-in setting:
@@ -90,10 +91,15 @@ also resolved from that folder. Changing the active editor never changes the
 selected server or settings. Reordering, adding, or removing workspace folders
 restarts the client so the first-folder selection remains consistent.
 
-Use **HLSL: Restart Language Server**, **HLSL: Stop Language Server**, **HLSL:
-Show Language Server Output**, and **HLSL: Show Client Diagnostics** to manage
-and inspect the selected process. Shutdown is performed through the language
-client and is scoped to the child process launched by this extension.
+Use **HLSL: Show Status** or the compact HLSL status-bar item to inspect the
+server lifecycle, active DXC version, effective shader context, and last
+actionable failure. The status view keeps Restart, Open Output, Open
+Configuration, and Copy Diagnostics actions together. **HLSL: Stop Language
+Server**, **HLSL: Show Language Server Output**, and **HLSL: Show Client
+Diagnostics** remain available for direct process control and detailed local
+logs. Shutdown is performed through the language client and is scoped to the
+child process launched by this extension. See
+[status and recovery](../../docs/status-and-recovery.md).
 
 ## Shader variants
 
