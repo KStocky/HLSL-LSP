@@ -84,6 +84,9 @@ void test("entry point data flow HTML renders a reachable function with its own 
   assert.match(html, /<a[^>]*>square<\/a>/);
   assert.match(html, /float square\(float x\)/);
   assert.match(html, /<td>0<\/td>/);
+  assert.match(html, /class="analysis-summary"/);
+  assert.match(html, /data-state-key="data-flow-reachable-section" open/);
+  assert.match(html, /data-filter-input="data-flow-reachable"/);
 });
 
 void test("entry point data flow HTML links a reachable function through the allowlisted command, using its own selectionRange", () => {

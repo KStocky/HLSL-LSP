@@ -119,9 +119,9 @@ export function escapeHtml(value: string): string {
 // The one command this view's webview may invoke through a plain
 // `command:` URI. Webview panels pass
 // `enableCommandUris: [openPreprocessorLocationCommand]` (never `true`) so
-// no other command can ever be triggered from this view's static HTML, and
-// `enableScripts` stays `false` throughout -- no script execution is needed
-// at all for navigation.
+// no other command can ever be triggered from this view. Its small local
+// script only preserves disclosure/filter/scroll state and never posts
+// messages or constructs command URIs.
 export const openPreprocessorLocationCommand =
   "hlsl.preprocessorExplorer.openLocation";
 
@@ -161,6 +161,13 @@ const statusLabels: Record<PreprocessorIncludeStatus, string> = {
   missing: "Missing",
   cyclic: "Cyclic",
   dynamic: "Dynamic",
+};
+
+const statusTones: Record<PreprocessorIncludeStatus, string> = {
+  resolved: "success",
+  missing: "error",
+  cyclic: "warning",
+  dynamic: "neutral",
 };
 
 const kindLabels: Record<PreprocessorIncludeKind, string> = {
@@ -216,7 +223,7 @@ function includeRow(fileUri: string, include: PreprocessorInclude): string {
               range: pointRange({ line: 0, character: 0 }),
             },
           )})</span>`;
-  return `<tr><td>${directiveLink}${expansion}</td><td>${escapeHtml(kindLabels[include.kind])}</td><td><span class="status ${include.status}">${escapeHtml(statusLabels[include.status])}</span></td><td>${target}${mapping}${configurationOrigin}</td></tr>`;
+  return `<tr ${filterableAttributes("preprocessor-includes", `${fileUri} ${include.path} ${include.expandedPath ?? ""} ${include.logicalPath ?? ""} ${include.resolvedUri ?? ""} ${include.status} ${include.kind}`)}><td>${directiveLink}${expansion}</td><td>${escapeHtml(kindLabels[include.kind])}</td><td><span class="status ${include.status} status-badge ${statusTones[include.status]}">${escapeHtml(statusLabels[include.status])}</span></td><td>${target}${mapping}${configurationOrigin}</td></tr>`;
 }
 
 function fileSection(file: PreprocessorFile): string {
@@ -247,7 +254,7 @@ function skippedRegionRow(region: PreprocessorSkippedRegion): string {
   const label =
     `${String(region.start.line + 1)}:${String(region.start.character + 1)}` +
     ` \u2013 ${String(region.end.line + 1)}:${String(region.end.character + 1)}`;
-  return `<tr><td>${locationLink(region.uri, { uri: region.uri, range: pointRange(region.start) })}</td><td>${locationLink(label, location)}</td></tr>`;
+  return `<tr ${filterableAttributes("preprocessor-skipped", `${region.uri} ${label}`)}><td>${locationLink(region.uri, { uri: region.uri, range: pointRange(region.start) })}</td><td>${locationLink(label, location)}</td></tr>`;
 }
 
 function macroRow(macro: PreprocessorMacro): string {
@@ -269,7 +276,7 @@ function macroRow(macro: PreprocessorMacro): string {
           uri: macro.originUri,
           range: pointRange({ line: 0, character: 0 }),
         });
-  return `<tr><td>${label}</td><td><code>${escapeHtml(macro.value)}</code></td><td>${escapeHtml(sourceLabel)}</td><td>${origin}</td></tr>`;
+  return `<tr ${filterableAttributes("preprocessor-macros", `${macro.name} ${macro.value} ${sourceLabel} ${macro.origin ?? ""}`)}><td>${label}</td><td><code>${escapeHtml(macro.value)}</code></td><td>${escapeHtml(sourceLabel)}</td><td>${origin}</td></tr>`;
 }
 
 function settingValueText(setting: PreprocessorSetting): string {
@@ -322,7 +329,8 @@ export function preprocessorExplorerHtml(
       ? `<p class="unavailable">Unavailable: ${escapeHtml(skippedRegionsCapability.reason ?? "compiler analysis is not supported for this source snapshot.")}</p>`
       : report.skippedRegions.length === 0
         ? `<p class="muted">No preprocessor-skipped regions were reported.</p>`
-        : `<table>
+        : `${analysisFilterHtml("preprocessor-skipped", "Filter skipped regions", "File or range…")}
+<table>
 <thead><tr><th>File</th><th>Range</th></tr></thead>
 <tbody>${report.skippedRegions.map((region) => skippedRegionRow(region)).join("")}</tbody>
 </table>`;
@@ -333,7 +341,8 @@ export function preprocessorExplorerHtml(
       ? `<p class="unavailable">Unavailable: ${escapeHtml(compilerMacrosCapability.reason ?? "compiler macro analysis is not supported for this source snapshot.")}</p>`
       : report.macros.length === 0
         ? `<p class="muted">No macros were reported.</p>`
-        : `<table>
+        : `${analysisFilterHtml("preprocessor-macros", "Filter macros", "Name, value, source, origin…")}
+<table>
 <thead><tr><th>Name</th><th>Value</th><th>Source</th><th>Origin</th></tr></thead>
 <tbody>${report.macros.map((macro) => macroRow(macro)).join("")}</tbody>
 </table>`;
@@ -345,6 +354,36 @@ export function preprocessorExplorerHtml(
 <thead><tr><th>Setting</th><th>Value</th><th>Origin</th></tr></thead>
 <tbody>${report.settings.map((setting) => settingRow(setting)).join("")}</tbody>
 </table>`;
+  const includeCount = report.files.reduce(
+    (count, file) => count + file.includes.length,
+    0,
+  );
+  const issueCount = report.files.reduce(
+    (count, file) =>
+      count +
+      file.includes.filter((include) => include.status !== "resolved").length,
+    0,
+  );
+  const skippedUnavailable = skippedRegionsCapability?.available === false;
+  const macrosUnavailable = compilerMacrosCapability?.available === false;
+  const summary = analysisSummaryHtml([
+    { label: "Files", value: String(report.files.length), tone: "neutral" },
+    {
+      label: "Includes",
+      value: String(includeCount),
+      tone: issueCount === 0 ? "success" : "warning",
+    },
+    {
+      label: "Include issues",
+      value: String(issueCount),
+      tone: issueCount === 0 ? "success" : "warning",
+    },
+    {
+      label: "Macros",
+      value: macrosUnavailable ? "Unavailable" : String(report.macros.length),
+      tone: macrosUnavailable ? "warning" : "neutral",
+    },
+  ]);
 
   return `<!doctype html>
 <html lang="en">
@@ -371,20 +410,20 @@ export function preprocessorExplorerHtml(
   .status.cyclic { color: var(--vscode-editorWarning-foreground); border-color: var(--vscode-editorWarning-foreground); }
   .status.dynamic { color: var(--vscode-descriptionForeground); border-color: var(--vscode-descriptionForeground); }
   .source { color: var(--vscode-descriptionForeground); font-size: .85em; margin-left: .35rem; }
+${analysisWebviewStyles}
 </style>
 </head>
 <body>
 <h1>Preprocessor Explorer</h1>
+${summary}
 ${effectiveContextHeaderHtml(report.context)}
 ${report.context === undefined ? `<div class="summary">${escapeHtml(report.rootUri)}</div>` : ""}
 ${diagnostics}
-${files}
-<h2>Preprocessor-skipped regions</h2>
-${skippedRegions}
-<h2>Macros</h2>
-${macros}
-<h2>Effective settings</h2>
-${settings}
+${analysisDetailsHtml("preprocessor-includes-section", "Files and includes", `<section><h2>Files and includes</h2>${includeCount === 0 ? "" : analysisFilterHtml("preprocessor-includes", "Filter includes", "File, path, status, kind…")}${files}</section>`, { meta: `${String(report.files.length)} files · ${String(includeCount)} includes`, open: true })}
+${analysisDetailsHtml("preprocessor-skipped-section", "Preprocessor-skipped regions", `<section><h2>Preprocessor-skipped regions</h2>${skippedRegions}</section>`, { meta: skippedUnavailable ? "Unavailable" : String(report.skippedRegions.length), open: skippedUnavailable })}
+${analysisDetailsHtml("preprocessor-macros-section", "Macros", `<section><h2>Macros</h2>${macros}</section>`, { meta: macrosUnavailable ? "Unavailable" : String(report.macros.length), open: macrosUnavailable })}
+${analysisDetailsHtml("preprocessor-settings", "Effective settings", `<section><h2>Effective settings</h2>${settings}</section>`, { meta: String(report.settings.length) })}
+${analysisWebviewScript}
 </body>
 </html>`;
 }
@@ -526,3 +565,11 @@ import {
   EffectiveShaderContext,
   effectiveContextHeaderHtml,
 } from "./effectiveContext";
+import {
+  analysisDetailsHtml,
+  analysisFilterHtml,
+  analysisSummaryHtml,
+  analysisWebviewScript,
+  analysisWebviewStyles,
+  filterableAttributes,
+} from "./webviewUi";

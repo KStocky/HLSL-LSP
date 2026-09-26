@@ -165,7 +165,12 @@ void test("memory layout HTML renders nested offsets and escapes source names", 
 
   assert.match(html, /Constant-buffer packing/);
   assert.match(html, /<td>16<\/td>/);
-  assert.match(html, /allocation 32 bytes/);
+  assert.match(
+    html,
+    /<span class="summary-label">Allocation<\/span><strong>32 bytes<\/strong>/,
+  );
+  assert.match(html, /data-state-key="memory-diagram" open/);
+  assert.match(html, /data-filter-input="memory-members"/);
   assert.doesNotMatch(html, /Example<script>/);
   assert.match(html, /Example&lt;script&gt;/);
 });

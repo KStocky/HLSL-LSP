@@ -170,6 +170,9 @@ void test("resource bindings HTML groups resources by register space, then class
   assert(spaceZero >= 0 && spaceOneSrv >= 0 && spaceOneSampler >= 0);
   assert(spaceZero < spaceOneSrv);
   assert(spaceOneSrv < spaceOneSampler);
+  assert.match(html, /class="analysis-summary"/);
+  assert.match(html, /data-state-key="resource-bindings-resources" open/);
+  assert.match(html, /data-filter-input="resource-bindings"/);
 });
 
 void test("resource bindings HTML renders collisions with class and space context", () => {
@@ -224,6 +227,26 @@ void test("resource bindings HTML reports no collisions when none are found", ()
   assert.match(
     html,
     /No provable register-range collisions were found between distinct resources/,
+  );
+});
+
+void test("resource bindings summary reports collisions as unavailable when reflection is unavailable", () => {
+  const html = resourceBindingsHtml(
+    baseInfo({
+      reflection: baseReflection({
+        available: false,
+        unavailableReason: "DXIL reflection is unavailable.",
+      }),
+    }),
+  );
+
+  assert.match(
+    html,
+    /<div class="summary-item warning"><span class="summary-label">Collisions<\/span><strong>Unavailable<\/strong><\/div>/,
+  );
+  assert.doesNotMatch(
+    html,
+    /<div class="summary-item success"><span class="summary-label">Collisions<\/span><strong>0<\/strong><\/div>/,
   );
 });
 

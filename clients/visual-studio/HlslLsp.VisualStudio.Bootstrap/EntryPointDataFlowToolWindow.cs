@@ -108,24 +108,30 @@ public sealed class EntryPointDataFlowToolWindow : ToolWindowPane, IAnalysisTrac
 internal sealed class EntryPointDataFlowControl : UserControl
 {
     private readonly StackPanel content = new();
+    private readonly AnalysisViewState viewState = new();
+    private readonly ScrollViewer scrollViewer;
+    private EntryPointDataFlowModel currentReport;
     private bool hasContent;
 
     internal EntryPointDataFlowControl()
     {
         ThreadHelper.ThrowIfNotOnUIThread();
         VisualStudioTheme.ApplyToolWindowTheme(this);
-        Content = VisualStudioTheme.ApplyScrollViewerStyle(new ScrollViewer
+        scrollViewer = VisualStudioTheme.ApplyScrollViewerStyle(new ScrollViewer
         {
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
             Content = content,
         });
+        Content = scrollViewer;
         SetReport(null);
     }
 
     internal void SetReport(EntryPointDataFlowModel report)
     {
         ThreadHelper.ThrowIfNotOnUIThread();
+        var scrollOffset = AnalysisViewPresentation.CaptureScrollOffset(scrollViewer);
+        currentReport = report;
         hasContent = report != null;
         content.Children.Clear();
         content.Margin = new Thickness(12);
@@ -137,21 +143,38 @@ internal sealed class EntryPointDataFlowControl : UserControl
                        "HLSL > Entry-Point Data Flow.",
                 TextWrapping = TextWrapping.Wrap,
             });
+            AnalysisViewPresentation.RestoreScrollOffset(scrollViewer, scrollOffset);
             return;
         }
 
         AddHeader(report);
         if (!report.Found)
         {
+            AnalysisViewPresentation.AddSummary(
+                content,
+                AnalysisSummaryKind.Unavailable,
+                "Entry point was not resolved",
+                EntryPointDataFlowDisplay.NotFoundMessage(report.Explanation));
             content.Children.Add(new TextBlock
             {
                 Text = EntryPointDataFlowDisplay.NotFoundMessage(report.Explanation),
                 Foreground = Brushes.Goldenrod,
                 TextWrapping = TextWrapping.Wrap,
             });
+            AnalysisViewPresentation.RestoreScrollOffset(scrollViewer, scrollOffset);
             return;
         }
 
+        AnalysisViewPresentation.AddSummary(
+            content,
+            report.Truncated
+                ? AnalysisSummaryKind.Attention
+                : AnalysisSummaryKind.Success,
+            $"{report.ReachableFunctions?.Count ?? 0} reachable function(s)",
+            $"{report.GlobalAccesses?.Count ?? 0} global/resource access(es); " +
+            $"{report.UnreachableFunctions?.Count ?? 0} unreachable function(s); " +
+            $"{report.UnusedDeclarations?.Count ?? 0} unused declaration(s)." +
+            (report.Truncated ? " One or more result sets are truncated." : string.Empty));
         if (report.FunctionsVisitedTruncated)
         {
             content.Children.Add(new TextBlock
@@ -164,6 +187,11 @@ internal sealed class EntryPointDataFlowControl : UserControl
                 Margin = new Thickness(0, 0, 0, 8),
             });
         }
+        AnalysisViewPresentation.AddFilter(
+            content,
+            viewState,
+            "Filter data-flow results",
+            () => SetReport(currentReport));
 
         AddSection("Reachable functions", () => AddReachableFunctions(report.ReachableFunctions));
         AddSection(
@@ -180,6 +208,7 @@ internal sealed class EntryPointDataFlowControl : UserControl
             () => AddUnusedDeclarations(
                 report.UnusedDeclarations,
                 report.UnusedDeclarationsTruncated));
+        AnalysisViewPresentation.RestoreScrollOffset(scrollViewer, scrollOffset);
     }
 
     internal void SetError(string message, bool preserveContent)
@@ -222,16 +251,12 @@ internal sealed class EntryPointDataFlowControl : UserControl
     }
 
     private void AddSection(string title, Action addBody)
-    {
-        content.Children.Add(new TextBlock
-        {
-            Text = title,
-            FontSize = 14,
-            FontWeight = FontWeights.SemiBold,
-            Margin = new Thickness(0, 14, 0, 6),
-        });
-        addBody();
-    }
+        => AnalysisViewPresentation.AddSection(
+            content,
+            viewState,
+            title,
+            title is "Reachable functions" or "Global & resource accesses",
+            addBody);
 
     // --- Reachable functions ------------------------------------------
 
@@ -253,6 +278,13 @@ internal sealed class EntryPointDataFlowControl : UserControl
         AddTableHeaderRow(grid, row++, new[] { "Function", "Depth", "Recursion" });
         foreach (var node in reachable)
         {
+            if (!viewState.Matches(
+                    node.Function?.Name,
+                    node.Function?.Detail,
+                    node.Function?.Uri))
+            {
+                continue;
+            }
             grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             AddNavigableCell(grid, row, 0, FunctionLabel(node.Function), node.Function);
             AddPlainCell(grid, row, 1, EntryPointDataFlowDisplay.DepthLabel(node.Depth));
@@ -304,6 +336,14 @@ internal sealed class EntryPointDataFlowControl : UserControl
         AddTableHeaderRow(grid, row++, new[] { "Global / resource", "Access" });
         foreach (var access in accesses)
         {
+            if (!viewState.Matches(
+                    access.Name,
+                    access.QualifiedName,
+                    access.Access,
+                    access.Uri))
+            {
+                continue;
+            }
             grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             var displayName = string.IsNullOrEmpty(access.QualifiedName)
                 ? access.Name
@@ -373,6 +413,10 @@ internal sealed class EntryPointDataFlowControl : UserControl
         }
         foreach (var function in unreachable)
         {
+            if (!viewState.Matches(function.Name, function.Detail, function.Uri))
+            {
+                continue;
+            }
             var line = new TextBlock
             {
                 TextWrapping = TextWrapping.Wrap,
@@ -417,6 +461,10 @@ internal sealed class EntryPointDataFlowControl : UserControl
         }
         foreach (var declaration in unused)
         {
+            if (!viewState.Matches(declaration.Name, declaration.Uri))
+            {
+                continue;
+            }
             var line = new TextBlock
             {
                 TextWrapping = TextWrapping.Wrap,

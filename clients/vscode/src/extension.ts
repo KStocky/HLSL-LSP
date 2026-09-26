@@ -2388,7 +2388,7 @@ export async function activate(
             (document) => document.uri.toString() === uri.toString(),
           );
     panel.webview.options = {
-      enableScripts: false,
+      enableScripts: true,
       enableCommandUris: analysisPanelCommandUris(kind),
     };
 
@@ -2755,7 +2755,7 @@ export async function activate(
             "hlslMacroExpansion",
             "HLSL Macro Expansion",
             vscode.ViewColumn.Beside,
-            { enableScripts: false },
+            { enableScripts: true, retainContextWhenHidden: true },
           );
           macroExpansionPanel = panel;
           panel.onDidDispose(() => {
@@ -2849,7 +2849,8 @@ export async function activate(
             `Memory Layout: ${layout.name || layout.type}`,
             vscode.ViewColumn.Beside,
             {
-              enableScripts: false,
+              enableScripts: true,
+              retainContextWhenHidden: true,
               enableCommandUris: analysisPanelCommandUris("memoryLayout"),
             },
           );
@@ -2913,12 +2914,11 @@ export async function activate(
           "Shader Compilation",
           vscode.ViewColumn.Beside,
           {
-            enableScripts: false,
-            // No script execution is used for Copy/Save: the panel's
-            // action links go through plain `command:` URIs, and this
-            // allowlists only Copy, Save, and this panel's Refresh -- never
-            // `true` (which would let static HTML trigger arbitrary
-            // commands).
+            enableScripts: true,
+            retainContextWhenHidden: true,
+            // Copy/Save links still go through plain `command:` URIs. The
+            // local script only preserves disclosure/filter/scroll state,
+            // and this allowlists only Copy, Save, and panel controls.
             enableCommandUris: analysisPanelCommandUris("compilationInfo"),
           },
         );
@@ -3029,11 +3029,10 @@ export async function activate(
           "Resource Bindings",
           vscode.ViewColumn.Beside,
           {
-            enableScripts: false,
-            // No script execution is used for navigation: resource/collision
-            // labels link through plain `command:` URIs, and this allowlists
-            // only navigation and this panel's Refresh -- never `true` (which
-            // would let static HTML trigger arbitrary commands).
+            enableScripts: true,
+            retainContextWhenHidden: true,
+            // Navigation remains restricted to the explicit command
+            // allowlist; the local script only preserves view state.
             enableCommandUris: analysisPanelCommandUris("resourceBindings"),
           },
         );
@@ -3128,12 +3127,10 @@ export async function activate(
             "Preprocessor Explorer",
             vscode.ViewColumn.Beside,
             {
-              enableScripts: false,
-              // No script execution is used for navigation: file/include/
-              // macro/skipped-region links go through plain `command:`
-              // URIs, and this allowlists only navigation and this panel's
-              // Refresh -- never `true` (which would let static HTML trigger
-              // arbitrary commands).
+              enableScripts: true,
+              retainContextWhenHidden: true,
+              // Navigation remains restricted to the explicit command
+              // allowlist; the local script only preserves view state.
               enableCommandUris: analysisPanelCommandUris(
                 "preprocessorExplorer",
               ),
@@ -3231,12 +3228,10 @@ export async function activate(
           "Entry-Point Data Flow",
           vscode.ViewColumn.Beside,
           {
-            enableScripts: false,
-            // No script execution is used for navigation: entry
-            // point/function/global-access links go through plain
-            // `command:` URIs, and this allowlists only navigation and this
-            // panel's Refresh -- never `true` (which would let static
-            // HTML trigger arbitrary commands).
+            enableScripts: true,
+            retainContextWhenHidden: true,
+            // Navigation remains restricted to the explicit command
+            // allowlist; the local script only preserves view state.
             enableCommandUris: analysisPanelCommandUris("entryPointDataFlow"),
           },
         );
@@ -3330,7 +3325,8 @@ export async function activate(
             "Compute Visualization",
             vscode.ViewColumn.Beside,
             {
-              enableScripts: false,
+              enableScripts: true,
+              retainContextWhenHidden: true,
               enableCommandUris: analysisPanelCommandUris(
                 "computeVisualization",
               ),

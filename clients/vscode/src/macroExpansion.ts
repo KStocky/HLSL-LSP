@@ -3,6 +3,12 @@ import {
   EffectiveShaderContext,
   effectiveContextHeaderHtml,
 } from "./effectiveContext";
+import {
+  analysisDetailsHtml,
+  analysisSummaryHtml,
+  analysisWebviewScript,
+  analysisWebviewStyles,
+} from "./webviewUi";
 
 export interface MacroExpansion {
   readonly name: string;
@@ -66,6 +72,12 @@ export function macroExpansionHtml(result: MacroExpansion): string {
     result.context === undefined
       ? ""
       : effectiveContextHeaderHtml(result.context);
+  const summary = analysisSummaryHtml([
+    { label: "Macro", value: result.name, tone: "info" },
+    { label: "Expansion", value: "Available", tone: "success" },
+  ]);
+  const invocation = `<section><h2>Invocation</h2><pre><code>${escapeHtml(result.invocation)}</code></pre></section>`;
+  const expansion = `<section><h2>Expanded result</h2><pre><code>${escapeHtml(result.expansion)}</code></pre></section>`;
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -78,19 +90,20 @@ h1 { font-size:1.35rem; margin:0 0 1rem; }
 h2 { font-size:1rem; margin:1.1rem 0 .4rem; }
 pre { margin:0; padding:.75rem; overflow:auto; border:1px solid var(--vscode-panel-border); border-radius:4px; background:var(--vscode-textCodeBlock-background); }
 code { font-family:var(--vscode-editor-font-family); font-size:var(--vscode-editor-font-size); }
+${analysisWebviewStyles}
 </style>
 </head>
 <body>
 <h1>Macro Expansion: ${escapeHtml(result.name)}</h1>
+${summary}
 ${context}
-<h2>Invocation</h2>
-<pre><code>${escapeHtml(result.invocation)}</code></pre>
-<h2>Expanded result</h2>
-<pre><code>${escapeHtml(result.expansion)}</code></pre>
+${analysisDetailsHtml("macro-invocation", "Invocation", invocation)}
+${analysisDetailsHtml("macro-expansion", "Expanded result", expansion, { open: true })}
+${analysisWebviewScript}
 </body>
 </html>`;
 }
 
 export function macroExpansionMessageHtml(message: string): string {
-  return `<!doctype html><html lang="en"><body style="color:var(--vscode-foreground);background:var(--vscode-editor-background);font-family:var(--vscode-font-family);padding:1rem 1.5rem;"><h1>Macro Expansion</h1><p>${escapeHtml(message)}</p></body></html>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{color:var(--vscode-foreground);background:var(--vscode-editor-background);font-family:var(--vscode-font-family);padding:1rem 1.5rem}${analysisWebviewStyles}</style></head><body><h1>Macro Expansion</h1>${analysisSummaryHtml([{ label: "Expansion", value: "Unavailable", tone: "warning" }])}<p>${escapeHtml(message)}</p>${analysisWebviewScript}</body></html>`;
 }

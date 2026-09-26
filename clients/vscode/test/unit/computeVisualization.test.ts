@@ -141,6 +141,9 @@ void test("compute visualization renders geometry and explicit unknown sections"
   assert.match(html, /Compiler instruction count: 1/);
   assert.match(html, /No compiler-authoritative wave-size requirement/);
   assert.match(html, /Occupancy is intentionally not guessed/);
+  assert.match(html, /class="analysis-summary"/);
+  assert.match(html, /data-state-key="compute-geometry" open/);
+  assert.match(html, /vscode\.setState/);
   assert.match(
     html,
     new RegExp(`command:${configureComputeVisualizationCommand}`),
@@ -237,7 +240,7 @@ void test("compute visualization escapes compiler and profile text", () => {
     }),
     uri,
   );
-  assert.doesNotMatch(html, /<script>/);
+  assert.doesNotMatch(html, /<script>alert/);
   assert.doesNotMatch(html, /<img /);
   assert.match(html, /&lt;script&gt;/);
 });

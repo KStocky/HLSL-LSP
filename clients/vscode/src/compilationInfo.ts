@@ -347,9 +347,9 @@ export interface CompilationInfo {
 // The two commands the Shader Compilation webview may invoke through plain
 // `command:` URIs. Webview panels pass
 // `enableCommandUris: [copyDisassemblyCommand, saveDisassemblyCommand]`
-// (never `true`) so no other command can ever be triggered from this
-// view's static HTML, and `enableScripts` stays `false` throughout. Neither
-// link carries any URI argument: both commands read the disassembly text
+// (never `true`) so no other command can ever be triggered from this view.
+// Its small local script only preserves disclosure/filter/scroll state.
+// Neither link carries any URI argument: both commands read the disassembly text
 // to copy/save from the extension's own last-rendered CompilationInfo for
 // this panel, never from anything a `command:` URI could supply, so a
 // malicious or stale link can at most no-op rather than exfiltrate or
@@ -545,10 +545,11 @@ function resourcesTable(
   const rows = resources
     .map(
       (resource) =>
-        `<tr><td>${escapeHtml(resource.name)}</td><td>${escapeHtml(resource.type)}</td><td>${String(resource.bindPoint)}</td><td>${String(resource.bindCount)}</td><td>${String(resource.space)}</td><td>${escapeHtml(resource.dimension)}</td><td>${escapeHtml(resource.returnType)}</td></tr>`,
+        `<tr ${filterableAttributes("compilation-resources", `${resource.name} ${resource.type} ${String(resource.bindPoint)} ${String(resource.space)} ${resource.dimension} ${resource.returnType}`)}><td>${escapeHtml(resource.name)}</td><td>${escapeHtml(resource.type)}</td><td>${String(resource.bindPoint)}</td><td>${String(resource.bindCount)}</td><td>${String(resource.space)}</td><td>${escapeHtml(resource.dimension)}</td><td>${escapeHtml(resource.returnType)}</td></tr>`,
     )
     .join("");
   return `<h3>Resources</h3>
+${analysisFilterHtml("compilation-resources", "Filter resources", "Name, type, register, space…")}
 <table>
 <thead><tr><th>Name</th><th>Type</th><th>Bind point</th><th>Bind count</th><th>Space</th><th>Dimension</th><th>Return type</th></tr></thead>
 <tbody>${rows}</tbody>
@@ -585,6 +586,39 @@ ${threadGroupSize}
 
 export function compilationInfoHtml(info: CompilationInfo): string {
   const title = info.entryPoint || "Shader compilation";
+  const diagnosticCount = info.diagnostics.length;
+  const resourceCount = info.reflection?.available
+    ? info.reflection.resources.length
+    : 0;
+  const disassemblyNeedsAttention =
+    !info.disassembly?.available || info.disassembly.truncated;
+  const summary = analysisSummaryHtml([
+    {
+      label: "Compilation",
+      value: info.success ? "Succeeded" : "Failed",
+      tone: info.success ? "success" : "error",
+    },
+    {
+      label: "Diagnostics",
+      value: String(diagnosticCount),
+      tone: diagnosticCount === 0 ? "success" : "warning",
+    },
+    {
+      label: "Output",
+      value:
+        info.output === null
+          ? "Unavailable"
+          : `${info.output.type} · ${String(info.output.size)} bytes`,
+      tone: info.output === null ? "warning" : "info",
+    },
+    {
+      label: "Resources",
+      value: !info.reflection?.available
+        ? "Unavailable"
+        : String(resourceCount),
+      tone: !info.reflection?.available ? "warning" : "neutral",
+    },
+  ]);
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -607,16 +641,19 @@ export function compilationInfoHtml(info: CompilationInfo): string {
   ul { margin: 0; padding-left: 1.25rem; }
   p.actions { margin: .25rem 0 .5rem; }
   pre.disassembly { max-height: 24rem; overflow: auto; margin: 0 0 .5rem; padding: .75rem; border-radius: 4px; background: var(--vscode-textCodeBlock-background, rgba(127,127,127,.14)); font-family: var(--vscode-editor-font-family); font-size: var(--vscode-editor-font-size, 13px); white-space: pre; }
+${analysisWebviewStyles}
 </style>
 </head>
 <body>
 <h1>${escapeHtml(title)}</h1>
+${summary}
 ${effectiveContextHeaderHtml(info.context)}
-${configurationSection(info)}
-${diagnosticsSection(info)}
-${outputSection(info)}
-${disassemblySection(info)}
-${reflectionSection(info)}
+${analysisDetailsHtml("compilation-diagnostics", "Diagnostics", diagnosticsSection(info), { meta: diagnosticCount === 0 ? "None" : `${String(diagnosticCount)} reported`, open: !info.success || diagnosticCount > 0 })}
+${analysisDetailsHtml("compilation-configuration", "Effective configuration", configurationSection(info), { meta: info.targetProfile || "Not configured" })}
+${analysisDetailsHtml("compilation-output", "Compiled output", outputSection(info), { meta: info.output?.type ?? "Unavailable", open: true })}
+${analysisDetailsHtml("compilation-disassembly", "Disassembly", disassemblySection(info), { meta: info.disassembly?.available ? (info.disassembly.truncated ? "Available · truncated" : "Available") : "Unavailable", open: disassemblyNeedsAttention })}
+${analysisDetailsHtml("compilation-reflection", "Reflection", reflectionSection(info), { meta: info.reflection?.available ? `${String(resourceCount)} resources` : "Unavailable", open: info.reflection?.available !== true })}
+${analysisWebviewScript}
 </body>
 </html>`;
 }
@@ -704,3 +741,11 @@ import {
   effectiveContextHeaderHtml,
   variantLabel,
 } from "./effectiveContext";
+import {
+  analysisDetailsHtml,
+  analysisFilterHtml,
+  analysisSummaryHtml,
+  analysisWebviewScript,
+  analysisWebviewStyles,
+  filterableAttributes,
+} from "./webviewUi";

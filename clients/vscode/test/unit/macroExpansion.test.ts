@@ -39,6 +39,8 @@ void test("macro expansion HTML is theme-aware and escapes compiler text", () =>
   assert.match(html, /WRAP\(&lt;value&gt;\)/);
   assert.match(html, /float4\(&quot;&lt;&amp;&gt;&quot;\)/);
   assert.doesNotMatch(html, /WRAP\(<value>\)/);
+  assert.match(html, /class="analysis-summary"/);
+  assert.match(html, /data-state-key="macro-expansion" open/);
 });
 
 void test("macro expansion status messages escape failure text", () => {

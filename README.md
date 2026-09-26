@@ -86,6 +86,12 @@ visible while refreshing or after a failed refresh. See
 [analysis result freshness](docs/analysis-freshness.md) for the exact shared
 semantics and race-handling guarantees.
 
+Analysis views use a shared summary-first hierarchy so success, failure,
+collisions, incompatibility, and truncated results remain visible before
+secondary detail. Long sections are collapsible, large collections are
+filterable, and refreshes preserve the user's expanded sections, filter,
+scroll position, and compute inputs.
+
 ![Context-sensitive HLSL commands in the Visual Studio editor](art/contextual-commands.png)
 
 ### Shader variants

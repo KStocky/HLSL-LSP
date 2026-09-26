@@ -4,6 +4,14 @@ import {
   effectiveContextHeaderHtml,
 } from "./effectiveContext";
 import { RefreshOutcome } from "./panelController";
+import {
+  analysisDetailsHtml,
+  analysisFilterHtml,
+  analysisSummaryHtml,
+  analysisWebviewScript,
+  analysisWebviewStyles,
+  filterableAttributes,
+} from "./webviewUi";
 
 export interface ComputeDimensions {
   readonly x: number;
@@ -260,13 +268,14 @@ function barriersSection(barriers: ComputeBarrierAnalysis): string {
           : barriers.locations
               .map((location, index) => {
                 const label = location.label ?? `Barrier ${String(index + 1)}`;
-                return `<li>${locationLink(location, label)}</li>`;
+                return `<li ${filterableAttributes("compute-barriers", label)}>${locationLink(location, label)}</li>`;
               })
               .join("");
   return `<section>
 <h2>Barriers</h2>
 <p>Compiler instruction count: ${numberOrUnavailable(barriers.instructionCount)}</p>
 ${barriers.locationsTruncated ? '<p class="unavailable">Barrier locations were truncated by the server limit.</p>' : ""}
+${barriers.locations.length === 0 ? "" : analysisFilterHtml("compute-barriers", "Filter barrier locations", "Barrier name…")}
 <ul>${locations}</ul>
 </section>`;
 }
@@ -291,7 +300,7 @@ function groupSharedSection(groupShared: ComputeGroupSharedAnalysis): string {
               declaration.bytes === null && declaration.sizeUnavailableReason
                 ? escapeHtml(declaration.sizeUnavailableReason)
                 : numberOrUnavailable(declaration.bytes);
-            return `<tr><td>${name}</td><td><code>${escapeHtml(declaration.type)}</code><br><code>${escapeHtml(declaration.declaration)}</code></td><td>${bytes}</td></tr>`;
+            return `<tr ${filterableAttributes("compute-group-shared", `${declaration.name} ${declaration.type} ${declaration.declaration}`)}><td>${name}</td><td><code>${escapeHtml(declaration.type)}</code><br><code>${escapeHtml(declaration.declaration)}</code></td><td>${bytes}</td></tr>`;
           })
           .join("");
   return `<section>
@@ -302,6 +311,7 @@ function groupSharedSection(groupShared: ComputeGroupSharedAnalysis): string {
       : numberOrUnavailable(groupShared.totalBytes)
   }</p>
   ${groupShared.truncated ? '<p class="unavailable">Group-shared declarations were truncated by the server limit.</p>' : ""}
+  ${groupShared.declarations.length === 0 ? "" : analysisFilterHtml("compute-group-shared", "Filter group-shared declarations", "Name, type, declaration…")}
   <table><thead><tr><th>Name</th><th>Type</th><th>Bytes</th></tr></thead><tbody>${rows}</tbody></table>
 </section>`;
 }
@@ -359,13 +369,38 @@ export function computeVisualizationHtml(
         documentUri,
     ),
   );
+  const summary = analysisSummaryHtml([
+    {
+      label: "Analysis",
+      value: report.applicable ? "Available" : "Unavailable",
+      tone: report.applicable ? "success" : "warning",
+    },
+    {
+      label: "Threads per group",
+      value: dimensions(report.threadGroupSize),
+      tone: report.threadGroupSize === null ? "warning" : "neutral",
+    },
+    {
+      label: "Logical workload",
+      value: dimensions(report.dispatchDimensions),
+      tone: report.dispatchDimensions === null ? "warning" : "info",
+    },
+    {
+      label: "Occupancy",
+      value:
+        report.occupancy === null
+          ? "Not estimated"
+          : report.occupancy.hardwareProfile,
+      tone: report.occupancy === null ? "warning" : "info",
+    },
+  ]);
   const body = report.applicable
-    ? `${geometrySection(report)}
-${systemValuesSection(report.systemValues)}
-${groupSharedSection(report.groupShared)}
-${barriersSection(report.barriers)}
-${waveSection(report.waveSize)}
-${occupancySection(report.occupancy)}`
+    ? `${analysisDetailsHtml("compute-geometry", "Dispatch geometry", geometrySection(report), { meta: dimensions(report.groupCount), open: true })}
+${analysisDetailsHtml("compute-system-values", "System-value mapping", systemValuesSection(report.systemValues), { meta: String(report.systemValues.length) })}
+${analysisDetailsHtml("compute-group-shared-section", "Group-shared memory", groupSharedSection(report.groupShared), { meta: report.groupShared.available ? numberOrUnavailable(report.groupShared.totalBytes) + " bytes" : "Unavailable", open: !report.groupShared.available || report.groupShared.truncated })}
+${analysisDetailsHtml("compute-barriers-section", "Barriers", barriersSection(report.barriers), { meta: report.barriers.available ? numberOrUnavailable(report.barriers.instructionCount) : "Unavailable", open: !report.barriers.available || report.barriers.locationsTruncated })}
+${analysisDetailsHtml("compute-wave", "Wave size", waveSection(report.waveSize), { meta: report.waveSize.known ? `${numberOrUnavailable(report.waveSize.min)}–${numberOrUnavailable(report.waveSize.max)}` : "Unavailable", open: !report.waveSize.known })}
+${analysisDetailsHtml("compute-occupancy", "Hardware-dependent occupancy", occupancySection(report.occupancy), { meta: report.occupancy?.hardwareProfile ?? "Not estimated", open: report.occupancy === null })}`
     : `<p class="unavailable">${escapeHtml(report.explanation || "Compute visualization is not available for this document.")}</p>`;
   return `<!doctype html>
 <html lang="en">
@@ -384,13 +419,16 @@ th { color: var(--vscode-descriptionForeground); }
 .muted { color: var(--vscode-descriptionForeground); }
 .unavailable { color: var(--vscode-editorWarning-foreground); }
 .estimate { border-left: 3px solid var(--vscode-editorWarning-foreground); padding-left: .75rem; }
+${analysisWebviewStyles}
 </style>
 </head>
 <body>
 <h1>Compute Visualization: ${label}</h1>
+${summary}
 ${effectiveContextHeaderHtml(report.context)}
 <p><a href="command:${configureComputeVisualizationCommand}">Configure logical workload and hardware profile</a></p>
 ${body}
+${analysisWebviewScript}
 </body>
 </html>`;
 }
