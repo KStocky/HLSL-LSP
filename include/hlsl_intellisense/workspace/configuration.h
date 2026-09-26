@@ -23,7 +23,8 @@ enum class ConfigurationErrorCode {
     path_not_directory,
     invalid_glob,
     conflicting_runtime,
-    invalid_variant
+    invalid_variant,
+    invalid_pipeline
 };
 
 // The only shadertoolsconfig.json named-variants schema version this build
@@ -31,6 +32,7 @@ enum class ConfigurationErrorCode {
 // hlsl.variantsVersion to this value; other values are reported rather than
 // silently accepted so the schema can evolve compatibly.
 inline constexpr int supported_variants_version = 1;
+inline constexpr int supported_pipelines_version = 1;
 
 class ConfigurationError final : public std::runtime_error {
   public:
@@ -82,6 +84,22 @@ enum class VariantSelection {
     not_applicable // A variant with that name exists but its file patterns exclude the shader.
 };
 
+enum class PipelineStageKind { vertex, hull, domain, geometry, pixel };
+
+struct PipelineStage {
+    PipelineStageKind kind{};
+    std::filesystem::path file;
+    std::optional<std::string> variant;
+    std::optional<std::string> entry_point;
+    std::optional<std::string> target_profile;
+};
+
+struct ResolvedPipeline {
+    std::string name;
+    std::filesystem::path declaring_file;
+    std::vector<PipelineStage> stages;
+};
+
 struct WorkspaceConfiguration {
     std::map<std::string, std::string, std::less<>> preprocessor_definitions;
     std::vector<std::filesystem::path> additional_include_directories;
@@ -100,6 +118,9 @@ struct WorkspaceConfiguration {
     // variant's file patterns match the shader. Selecting a variant applies its
     // settings on top of the file-derived configuration.
     std::vector<ResolvedVariant> variants;
+    // Named classic graphics pipelines visible in the discovered configuration
+    // hierarchy, ordered outermost configuration first and then by declaration.
+    std::vector<ResolvedPipeline> pipelines;
     // Human-readable provenance retained alongside effective values for
     // diagnostics and explorer UIs. These fields never affect compilation.
     std::map<std::string, std::string, std::less<>> definition_origins;

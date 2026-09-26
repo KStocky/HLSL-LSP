@@ -44,7 +44,11 @@ using Clock = std::chrono::steady_clock;
     workspace::SourceSnapshot root{uri, "hlsl", version, source};
     return {.root = root,
             .open_documents = std::vector<workspace::SourceSnapshot>{root},
-            .configuration = {}};
+            .configuration = {},
+            .generation = 0,
+            .analysis_identity = {},
+            .publish_diagnostics = true,
+            .request_compilation_info = false};
 }
 
 [[nodiscard]] std::string generated_large_shader() {

@@ -169,7 +169,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(MemoryLayout, name, type, kind, size, allocat
                                    selected_alignment, supported, explanation, members)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(CompilationSignatureParameter, semantic_name, semantic_index,
                                    register_index, system_value, component_type, mask,
-                                   read_write_mask, stream)
+                                   read_write_mask, stream, interpolation, source_location)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(CompilationResourceBinding, name, type, bind_point, bind_count,
                                    space, dimension, return_type, register_class, raw_flags,
                                    range_id, sample_count, unbounded, system_reserved_space, usage,

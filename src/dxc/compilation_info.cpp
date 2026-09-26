@@ -59,6 +59,172 @@ struct PsvRuntimeInfo0 {
 };
 static_assert(sizeof(PsvRuntimeInfo0) == 24);
 
+struct PsvRuntimeInfo1 {
+    PsvRuntimeInfo0 base;
+    std::uint8_t shader_stage;
+    std::uint8_t uses_view_id;
+    std::uint16_t stage_data;
+    std::uint8_t input_elements;
+    std::uint8_t output_elements;
+    std::uint8_t patch_or_primitive_elements;
+    std::uint8_t input_vectors;
+    std::uint8_t output_vectors[4];
+};
+static_assert(sizeof(PsvRuntimeInfo1) == 36);
+
+struct PsvSignatureElement0 {
+    std::uint32_t semantic_name;
+    std::uint32_t semantic_indexes;
+    std::uint8_t rows;
+    std::uint8_t start_row;
+    std::uint8_t columns_and_start;
+    std::uint8_t semantic_kind;
+    std::uint8_t component_type;
+    std::uint8_t interpolation_mode;
+    std::uint8_t dynamic_mask_and_stream;
+    std::uint8_t reserved;
+};
+static_assert(sizeof(PsvSignatureElement0) == 16);
+
+struct PsvSignatureInterpolation {
+    std::string semantic_name;
+    std::uint32_t semantic_index{};
+    hlsl_intellisense::dxc::InterpolationMode interpolation{
+        hlsl_intellisense::dxc::InterpolationMode::undefined};
+};
+
+struct PsvSignatureInterpolations {
+    std::vector<PsvSignatureInterpolation> inputs;
+    std::vector<PsvSignatureInterpolation> outputs;
+};
+
+[[nodiscard]] bool checked_advance(std::size_t& offset, std::size_t amount, std::size_t size) {
+    if (offset > size || amount > size - offset) {
+        return false;
+    }
+    offset += amount;
+    return true;
+}
+
+[[nodiscard]] bool checked_array_size(std::size_t count, std::size_t stride, std::size_t& result) {
+    if (stride != 0 && count > (std::numeric_limits<std::size_t>::max)() / stride) {
+        return false;
+    }
+    result = count * stride;
+    return true;
+}
+
+[[nodiscard]] std::optional<PsvSignatureInterpolations>
+extract_psv_signature_interpolations(IDxcUtils& utils, const DxcBuffer& object_buffer) {
+    void* part_data = nullptr;
+    UINT32 part_size = 0;
+    if (FAILED(utils.GetDxilContainerPart(&object_buffer, psv_part, &part_data, &part_size)) ||
+        part_data == nullptr) {
+        return std::nullopt;
+    }
+
+    const auto* bytes = static_cast<const std::byte*>(part_data);
+    const auto size = static_cast<std::size_t>(part_size);
+    std::size_t offset{};
+    const auto read_u32 = [&](std::uint32_t& value) {
+        if (!checked_advance(offset, sizeof(value), size)) {
+            return false;
+        }
+        std::memcpy(&value, bytes + offset - sizeof(value), sizeof(value));
+        return true;
+    };
+
+    std::uint32_t runtime_info_size{};
+    if (!read_u32(runtime_info_size) || runtime_info_size < sizeof(PsvRuntimeInfo1) ||
+        !checked_advance(offset, runtime_info_size, size)) {
+        return std::nullopt;
+    }
+    PsvRuntimeInfo1 runtime_info{};
+    std::memcpy(&runtime_info, bytes + sizeof(runtime_info_size), sizeof(runtime_info));
+
+    std::uint32_t resource_count{};
+    if (!read_u32(resource_count)) {
+        return std::nullopt;
+    }
+    if (resource_count != 0) {
+        std::uint32_t resource_stride{};
+        std::size_t resource_bytes{};
+        if (!read_u32(resource_stride) || resource_stride < 16 ||
+            !checked_array_size(resource_count, resource_stride, resource_bytes) ||
+            !checked_advance(offset, resource_bytes, size)) {
+            return std::nullopt;
+        }
+    }
+
+    std::uint32_t string_table_size{};
+    if (!read_u32(string_table_size) || !checked_advance(offset, string_table_size, size)) {
+        return std::nullopt;
+    }
+    const auto* string_table = reinterpret_cast<const char*>(bytes + offset - string_table_size);
+
+    std::uint32_t semantic_index_count{};
+    std::size_t semantic_index_bytes{};
+    if (!read_u32(semantic_index_count) ||
+        !checked_array_size(semantic_index_count, sizeof(std::uint32_t), semantic_index_bytes) ||
+        !checked_advance(offset, semantic_index_bytes, size)) {
+        return std::nullopt;
+    }
+    const auto* semantic_indexes =
+        reinterpret_cast<const std::uint32_t*>(bytes + offset - semantic_index_bytes);
+
+    const auto total_elements = static_cast<std::size_t>(runtime_info.input_elements) +
+                                runtime_info.output_elements +
+                                runtime_info.patch_or_primitive_elements;
+    if (total_elements == 0) {
+        return PsvSignatureInterpolations{};
+    }
+
+    std::uint32_t element_stride{};
+    std::size_t element_bytes{};
+    if (!read_u32(element_stride) || element_stride < sizeof(PsvSignatureElement0) ||
+        !checked_array_size(total_elements, element_stride, element_bytes) ||
+        !checked_advance(offset, element_bytes, size)) {
+        return std::nullopt;
+    }
+    const auto elements_offset = offset - element_bytes;
+
+    PsvSignatureInterpolations result;
+    const auto append_elements = [&](std::vector<PsvSignatureInterpolation>& destination,
+                                     std::size_t first, std::size_t count) {
+        for (std::size_t element_index = first; element_index < first + count; ++element_index) {
+            PsvSignatureElement0 element{};
+            std::memcpy(&element, bytes + elements_offset + element_index * element_stride,
+                        sizeof(element));
+            if (element.semantic_name >= string_table_size ||
+                element.semantic_indexes > semantic_index_count ||
+                element.rows > semantic_index_count - element.semantic_indexes) {
+                return false;
+            }
+            const auto* semantic_name = string_table + element.semantic_name;
+            const auto remaining = string_table_size - element.semantic_name;
+            if (std::memchr(semantic_name, '\0', remaining) == nullptr ||
+                element.interpolation_mode >
+                    static_cast<std::uint8_t>(hlsl_intellisense::dxc::InterpolationMode::invalid)) {
+                return false;
+            }
+            for (std::size_t row = 0; row < element.rows; ++row) {
+                destination.push_back(PsvSignatureInterpolation{
+                    .semantic_name = semantic_name,
+                    .semantic_index = semantic_indexes[element.semantic_indexes + row],
+                    .interpolation = static_cast<hlsl_intellisense::dxc::InterpolationMode>(
+                        element.interpolation_mode)});
+            }
+        }
+        return true;
+    };
+    if (!append_elements(result.inputs, 0, runtime_info.input_elements) ||
+        !append_elements(result.outputs, runtime_info.input_elements,
+                         runtime_info.output_elements)) {
+        return std::nullopt;
+    }
+    return result;
+}
+
 [[nodiscard]] hlsl_intellisense::dxc::CompilationInfo::PsvWaveSize
 extract_psv_wave_size(IDxcUtils& utils, const DxcBuffer& object_buffer) {
     void* part_data = nullptr;
@@ -1162,6 +1328,8 @@ CompilationInfo compilation_info_from_compile(DxcCreateInstanceProc create_insta
 
     CompilationReflection reflection_result;
     reflection_result.barrier_instruction_count = shader_desc.cBarrierInstructions;
+    const auto psv_interpolations =
+        extract_psv_signature_interpolations(*utils.get(), object_buffer);
 
     reflection_result.input_signature.reserve(shader_desc.InputParameters);
     for (unsigned index = 0; index < shader_desc.InputParameters; ++index) {
@@ -1169,15 +1337,35 @@ CompilationInfo compilation_info_from_compile(DxcCreateInstanceProc create_insta
         if (FAILED(reflection->GetInputParameterDesc(index, &desc))) {
             continue;
         }
-        reflection_result.input_signature.push_back(
-            {.semantic_name = desc.SemanticName != nullptr ? std::string{desc.SemanticName} : "",
-             .semantic_index = desc.SemanticIndex,
-             .register_index = desc.Register,
-             .system_value = system_value_name(desc.SystemValueType),
-             .component_type = component_type_name(desc.ComponentType),
-             .mask = desc.Mask,
-             .read_write_mask = desc.ReadWriteMask,
-             .stream = desc.Stream});
+        const auto semantic_name =
+            desc.SemanticName != nullptr ? std::string{desc.SemanticName} : "";
+        const auto interpolation =
+            psv_interpolations
+                ? std::ranges::find_if(
+                      psv_interpolations->inputs,
+                      [&](const auto& candidate) {
+                          return candidate.semantic_index == desc.SemanticIndex &&
+                                 std::ranges::equal(
+                                     candidate.semantic_name, semantic_name,
+                                     [](char left, char right) {
+                                         return std::tolower(static_cast<unsigned char>(left)) ==
+                                                std::tolower(static_cast<unsigned char>(right));
+                                     });
+                      })
+                : std::vector<PsvSignatureInterpolation>::const_iterator{};
+        reflection_result.input_signature.push_back({
+            .semantic_name = semantic_name,
+            .semantic_index = desc.SemanticIndex,
+            .register_index = desc.Register,
+            .system_value = system_value_name(desc.SystemValueType),
+            .component_type = component_type_name(desc.ComponentType),
+            .mask = desc.Mask,
+            .read_write_mask = desc.ReadWriteMask,
+            .stream = desc.Stream,
+            .interpolation = psv_interpolations && interpolation != psv_interpolations->inputs.end()
+                                 ? interpolation->interpolation
+                                 : InterpolationMode::undefined,
+        });
     }
 
     reflection_result.output_signature.reserve(shader_desc.OutputParameters);
@@ -1186,15 +1374,36 @@ CompilationInfo compilation_info_from_compile(DxcCreateInstanceProc create_insta
         if (FAILED(reflection->GetOutputParameterDesc(index, &desc))) {
             continue;
         }
-        reflection_result.output_signature.push_back(
-            {.semantic_name = desc.SemanticName != nullptr ? std::string{desc.SemanticName} : "",
-             .semantic_index = desc.SemanticIndex,
-             .register_index = desc.Register,
-             .system_value = system_value_name(desc.SystemValueType),
-             .component_type = component_type_name(desc.ComponentType),
-             .mask = desc.Mask,
-             .read_write_mask = desc.ReadWriteMask,
-             .stream = desc.Stream});
+        const auto semantic_name =
+            desc.SemanticName != nullptr ? std::string{desc.SemanticName} : "";
+        const auto interpolation =
+            psv_interpolations
+                ? std::ranges::find_if(
+                      psv_interpolations->outputs,
+                      [&](const auto& candidate) {
+                          return candidate.semantic_index == desc.SemanticIndex &&
+                                 std::ranges::equal(
+                                     candidate.semantic_name, semantic_name,
+                                     [](char left, char right) {
+                                         return std::tolower(static_cast<unsigned char>(left)) ==
+                                                std::tolower(static_cast<unsigned char>(right));
+                                     });
+                      })
+                : std::vector<PsvSignatureInterpolation>::const_iterator{};
+        reflection_result.output_signature.push_back({
+            .semantic_name = semantic_name,
+            .semantic_index = desc.SemanticIndex,
+            .register_index = desc.Register,
+            .system_value = system_value_name(desc.SystemValueType),
+            .component_type = component_type_name(desc.ComponentType),
+            .mask = desc.Mask,
+            .read_write_mask = desc.ReadWriteMask,
+            .stream = desc.Stream,
+            .interpolation =
+                psv_interpolations && interpolation != psv_interpolations->outputs.end()
+                    ? interpolation->interpolation
+                    : InterpolationMode::undefined,
+        });
     }
 
     reflection_result.resources.reserve(shader_desc.BoundResources);

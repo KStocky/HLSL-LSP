@@ -1042,6 +1042,115 @@ void attach_resource_source_locations(CompilationInfo& info,
     }
 }
 
+[[nodiscard]] bool contains_semantic(std::string_view declaration, std::string_view semantic_name,
+                                     std::uint32_t semantic_index) {
+    const auto equals_ignore_case = [](char left, char right) {
+        return std::tolower(static_cast<unsigned char>(left)) ==
+               std::tolower(static_cast<unsigned char>(right));
+    };
+    const auto identifier_character = [](char value) {
+        const auto byte = static_cast<unsigned char>(value);
+        return std::isalnum(byte) != 0 || value == '_';
+    };
+    const auto contains_token = [&](std::string_view expected) {
+        for (std::size_t offset = 0; offset + expected.size() <= declaration.size(); ++offset) {
+            if (!std::ranges::equal(declaration.substr(offset, expected.size()), expected,
+                                    equals_ignore_case)) {
+                continue;
+            }
+            const auto starts_token = offset == 0 || !identifier_character(declaration[offset - 1]);
+            const auto end = offset + expected.size();
+            const auto ends_token =
+                end == declaration.size() || !identifier_character(declaration[end]);
+            if (starts_token && ends_token) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    auto indexed_name = std::string{semantic_name} + std::to_string(semantic_index);
+    if (contains_token(indexed_name)) {
+        return true;
+    }
+    if (semantic_index == 0) {
+        return contains_token(semantic_name);
+    }
+    return false;
+}
+
+[[nodiscard]] std::string cursor_formatted_name(IDxcCursor& cursor);
+
+void collect_signature_declarations(
+    IDxcCursor& cursor, std::vector<std::pair<std::string, SourceLocation>>& declarations,
+    std::uint32_t depth = 0) {
+    if (depth >= 64) {
+        return;
+    }
+    constexpr unsigned page_size = 256;
+    for (unsigned skip = 0;; skip += page_size) {
+        unsigned child_count{};
+        IDxcCursor** raw_children{};
+        check(cursor.GetChildren(skip, page_size, &child_count, &raw_children), "GetChildren");
+        TaskCursors children{raw_children, child_count};
+        for (unsigned index = 0; index < child_count; ++index) {
+            auto* child = children[index];
+            if (child == nullptr) {
+                continue;
+            }
+            DxcCursorKind kind{DxcCursor_UnexposedDecl};
+            check(child->GetKind(&kind), "GetKind");
+            if (kind == DxcCursor_FieldDecl || kind == DxcCursor_ParmDecl) {
+                ComPtr<IDxcSourceLocation> location;
+                check(child->GetLocation(location.put()), "GetLocation");
+                BOOL is_null{};
+                check(location->IsNull(&is_null), "IsNull");
+                if (is_null == FALSE) {
+                    declarations.emplace_back(cursor_formatted_name(*child),
+                                              make_source_location(*location.get()));
+                }
+            }
+            if (symbol_container(kind) || kind == DxcCursor_FunctionDecl) {
+                collect_signature_declarations(*child, declarations, depth + 1);
+            }
+        }
+        if (child_count < page_size) {
+            break;
+        }
+    }
+}
+
+void attach_signature_source_locations(CompilationInfo& info, IDxcCursor& root) {
+    if (!info.reflection.has_value()) {
+        return;
+    }
+    std::vector<std::pair<std::string, SourceLocation>> declarations;
+    collect_signature_declarations(root, declarations);
+
+    const auto attach = [&declarations](CompilationSignatureParameter& parameter) {
+        const SourceLocation* match = nullptr;
+        for (const auto& [declaration, location] : declarations) {
+            if (!contains_semantic(declaration, parameter.semantic_name,
+                                   parameter.semantic_index)) {
+                continue;
+            }
+            if (match != nullptr && *match != location) {
+                return;
+            }
+            match = &location;
+        }
+        if (match != nullptr) {
+            parameter.source_location = *match;
+        }
+    };
+    for (auto& parameter : info.reflection->input_signature) {
+        attach(parameter);
+    }
+    for (auto& parameter : info.reflection->output_signature) {
+        attach(parameter);
+    }
+}
+
 [[nodiscard]] std::string cursor_spelling(IDxcCursor& cursor) {
     char* spelling{};
     check(cursor.GetSpelling(&spelling), "GetSpelling");
@@ -3273,7 +3382,11 @@ auto TranslationUnit::compilation_info(const ComputeMetadataLimits& limits) cons
     // same IntelliSense parse index (and therefore the same current unsaved
     // snapshot) already used for hover/go-to-definition/document symbols,
     // rather than re-parsing or inferring anything from raw text.
-    attach_resource_source_locations(info, symbols());
+    const auto document_symbols = symbols();
+    attach_resource_source_locations(info, document_symbols);
+    ComPtr<IDxcCursor> signature_root;
+    check(implementation_->translation_unit->GetCursor(signature_root.put()), "GetCursor");
+    attach_signature_source_locations(info, *signature_root.get());
     if (info.stage != "compute") {
         return info;
     }

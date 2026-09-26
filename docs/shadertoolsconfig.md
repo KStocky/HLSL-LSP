@@ -283,6 +283,78 @@ Problems are reported clearly rather than applied silently:
   active runtime is left unchanged and the conflict is reported, exactly as for
   `hlsl.dxcRuntimeDirectory`.
 
+## Named shader pipelines
+
+`hlsl.pipelines` connects independently compiled shader stages so HLSL-LSP can
+validate their interfaces and shared resources. Pipeline validation uses DXC
+reflection from the same isolated analysis workers as normal editor features,
+including unsaved contents for open stage files.
+
+```jsonc
+{
+  // Required whenever hlsl.pipelines is present. Only version 1 is supported.
+  "hlsl.pipelinesVersion": 1,
+
+  "hlsl.pipelines": [
+    {
+      "name": "Forward",
+      "stages": {
+        "vertex": {
+          "file": "Shaders/Forward.hlsl",
+          "variant": "Debug",
+          "entryPoint": "VSMain",
+          "targetProfile": "vs_6_7"
+        },
+        "pixel": {
+          "file": "Shaders/Forward.hlsl",
+          "entryPoint": "PSMain",
+          "targetProfile": "ps_6_7"
+        }
+      }
+    }
+  ]
+}
+```
+
+Each pipeline has a non-empty `name` and a `stages` object. The `vertex` and
+`pixel` stages are required. `hull`, `domain`, and `geometry` are optional;
+`hull` and `domain` must be declared together. Stages are linked in graphics
+pipeline order, regardless of property order.
+
+Each stage requires a `file` path relative to the configuration that declares
+the pipeline. Optional `entryPoint` and `targetProfile` values override that
+stage file's normal configuration. A target profile must match its stage
+(`vs_`, `hs_`, `ds_`, `gs_`, or `ps_`). Optional `variant` selects a named
+variant for that stage. Without it, the editor's active variant is used when
+one is selected. An undefined or inapplicable variant produces an
+`analysis-unavailable` pipeline diagnostic instead of silently compiling the
+base configuration.
+
+Pipeline declarations accumulate through the configuration hierarchy, with
+outer declarations first. Names must be unique across all discovered
+configuration files. Unknown stages, unknown properties, incomplete
+hull/domain pairs, and unsupported schema versions are configuration errors.
+
+HLSL-LSP reports `source: "hlsl-lsp"` diagnostics for:
+
+- Missing producer outputs.
+- Component type and mask incompatibilities.
+- Pixel-input interpolation incompatibilities.
+- System-value classification incompatibilities.
+- Shared resource binding and reflected-type incompatibilities.
+- Stage compilation or reflection that is unavailable.
+
+Diagnostics are attached to both producer and consumer declarations when DXC
+provides their locations. Otherwise they use the relevant stage file's first
+line. Editing either stage revalidates the complete pipeline. Closing a stage
+reloads its saved contents, watched changes to closed stages also revalidate,
+and removing a pipeline clears its diagnostics.
+
+Hull-to-domain patch-constant interface validation is currently reported as
+unavailable because that signature has not yet been exposed from DXC's PSV
+metadata. Vertex-to-hull and domain-to-later-stage interfaces, resource
+compatibility, and the other supported stage links are still validated.
+
 ## Properties
 
 | Property | Type | Behavior |
@@ -291,6 +363,8 @@ Problems are reported clearly rather than applied silently:
 | `hlsl.fileGroups` | Array of file-group objects | Applies file-specific settings using the ordered matching and precedence rules above. |
 | `hlsl.variantsVersion` | Integer | Declares the named-variants schema version. Required when `hlsl.variants` is present; only `1` is supported. |
 | `hlsl.variants` | Array of variant objects | Declares selectable named compilation variants; see [Named compilation variants](#named-compilation-variants). |
+| `hlsl.pipelinesVersion` | Integer | Declares the named-pipelines schema version. Required when `hlsl.pipelines` is present; only `1` is supported. |
+| `hlsl.pipelines` | Array of pipeline objects | Declares shader stages to validate together; see [Named shader pipelines](#named-shader-pipelines). |
 | `hlsl.preprocessorDefinitions` | Object | Adds DXC defines. Values may be strings, numbers, or Booleans. An empty string emits a value-less define. Object-like values that expand to exactly one header-name token may resolve `#include MACRO`; quoted header values require JSON-escaped quotes. |
 | `hlsl.additionalIncludeDirectories` | String array | Adds existing directories to DXC's include search path. Relative paths are resolved from this config file. |
 | `hlsl.virtualDirectoryMappings` | Object of string paths | Maps virtual include roots to existing directories, primarily for Unreal-style paths. Each virtual key must begin with `/` or `\`. |

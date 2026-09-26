@@ -212,8 +212,20 @@ struct MemoryLayout {
     std::vector<MemoryLayoutElement> members;
 };
 
+enum class InterpolationMode : std::uint8_t {
+    undefined,
+    constant,
+    linear,
+    linear_centroid,
+    linear_noperspective,
+    linear_noperspective_centroid,
+    linear_sample,
+    linear_noperspective_sample,
+    invalid
+};
+
 // Describes one entry of a DXIL input/output signature parameter, populated
-// from ID3D12ShaderReflection::GetInputParameterDesc/GetOutputParameterDesc.
+// from ID3D12ShaderReflection and the compiler-produced PSV0 metadata.
 struct CompilationSignatureParameter {
     std::string semantic_name;
     std::uint32_t semantic_index{};
@@ -223,6 +235,8 @@ struct CompilationSignatureParameter {
     std::uint8_t mask{};
     std::uint8_t read_write_mask{};
     std::uint32_t stream{};
+    InterpolationMode interpolation{InterpolationMode::undefined};
+    std::optional<SourceLocation> source_location;
 };
 
 // The register class a resource binds through, derived from the raw

@@ -940,3 +940,182 @@ TEST_CASE("A variant without a name is rejected", "[configuration][variants]") {
     CHECK(failure.code == workspace::ConfigurationErrorCode::invalid_variant);
     CHECK(failure.message.find("name") != std::string::npos);
 }
+
+TEST_CASE("Named pipelines resolve stages and overrides deterministically",
+          "[configuration][pipelines]") {
+    const TestTree tree;
+    tree.file("shadertoolsconfig.json", R"({
+        "root": true,
+        "hlsl.pipelinesVersion": 1,
+        "hlsl.pipelines": [
+            {
+                "name": "Forward",
+                "stages": {
+                    "pixel": {
+                        "file": "shaders/forward.hlsl",
+                        "entryPoint": "PSMain",
+                        "targetProfile": "ps_6_7"
+                    },
+                    "vertex": {
+                        "file": "shaders/forward.hlsl",
+                        "variant": "Debug",
+                        "entryPoint": "VSMain",
+                        "targetProfile": "vs_6_7"
+                    }
+                }
+            }
+        ]
+    })");
+    tree.file("shaders/forward.hlsl", "");
+
+    const auto configuration =
+        workspace::load_workspace_configuration_for_file(tree.path("shaders/forward.hlsl"));
+    REQUIRE(configuration.pipelines.size() == 1);
+    const auto& pipeline = configuration.pipelines.front();
+    CHECK(pipeline.name == "Forward");
+    CHECK(pipeline.declaring_file == tree.path("shadertoolsconfig.json"));
+    REQUIRE(pipeline.stages.size() == 2);
+    CHECK(pipeline.stages[0].kind == workspace::PipelineStageKind::vertex);
+    CHECK(pipeline.stages[0].file == tree.path("shaders/forward.hlsl"));
+    REQUIRE(pipeline.stages[0].variant.has_value());
+    CHECK(*pipeline.stages[0].variant == "Debug");
+    REQUIRE(pipeline.stages[0].entry_point.has_value());
+    CHECK(*pipeline.stages[0].entry_point == "VSMain");
+    REQUIRE(pipeline.stages[0].target_profile.has_value());
+    CHECK(*pipeline.stages[0].target_profile == "vs_6_7");
+    CHECK(pipeline.stages[1].kind == workspace::PipelineStageKind::pixel);
+}
+
+TEST_CASE("Named pipelines accumulate across configuration files", "[configuration][pipelines]") {
+    const TestTree tree;
+    tree.file("shadertoolsconfig.json", R"({
+        "root": true,
+        "hlsl.pipelinesVersion": 1,
+        "hlsl.pipelines": [{
+            "name": "Outer",
+            "stages": {
+                "vertex": { "file": "outer.hlsl" },
+                "pixel": { "file": "outer.hlsl" }
+            }
+        }]
+    })");
+    tree.file("child/shadertoolsconfig.json", R"({
+        "hlsl.pipelinesVersion": 1,
+        "hlsl.pipelines": [{
+            "name": "Inner",
+            "stages": {
+                "vertex": { "file": "inner.hlsl" },
+                "pixel": { "file": "inner.hlsl" }
+            }
+        }]
+    })");
+    tree.file("child/inner.hlsl", "");
+
+    const auto configuration =
+        workspace::load_workspace_configuration_for_file(tree.path("child/inner.hlsl"));
+    REQUIRE(configuration.pipelines.size() == 2);
+    CHECK(configuration.pipelines[0].name == "Outer");
+    CHECK(configuration.pipelines[1].name == "Inner");
+}
+
+TEST_CASE("Named pipelines reject unsupported versions and invalid topologies",
+          "[configuration][pipelines]") {
+    const TestTree missing_version;
+    missing_version.file("shadertoolsconfig.json", R"({
+        "hlsl.pipelines": [{
+            "name": "Forward",
+            "stages": {
+                "vertex": { "file": "shader.hlsl" },
+                "pixel": { "file": "shader.hlsl" }
+            }
+        }]
+    })");
+    missing_version.file("shader.hlsl", "");
+    const auto missing = configuration_failure(missing_version.path("shader.hlsl"));
+    CHECK(missing.code == workspace::ConfigurationErrorCode::invalid_pipeline);
+    CHECK(missing.key == "hlsl.pipelinesVersion");
+
+    const TestTree unsupported_version;
+    unsupported_version.file("shadertoolsconfig.json", R"({
+        "hlsl.pipelinesVersion": 2,
+        "hlsl.pipelines": []
+    })");
+    unsupported_version.file("shader.hlsl", "");
+    const auto unsupported = configuration_failure(unsupported_version.path("shader.hlsl"));
+    CHECK(unsupported.code == workspace::ConfigurationErrorCode::invalid_pipeline);
+    CHECK(unsupported.message.find("Unsupported") != std::string::npos);
+
+    const TestTree missing_pixel;
+    missing_pixel.file("shadertoolsconfig.json", R"({
+        "hlsl.pipelinesVersion": 1,
+        "hlsl.pipelines": [{
+            "name": "Incomplete",
+            "stages": { "vertex": { "file": "shader.hlsl" } }
+        }]
+    })");
+    missing_pixel.file("shader.hlsl", "");
+    const auto incomplete = configuration_failure(missing_pixel.path("shader.hlsl"));
+    CHECK(incomplete.code == workspace::ConfigurationErrorCode::invalid_pipeline);
+    CHECK(incomplete.message.find("vertex and pixel") != std::string::npos);
+
+    const TestTree unpaired_tessellation;
+    unpaired_tessellation.file("shadertoolsconfig.json", R"({
+        "hlsl.pipelinesVersion": 1,
+        "hlsl.pipelines": [{
+            "name": "Incomplete",
+            "stages": {
+                "vertex": { "file": "shader.hlsl" },
+                "hull": { "file": "shader.hlsl" },
+                "pixel": { "file": "shader.hlsl" }
+            }
+        }]
+    })");
+    unpaired_tessellation.file("shader.hlsl", "");
+    const auto unpaired = configuration_failure(unpaired_tessellation.path("shader.hlsl"));
+    CHECK(unpaired.code == workspace::ConfigurationErrorCode::invalid_pipeline);
+    CHECK(unpaired.message.find("hull and domain") != std::string::npos);
+}
+
+TEST_CASE("Named pipelines reject duplicate names and mismatched profiles",
+          "[configuration][pipelines]") {
+    const TestTree duplicate;
+    duplicate.file("shadertoolsconfig.json", R"({
+        "hlsl.pipelinesVersion": 1,
+        "hlsl.pipelines": [
+            {
+                "name": "Forward",
+                "stages": {
+                    "vertex": { "file": "shader.hlsl" },
+                    "pixel": { "file": "shader.hlsl" }
+                }
+            },
+            {
+                "name": "Forward",
+                "stages": {
+                    "vertex": { "file": "shader.hlsl" },
+                    "pixel": { "file": "shader.hlsl" }
+                }
+            }
+        ]
+    })");
+    duplicate.file("shader.hlsl", "");
+    const auto duplicate_failure = configuration_failure(duplicate.path("shader.hlsl"));
+    CHECK(duplicate_failure.code == workspace::ConfigurationErrorCode::invalid_pipeline);
+    CHECK(duplicate_failure.message.find("Duplicate pipeline name") != std::string::npos);
+
+    const TestTree profile;
+    profile.file("shadertoolsconfig.json", R"({
+        "hlsl.pipelinesVersion": 1,
+        "hlsl.pipelines": [{
+            "name": "Forward",
+            "stages": {
+                "vertex": { "file": "shader.hlsl", "targetProfile": "ps_6_7" },
+                "pixel": { "file": "shader.hlsl" }
+            }
+        }]
+    })");
+    profile.file("shader.hlsl", "");
+    const auto profile_failure = configuration_failure(profile.path("shader.hlsl"));
+    CHECK(profile_failure.code == workspace::ConfigurationErrorCode::invalid_pipeline);
+    CHECK(profile_failure.key.find("targetProfile") != std::string::npos);
+}

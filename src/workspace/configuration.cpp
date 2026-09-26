@@ -61,12 +61,19 @@ struct Variant {
     ConfigurationSettings settings;
 };
 
+struct Pipeline {
+    std::filesystem::path declaring_file;
+    std::string name;
+    std::vector<PipelineStage> stages;
+};
+
 struct ConfigFile {
     std::filesystem::path path;
     bool root{};
     ConfigurationSettings settings;
     std::vector<FileGroup> file_groups;
     std::vector<Variant> variants;
+    std::vector<Pipeline> pipelines;
 };
 
 [[noreturn]] void throw_type_error(const std::filesystem::path& file, std::string_view key,
@@ -556,6 +563,218 @@ parse_glob_array(const Json& array, const std::filesystem::path& path, const std
     return result;
 }
 
+[[nodiscard]] std::optional<PipelineStageKind> pipeline_stage_kind(std::string_view name) {
+    if (name == "vertex") {
+        return PipelineStageKind::vertex;
+    }
+    if (name == "hull") {
+        return PipelineStageKind::hull;
+    }
+    if (name == "domain") {
+        return PipelineStageKind::domain;
+    }
+    if (name == "geometry") {
+        return PipelineStageKind::geometry;
+    }
+    if (name == "pixel") {
+        return PipelineStageKind::pixel;
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] std::string_view pipeline_stage_name(PipelineStageKind kind) {
+    switch (kind) {
+    case PipelineStageKind::vertex:
+        return "vertex";
+    case PipelineStageKind::hull:
+        return "hull";
+    case PipelineStageKind::domain:
+        return "domain";
+    case PipelineStageKind::geometry:
+        return "geometry";
+    case PipelineStageKind::pixel:
+        return "pixel";
+    }
+    return {};
+}
+
+[[nodiscard]] std::string_view pipeline_profile_prefix(PipelineStageKind kind) {
+    switch (kind) {
+    case PipelineStageKind::vertex:
+        return "vs_";
+    case PipelineStageKind::hull:
+        return "hs_";
+    case PipelineStageKind::domain:
+        return "ds_";
+    case PipelineStageKind::geometry:
+        return "gs_";
+    case PipelineStageKind::pixel:
+        return "ps_";
+    }
+    return {};
+}
+
+[[nodiscard]] bool supported_pipeline_stage_key(std::string_view key) {
+    constexpr std::array keys{std::string_view{"file"}, std::string_view{"variant"},
+                              std::string_view{"entryPoint"}, std::string_view{"targetProfile"}};
+    return std::ranges::find(keys, key) != keys.end();
+}
+
+[[nodiscard]] std::optional<std::string>
+optional_non_empty_string(const Json& object, std::string_view property,
+                          const std::filesystem::path& path, const std::string& object_key) {
+    const auto value = object.find(property);
+    if (value == object.end()) {
+        return std::nullopt;
+    }
+    const auto key = object_key + "." + std::string{property};
+    if (!value->is_string() || value->get_ref<const std::string&>().empty()) {
+        throw ConfigurationError{ConfigurationErrorCode::invalid_pipeline, path, key,
+                                 "Pipeline property '" + key + "' in '" + path.string() +
+                                     "' must be a non-empty string"};
+    }
+    return value->get<std::string>();
+}
+
+[[nodiscard]] PipelineStage parse_pipeline_stage(const Json& stage, PipelineStageKind kind,
+                                                 const std::filesystem::path& path,
+                                                 const std::string& stage_key) {
+    if (!stage.is_object()) {
+        throw_type_error(path, stage_key, "an object");
+    }
+    for (const auto& [key, value] : stage.items()) {
+        static_cast<void>(value);
+        if (!supported_pipeline_stage_key(key)) {
+            throw ConfigurationError{
+                ConfigurationErrorCode::invalid_pipeline, path, stage_key + "." + key,
+                "Unsupported pipeline-stage property '" + key + "' in '" + path.string() + "'"};
+        }
+    }
+
+    const auto file = stage.find("file");
+    if (file == stage.end() || !file->is_string() || file->get_ref<const std::string&>().empty()) {
+        throw ConfigurationError{ConfigurationErrorCode::invalid_pipeline, path,
+                                 stage_key + ".file",
+                                 "Pipeline stage '" + stage_key + "' in '" + path.string() +
+                                     "' must declare a non-empty 'file'"};
+    }
+    auto resolved_file = std::filesystem::path{file->get<std::string>()};
+    if (resolved_file.is_relative()) {
+        resolved_file = path.parent_path() / resolved_file;
+    }
+    resolved_file = std::filesystem::absolute(resolved_file).lexically_normal();
+
+    auto target_profile = optional_non_empty_string(stage, "targetProfile", path, stage_key);
+    if (target_profile && !target_profile->starts_with(pipeline_profile_prefix(kind))) {
+        throw ConfigurationError{ConfigurationErrorCode::invalid_pipeline, path,
+                                 stage_key + ".targetProfile",
+                                 "Pipeline " + std::string{pipeline_stage_name(kind)} +
+                                     " stage profile '" + *target_profile + "' must start with '" +
+                                     std::string{pipeline_profile_prefix(kind)} + "'"};
+    }
+
+    return PipelineStage{.kind = kind,
+                         .file = std::move(resolved_file),
+                         .variant = optional_non_empty_string(stage, "variant", path, stage_key),
+                         .entry_point =
+                             optional_non_empty_string(stage, "entryPoint", path, stage_key),
+                         .target_profile = std::move(target_profile)};
+}
+
+[[nodiscard]] std::vector<Pipeline> parse_pipelines(const Json& json,
+                                                    const std::filesystem::path& path) {
+    const auto pipelines = json.find("hlsl.pipelines");
+    const auto version = json.find("hlsl.pipelinesVersion");
+    if (version != json.end() &&
+        (!version->is_number_integer() || version->get<int>() != supported_pipelines_version)) {
+        throw ConfigurationError{
+            ConfigurationErrorCode::invalid_pipeline, path, "hlsl.pipelinesVersion",
+            "Unsupported 'hlsl.pipelinesVersion' in '" + path.string() +
+                "'; this build supports version " + std::to_string(supported_pipelines_version)};
+    }
+    if (pipelines == json.end()) {
+        return {};
+    }
+    if (version == json.end()) {
+        throw ConfigurationError{ConfigurationErrorCode::invalid_pipeline, path,
+                                 "hlsl.pipelinesVersion",
+                                 "'hlsl.pipelines' in '" + path.string() +
+                                     "' requires 'hlsl.pipelinesVersion' to be set to " +
+                                     std::to_string(supported_pipelines_version)};
+    }
+    if (!pipelines->is_array()) {
+        throw_type_error(path, "hlsl.pipelines", "an array of objects");
+    }
+
+    constexpr std::array ordered_stages{std::string_view{"vertex"}, std::string_view{"hull"},
+                                        std::string_view{"domain"}, std::string_view{"geometry"},
+                                        std::string_view{"pixel"}};
+    std::vector<Pipeline> result;
+    result.reserve(pipelines->size());
+    for (std::size_t pipeline_index = 0; pipeline_index < pipelines->size(); ++pipeline_index) {
+        const auto& pipeline = (*pipelines)[pipeline_index];
+        const auto pipeline_key = "hlsl.pipelines[" + std::to_string(pipeline_index) + "]";
+        if (!pipeline.is_object()) {
+            throw_type_error(path, pipeline_key, "an object");
+        }
+        for (const auto& [key, value] : pipeline.items()) {
+            static_cast<void>(value);
+            if (key != "name" && key != "stages") {
+                throw ConfigurationError{
+                    ConfigurationErrorCode::invalid_pipeline, path, pipeline_key + "." + key,
+                    "Unsupported pipeline property '" + key + "' in '" + path.string() + "'"};
+            }
+        }
+
+        const auto name = pipeline.find("name");
+        if (name == pipeline.end() || !name->is_string() ||
+            name->get_ref<const std::string&>().empty()) {
+            throw ConfigurationError{ConfigurationErrorCode::invalid_pipeline, path,
+                                     pipeline_key + ".name",
+                                     "Pipeline '" + pipeline_key + "' in '" + path.string() +
+                                         "' must declare a non-empty 'name'"};
+        }
+        const auto stages = pipeline.find("stages");
+        if (stages == pipeline.end() || !stages->is_object()) {
+            throw_type_error(path, pipeline_key + ".stages", "an object");
+        }
+        for (const auto& [stage_name, value] : stages->items()) {
+            static_cast<void>(value);
+            if (!pipeline_stage_kind(stage_name)) {
+                throw ConfigurationError{ConfigurationErrorCode::invalid_pipeline, path,
+                                         pipeline_key + ".stages." + stage_name,
+                                         "Unsupported pipeline stage '" + stage_name + "' in '" +
+                                             path.string() + "'"};
+            }
+        }
+        if (!stages->contains("vertex") || !stages->contains("pixel")) {
+            throw ConfigurationError{ConfigurationErrorCode::invalid_pipeline, path,
+                                     pipeline_key + ".stages",
+                                     "Pipeline '" + name->get<std::string>() +
+                                         "' must declare both vertex and pixel stages"};
+        }
+        if (stages->contains("hull") != stages->contains("domain")) {
+            throw ConfigurationError{ConfigurationErrorCode::invalid_pipeline, path,
+                                     pipeline_key + ".stages",
+                                     "Pipeline '" + name->get<std::string>() +
+                                         "' must declare hull and domain stages together"};
+        }
+
+        Pipeline parsed{.declaring_file = path, .name = name->get<std::string>(), .stages = {}};
+        for (const auto stage_name : ordered_stages) {
+            const auto stage = stages->find(stage_name);
+            if (stage == stages->end()) {
+                continue;
+            }
+            const auto kind = *pipeline_stage_kind(stage_name);
+            parsed.stages.push_back(parse_pipeline_stage(
+                *stage, kind, path, pipeline_key + ".stages." + std::string{stage_name}));
+        }
+        result.push_back(std::move(parsed));
+    }
+    return result;
+}
+
 [[nodiscard]] ConfigFile parse_config_file(const std::filesystem::path& path) {
     const auto json = read_json(path);
     if (!json.is_object()) {
@@ -575,6 +794,7 @@ parse_glob_array(const Json& array, const std::filesystem::path& path, const std
     result.settings = parse_settings(json, path, {});
     result.file_groups = parse_file_groups(json, path);
     result.variants = parse_variants(json, path);
+    result.pipelines = parse_pipelines(json, path);
     return result;
 }
 
@@ -954,6 +1174,29 @@ resolve_variants(const std::vector<ConfigFile>& configs,
     return result;
 }
 
+[[nodiscard]] std::vector<ResolvedPipeline>
+resolve_pipelines(const std::vector<ConfigFile>& configs) {
+    std::vector<ResolvedPipeline> result;
+    std::map<std::string, const Pipeline*, std::less<>> by_name;
+    for (auto iterator = configs.rbegin(); iterator != configs.rend(); ++iterator) {
+        for (const auto& pipeline : iterator->pipelines) {
+            const auto [entry, inserted] = by_name.emplace(pipeline.name, &pipeline);
+            if (!inserted) {
+                throw ConfigurationError{ConfigurationErrorCode::invalid_pipeline,
+                                         pipeline.declaring_file, "hlsl.pipelines",
+                                         "Duplicate pipeline name '" + pipeline.name +
+                                             "' declared in '" +
+                                             entry->second->declaring_file.string() + "' and '" +
+                                             pipeline.declaring_file.string() + "'"};
+            }
+            result.push_back(ResolvedPipeline{.name = pipeline.name,
+                                              .declaring_file = pipeline.declaring_file,
+                                              .stages = pipeline.stages});
+        }
+    }
+    return result;
+}
+
 void apply_settings(WorkspaceConfiguration& result, const ConfigurationSettings& settings,
                     const std::filesystem::path& origin) {
     for (const auto& [name, value] : settings.definitions) {
@@ -1065,6 +1308,7 @@ merge_configurations(const std::vector<ConfigFile>& configs,
         result.setting_origin_files["dxcRuntimeDirectory"] = selected_runtime_file;
     }
     result.variants = resolve_variants(configs, canonical_shader);
+    result.pipelines = resolve_pipelines(configs);
     return result;
 }
 

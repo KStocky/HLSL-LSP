@@ -1538,6 +1538,55 @@ TEST_CASE("Compilation info reflects effective configuration and DXIL resource r
     CHECK_FALSE(info.reflection->thread_group_size.has_value());
 }
 
+TEST_CASE("Compilation info exposes compiler-authored signature interpolation",
+          "[dxc][compilation-info][pipeline]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.target_profile = "ps_6_6";
+    options.entry_point = "main";
+    const std::string source =
+        "struct Input {\n"
+        "    nointerpolation uint material : TEXCOORD0;\n"
+        "    centroid float2 uv : TEXCOORD1;\n"
+        "    noperspective sample float2 screen : TEXCOORD2;\n"
+        "};\n"
+        "float4 main(Input input) : SV_Target {\n"
+        "    return float4(input.uv + input.screen, float(input.material), 1.0);\n"
+        "}\n";
+    auto translation_unit = intellisense.parse(shader_path, {{shader_path, source}}, options);
+
+    const auto material_hover = translation_unit.hover_at(shader_path, 2, 28);
+    REQUIRE(material_hover.has_value());
+    CHECK(material_hover->declaration.find("TEXCOORD0") != std::string::npos);
+
+    const auto info = translation_unit.compilation_info();
+    REQUIRE(info.success);
+    REQUIRE(info.reflection.has_value());
+    const auto find_input = [&](std::uint32_t semantic_index) {
+        return std::ranges::find_if(info.reflection->input_signature,
+                                    [semantic_index](const auto& parameter) {
+                                        return parameter.semantic_name == "TEXCOORD" &&
+                                               parameter.semantic_index == semantic_index;
+                                    });
+    };
+    const auto material = find_input(0);
+    REQUIRE(material != info.reflection->input_signature.end());
+    CHECK(material->interpolation == hlsl_intellisense::dxc::InterpolationMode::constant);
+    REQUIRE(material->source_location.has_value());
+    CHECK(material->source_location->line == 2);
+    const auto uv = find_input(1);
+    REQUIRE(uv != info.reflection->input_signature.end());
+    CHECK(uv->interpolation == hlsl_intellisense::dxc::InterpolationMode::linear_centroid);
+    REQUIRE(uv->source_location.has_value());
+    CHECK(uv->source_location->line == 3);
+    const auto screen = find_input(2);
+    REQUIRE(screen != info.reflection->input_signature.end());
+    CHECK(screen->interpolation ==
+          hlsl_intellisense::dxc::InterpolationMode::linear_noperspective_sample);
+    REQUIRE(screen->source_location.has_value());
+    CHECK(screen->source_location->line == 4);
+}
+
 TEST_CASE("Compilation info exposes compute thread group size", "[dxc][compilation-info]") {
     hlsl_intellisense::dxc::Intellisense intellisense;
     hlsl_intellisense::dxc::CompilerOptions options;

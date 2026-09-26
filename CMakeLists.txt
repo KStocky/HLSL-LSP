@@ -97,6 +97,7 @@ add_library(hlsl_lsp STATIC)
 target_sources(hlsl_lsp
     PRIVATE
         src/analysis/manager.cpp
+        src/analysis/pipeline_validation.cpp
         src/analysis/scheduler.cpp
         src/analysis/worker_process.cpp
         src/analysis/worker_protocol.cpp
@@ -106,6 +107,7 @@ target_sources(hlsl_lsp
         BASE_DIRS include
         FILES
             include/hlsl_intellisense/analysis/manager.h
+            include/hlsl_intellisense/analysis/pipeline_validation.h
             include/hlsl_intellisense/analysis/scheduler.h
             include/hlsl_intellisense/analysis/worker_process.h
             include/hlsl_intellisense/analysis/worker_protocol.h
@@ -184,6 +186,7 @@ if(BUILD_TESTING)
 
     add_executable(hlsl-lsp-tests
         tests/analysis/manager_tests.cpp
+        tests/analysis/pipeline_validation_tests.cpp
         tests/analysis/scheduler_tests.cpp
         tests/analysis/worker_process_tests.cpp
         tests/analysis/worker_protocol_tests.cpp
