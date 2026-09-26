@@ -35,13 +35,12 @@ macro includes dynamic. DXC remains authoritative for replacement values and
 preprocessing, and receives rewritten source only when a safely resolved
 virtual macro include must be mapped to its physical file.
 
-The bundled Windows DXC `2609-kstocky.1` release initializes the legacy
+The bundled Windows and Linux DXC `2609-kstocky.2` release initializes the legacy
 IntelliSense index's token-pasting option and accepts valid GNU-style
-`, ##__VA_ARGS__` comma elision. Microsoft's Linux `v1.9.2607` runtime and
-older or custom runtimes may still report a false invalid-token diagnostic.
-For compatibility with those runtimes, HLSL-LSP checks that specific
-diagnostic against DXC's compiler preprocessor before publishing it. Genuine
-invalid token pastes remain diagnostics.
+`, ##__VA_ARGS__` comma elision. Older or custom runtimes may still report a
+false invalid-token diagnostic. For compatibility with those runtimes,
+HLSL-LSP checks that specific diagnostic against DXC's compiler preprocessor
+before publishing it. Genuine invalid token pastes remain diagnostics.
 
 DXC 1.9's Linux `GetSkippedRanges` API is unsafe when IntelliSense receives
 source buffers with virtual include directives rewritten to physical paths.
