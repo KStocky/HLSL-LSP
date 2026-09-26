@@ -18,16 +18,17 @@ The release VSIX contains the Windows x64 `hlsl-lsp.exe`, `dxcompiler.dll`, and
 `dxil.dll`, plus the Linux x64 `hlsl-lsp` and `libdxcompiler.so`. Opening an
 HLSL document starts the matching bundled server automatically.
 Right-click an HLSL editor to open the **HLSL** submenu for status and recovery,
-opening the effective configuration file, shader variants, compilation,
-resource bindings, preprocessor exploration, memory layout, compute
-visualization, and entry-point data flow. The same actions remain available
-from the Command Palette; call hierarchy uses VS Code's native **Show Call
-Hierarchy** action.
+guided creation or editing of `shadertoolsconfig.json`, opening the effective
+configuration file, shader variants, compilation, resource bindings,
+preprocessor exploration, memory layout, compute visualization, and
+entry-point data flow. The same actions remain available from the Command
+Palette; call hierarchy uses VS Code's native **Show Call Hierarchy** action.
 
 The first HLSL document shows one dismissible activation message with direct
-links to configuration, variant selection, and setup diagnostics. If HLSL
-Tools is also enabled, HLSL-LSP shows a separate one-time warning explaining
-how to disable the competing language service for the workspace.
+links to guided configuration creation, variant selection, and setup
+diagnostics. If HLSL Tools is also enabled, HLSL-LSP shows a separate one-time
+warning explaining how to disable the competing language service for the
+workspace.
 
 Additional extensions can be associated with the contributed `hlsl` language
 through VS Code's built-in setting:
@@ -239,6 +240,22 @@ restart loop can form. **HLSL: Show Client Diagnostics** reports the selected an
 active runtime directory and the loaded DXC version.
 
 ## Configuration
+
+Run **HLSL: Create shadertoolsconfig.json** or **HLSL: Edit
+shadertoolsconfig.json** for a compiler-guided setup flow. In a multi-root
+window, first choose the workspace. The extension asks the server to discover
+and DXC-validate shader files, entry points, and target profiles; uniquely
+resolved entries are preselected, while ambiguous profiles require an explicit
+choice. Multiple candidates can be selected.
+
+The server returns a deterministic preview without writing files. VS Code shows
+that preview as a JSON diff and requires confirmation before applying it as a
+normal `WorkspaceEdit`, so the change remains visible to source control.
+Existing unsaved configuration content is included in the request. Immediately
+before applying, the extension compares the server's expected document version
+and content hash with the current editor buffer; stale previews are refused and
+can be restarted. Validation failures identify the exact configuration field,
+and the resulting file opens after a successful apply.
 
 `hlsl.languageVersion` defaults to `2021` as a _client default_. It remains
 below `shadertoolsconfig.json` in the server's precedence order. The following

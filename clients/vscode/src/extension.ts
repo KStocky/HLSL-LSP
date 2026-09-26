@@ -91,6 +91,11 @@ import {
   readTraceSetting,
   TraceSetting,
 } from "./configuration";
+import { ConfigurationAuthoringController } from "./configurationAuthoring";
+import {
+  ConfigurationAuthoringParams,
+  ConfigurationAuthoringResult,
+} from "./configurationAuthoringCore";
 import {
   ClientLifecycle,
   ConnectionRecoveryTracker,
@@ -153,6 +158,9 @@ interface ManagedClient extends LifecycleClient {
   effectiveContext(uri: vscode.Uri): Promise<EffectiveShaderContext | null>;
   dxcRuntime(): Promise<DxcRuntimeInfo | null>;
   variants(uri: vscode.Uri | undefined): Promise<VariantList | null>;
+  configurationAuthoring(
+    params: ConfigurationAuthoringParams,
+  ): Promise<ConfigurationAuthoringResult | null>;
 }
 
 export interface HlslExtensionApi {
@@ -1753,6 +1761,15 @@ class VscodeLanguageClient implements ManagedClient {
     );
   }
 
+  public configurationAuthoring(
+    params: ConfigurationAuthoringParams,
+  ): Promise<ConfigurationAuthoringResult | null> {
+    return this.client.sendRequest<ConfigurationAuthoringResult | null>(
+      "hlsl/configurationAuthoring",
+      params,
+    );
+  }
+
   private async applySettings(
     settings: ClientSettings,
     isCurrentConnection: () => boolean,
@@ -1920,16 +1937,12 @@ export async function activate(
         await context.globalState.update(firstRunGuidanceStateKey, true);
         const selection = await vscode.window.showInformationMessage(
           "HLSL-LSP is active. Right-click the editor for the HLSL menu, or use the actions below to configure and inspect this shader.",
-          "Configuration Guide",
+          "Create Configuration",
           "Select Variant",
           "Setup Diagnostics",
         );
-        if (selection === "Configuration Guide") {
-          await vscode.env.openExternal(
-            vscode.Uri.parse(
-              "https://github.com/KStocky/HLSL-LSP/blob/main/docs/shadertoolsconfig.md",
-            ),
-          );
+        if (selection === "Create Configuration") {
+          await vscode.commands.executeCommand("hlsl.createConfiguration");
         } else if (selection === "Select Variant") {
           await vscode.commands.executeCommand("hlsl.selectVariant");
         } else if (selection === "Setup Diagnostics") {
@@ -2713,6 +2726,11 @@ export async function activate(
   }
 
   context.subscriptions.push(
+    new ConfigurationAuthoringController(
+      (params) =>
+        lifecycle.withClient((client) => client.configurationAuthoring(params)),
+      outputChannel,
+    ),
     vscode.commands.registerCommand("hlsl.showStatus", showHealth),
     vscode.commands.registerCommand("hlsl.restartServer", restart),
     vscode.commands.registerCommand("hlsl.stopServer", async () => {

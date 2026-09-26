@@ -3,6 +3,7 @@ import "./analysisTracking.test";
 import "./compilationInfo.test";
 import "./computeVisualization.test";
 import "./configuration.test";
+import "./configurationAuthoring.test";
 import "./debouncer.test";
 import "./effectiveContext.test";
 import "./entryPointDataFlow.test";

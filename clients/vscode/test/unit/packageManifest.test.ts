@@ -49,6 +49,15 @@ void test("restorable analysis panels activate their serializers", () => {
   );
 });
 
+void test("configuration authoring commands activate the extension", () => {
+  assert(
+    manifest.activationEvents.includes("onCommand:hlsl.createConfiguration"),
+  );
+  assert(
+    manifest.activationEvents.includes("onCommand:hlsl.editConfiguration"),
+  );
+});
+
 void test("package contributes an HLSL-only editor context submenu", () => {
   assert.deepEqual(manifest.contributes.submenus, [
     { id: "hlsl.editorContext", label: "HLSL" },
@@ -78,10 +87,12 @@ void test("HLSL submenu exposes every custom shader workflow in stable groups", 
     entries.map((entry) => [entry.command, entry.group]),
     [
       ["hlsl.showStatus", "1_configuration@0"],
-      ["hlsl.openEffectiveConfigurationFile", "1_configuration@1"],
-      ["hlsl.selectVariant", "1_configuration@2"],
-      ["hlsl.showCompilationInfo", "1_configuration@3"],
-      ["hlsl.showPreprocessorExplorer", "1_configuration@4"],
+      ["hlsl.createConfiguration", "1_configuration@1"],
+      ["hlsl.editConfiguration", "1_configuration@2"],
+      ["hlsl.openEffectiveConfigurationFile", "1_configuration@3"],
+      ["hlsl.selectVariant", "1_configuration@4"],
+      ["hlsl.showCompilationInfo", "1_configuration@5"],
+      ["hlsl.showPreprocessorExplorer", "1_configuration@6"],
       ["hlsl.expandMacro", "2_inspection@0"],
       ["hlsl.showMemoryLayout", "2_inspection@1"],
       ["hlsl.showResourceBindings", "2_inspection@2"],
@@ -118,6 +129,8 @@ void test("HLSL submenu uses concise command labels", () => {
     ),
     [
       "Status and Recovery",
+      "Create Configuration",
+      "Edit Configuration",
       "Open Effective Configuration",
       "Select Shader Variant",
       "Shader Compilation",

@@ -61,6 +61,9 @@ export async function run(): Promise<void> {
     vscode.extensions.getExtension<HlslExtensionApi>("KStocky.hlsl-lsp");
   assert(extension, "The HLSL-LSP extension was not found");
   const api = await extension.activate();
+  const registeredCommands = await vscode.commands.getCommands(true);
+  assert(registeredCommands.includes("hlsl.createConfiguration"));
+  assert(registeredCommands.includes("hlsl.editConfiguration"));
 
   const valid = await openFixture("valid.hlsl");
   await waitFor("server initialization", () =>

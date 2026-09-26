@@ -34,6 +34,8 @@
     "onCommand:hlsl.restartServer",
     "onCommand:hlsl.stopServer",
     "onCommand:hlsl.showStatus",
+    "onCommand:hlsl.createConfiguration",
+    "onCommand:hlsl.editConfiguration",
     "onCommand:hlsl.openEffectiveConfigurationFile",
     "onCommand:hlsl.showOutput",
     "onCommand:hlsl.showDiagnostics",
@@ -95,6 +97,18 @@
       {
         "command": "hlsl.showOutput",
         "title": "HLSL: Show Language Server Output",
+        "category": "HLSL"
+      },
+      {
+        "command": "hlsl.createConfiguration",
+        "title": "HLSL: Create shadertoolsconfig.json",
+        "shortTitle": "Create Configuration",
+        "category": "HLSL"
+      },
+      {
+        "command": "hlsl.editConfiguration",
+        "title": "HLSL: Edit shadertoolsconfig.json",
+        "shortTitle": "Edit Configuration",
         "category": "HLSL"
       },
       {
@@ -178,24 +192,34 @@
           "group": "1_configuration@0"
         },
         {
-          "command": "hlsl.openEffectiveConfigurationFile",
+          "command": "hlsl.createConfiguration",
           "when": "editorLangId == hlsl",
           "group": "1_configuration@1"
         },
         {
-          "command": "hlsl.selectVariant",
+          "command": "hlsl.editConfiguration",
           "when": "editorLangId == hlsl",
           "group": "1_configuration@2"
         },
         {
-          "command": "hlsl.showCompilationInfo",
+          "command": "hlsl.openEffectiveConfigurationFile",
           "when": "editorLangId == hlsl",
           "group": "1_configuration@3"
         },
         {
-          "command": "hlsl.showPreprocessorExplorer",
+          "command": "hlsl.selectVariant",
           "when": "editorLangId == hlsl",
           "group": "1_configuration@4"
+        },
+        {
+          "command": "hlsl.showCompilationInfo",
+          "when": "editorLangId == hlsl",
+          "group": "1_configuration@5"
+        },
+        {
+          "command": "hlsl.showPreprocessorExplorer",
+          "when": "editorLangId == hlsl",
+          "group": "1_configuration@6"
         },
         {
           "command": "hlsl.expandMacro",
