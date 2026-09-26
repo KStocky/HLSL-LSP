@@ -24,6 +24,11 @@ visualization, and entry-point data flow. The same actions remain available
 from the Command Palette; call hierarchy uses VS Code's native **Show Call
 Hierarchy** action.
 
+The first HLSL document shows one dismissible activation message with direct
+links to configuration, variant selection, and setup diagnostics. If HLSL
+Tools is also enabled, HLSL-LSP shows a separate one-time warning explaining
+how to disable the competing language service for the workspace.
+
 Additional extensions can be associated with the contributed `hlsl` language
 through VS Code's built-in setting:
 
