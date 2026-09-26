@@ -404,6 +404,38 @@ struct ComputeMetadataLimits {
     std::size_t max_barrier_locations{256};
 };
 
+// Compiler-authored statistics from D3D12_SHADER_DESC. These counts describe
+// the compiled program and its reflection metadata; they are not estimates of
+// GPU execution time, occupancy, latency, or hardware performance.
+struct CompilationStatistics {
+    std::uint32_t instruction_count{};
+    std::uint32_t temp_register_count{};
+    std::uint32_t temp_array_count{};
+    std::uint32_t define_count{};
+    std::uint32_t declaration_count{};
+    std::uint32_t texture_normal_instruction_count{};
+    std::uint32_t texture_load_instruction_count{};
+    std::uint32_t texture_comparison_instruction_count{};
+    std::uint32_t texture_bias_instruction_count{};
+    std::uint32_t texture_gradient_instruction_count{};
+    std::uint32_t float_instruction_count{};
+    std::uint32_t int_instruction_count{};
+    std::uint32_t uint_instruction_count{};
+    std::uint32_t static_flow_control_count{};
+    std::uint32_t dynamic_flow_control_count{};
+    std::uint32_t macro_instruction_count{};
+    std::uint32_t array_instruction_count{};
+    std::uint32_t cut_instruction_count{};
+    std::uint32_t emit_instruction_count{};
+    std::uint32_t geometry_shader_max_output_vertex_count{};
+    std::uint32_t geometry_shader_instance_count{};
+    std::uint32_t control_point_count{};
+    std::uint32_t patch_constant_parameter_count{};
+    std::uint32_t barrier_instruction_count{};
+    std::uint32_t interlocked_instruction_count{};
+    std::uint32_t texture_store_instruction_count{};
+};
+
 // DXIL reflection extracted via IDxcUtils::CreateReflection and
 // ID3D12ShaderReflection. Unavailable for non-DXIL output (e.g. SPIR-V); in
 // that case `available` is false and `unavailable_reason` explains why,
@@ -415,8 +447,11 @@ struct CompilationReflection {
     std::vector<CompilationSignatureParameter> output_signature;
     std::vector<CompilationResourceBinding> resources;
     std::optional<CompilationThreadGroupSize> thread_group_size;
+    std::optional<CompilationStatistics> statistics;
     // Compiler-emitted barrier instruction count from
-    // D3D12_SHADER_DESC::cBarrierInstructions.
+    // D3D12_SHADER_DESC::cBarrierInstructions. Retained as an internal
+    // compatibility alias for compute visualization while the complete
+    // descriptor is exposed through `statistics`.
     std::uint32_t barrier_instruction_count{};
     // Deterministic grouping/collision analysis over `resources`, computed
     // purely from the reflected register data above.

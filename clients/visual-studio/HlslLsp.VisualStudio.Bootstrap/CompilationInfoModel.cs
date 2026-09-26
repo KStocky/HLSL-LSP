@@ -273,6 +273,123 @@ public sealed class CompilationThreadGroupSizeModel
     public long Z { get; set; }
 }
 
+// Exact D3D12_SHADER_DESC counts reported by DXC. They describe compiler
+// output and are not GPU timing, occupancy, latency, or performance estimates.
+public sealed class CompilationStatisticsModel
+{
+    public long InstructionCount { get; set; }
+    public long TempRegisterCount { get; set; }
+    public long TempArrayCount { get; set; }
+    public long DefineCount { get; set; }
+    public long DeclarationCount { get; set; }
+    public long TextureNormalInstructionCount { get; set; }
+    public long TextureLoadInstructionCount { get; set; }
+    public long TextureComparisonInstructionCount { get; set; }
+    public long TextureBiasInstructionCount { get; set; }
+    public long TextureGradientInstructionCount { get; set; }
+    public long FloatInstructionCount { get; set; }
+    public long IntInstructionCount { get; set; }
+    public long UintInstructionCount { get; set; }
+    public long StaticFlowControlCount { get; set; }
+    public long DynamicFlowControlCount { get; set; }
+    public long MacroInstructionCount { get; set; }
+    public long ArrayInstructionCount { get; set; }
+    public long CutInstructionCount { get; set; }
+    public long EmitInstructionCount { get; set; }
+    public long GeometryShaderMaxOutputVertexCount { get; set; }
+    public long GeometryShaderInstanceCount { get; set; }
+    public long ControlPointCount { get; set; }
+    public long PatchConstantParameterCount { get; set; }
+    public long BarrierInstructionCount { get; set; }
+    public long InterlockedInstructionCount { get; set; }
+    public long TextureStoreInstructionCount { get; set; }
+}
+
+internal sealed class CompilationStatisticsGroup
+{
+    internal CompilationStatisticsGroup(
+        string title,
+        params KeyValuePair<string, long>[] values)
+    {
+        Title = title;
+        Values = values;
+    }
+
+    internal string Title { get; }
+
+    internal IReadOnlyList<KeyValuePair<string, long>> Values { get; }
+}
+
+internal static class CompilationStatisticsPresentation
+{
+    internal static IReadOnlyList<CompilationStatisticsGroup> Groups(
+        string stage,
+        CompilationStatisticsModel statistics)
+    {
+        var groups = new List<CompilationStatisticsGroup>
+        {
+            new(
+                "Overview",
+                Pair("Instructions", statistics.InstructionCount),
+                Pair("Temporary registers", statistics.TempRegisterCount),
+                Pair("Temporary arrays", statistics.TempArrayCount)),
+            new(
+                "Instruction classes",
+                Pair("Floating-point", statistics.FloatInstructionCount),
+                Pair("Signed integer", statistics.IntInstructionCount),
+                Pair("Unsigned integer", statistics.UintInstructionCount),
+                Pair("Array", statistics.ArrayInstructionCount),
+                Pair("Macro", statistics.MacroInstructionCount)),
+            new(
+                "Texture operations",
+                Pair("Normal", statistics.TextureNormalInstructionCount),
+                Pair("Load", statistics.TextureLoadInstructionCount),
+                Pair("Comparison", statistics.TextureComparisonInstructionCount),
+                Pair("Bias", statistics.TextureBiasInstructionCount),
+                Pair("Gradient", statistics.TextureGradientInstructionCount),
+                Pair("Store", statistics.TextureStoreInstructionCount)),
+            new(
+                "Flow and synchronization",
+                Pair("Static flow-control constructs", statistics.StaticFlowControlCount),
+                Pair("Dynamic flow-control instructions", statistics.DynamicFlowControlCount),
+                Pair("Barrier instructions", statistics.BarrierInstructionCount),
+                Pair("Interlocked instructions", statistics.InterlockedInstructionCount)),
+            new(
+                "Compiler metadata",
+                Pair("Definition instructions", statistics.DefineCount),
+                Pair("Declaration instructions", statistics.DeclarationCount)),
+        };
+
+        if (string.Equals(stage, "geometry", StringComparison.OrdinalIgnoreCase))
+        {
+            groups.Add(new CompilationStatisticsGroup(
+                "Geometry stage",
+                Pair("Cut instructions", statistics.CutInstructionCount),
+                Pair("Emit instructions", statistics.EmitInstructionCount),
+                Pair(
+                    "Maximum output vertices",
+                    statistics.GeometryShaderMaxOutputVertexCount),
+                Pair("Instances", statistics.GeometryShaderInstanceCount)));
+        }
+        else if (
+            string.Equals(stage, "hull", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(stage, "domain", StringComparison.OrdinalIgnoreCase))
+        {
+            groups.Add(new CompilationStatisticsGroup(
+                "Tessellation stage",
+                Pair("Control points", statistics.ControlPointCount),
+                Pair(
+                    "Patch-constant parameters",
+                    statistics.PatchConstantParameterCount)));
+        }
+
+        return groups;
+    }
+
+    private static KeyValuePair<string, long> Pair(string label, long value)
+        => new(label, value);
+}
+
 public sealed class CompilationReflectionModel
 {
     public bool Available { get; set; }
@@ -289,6 +406,8 @@ public sealed class CompilationReflectionModel
         Array.Empty<CompilationResourceBindingModel>();
 
     public CompilationThreadGroupSizeModel ThreadGroupSize { get; set; }
+
+    public CompilationStatisticsModel Statistics { get; set; }
 
     public ResourceBindingAnalysisModel BindingAnalysis { get; set; } =
         new ResourceBindingAnalysisModel();

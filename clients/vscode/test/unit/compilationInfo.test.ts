@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   CompilationInfo,
+  CompilationStatistics,
   compilationInfoErrorHtml,
   compilationInfoHtml,
   copyDisassemblyCommand,
@@ -10,6 +11,40 @@ import {
   resolveCompilationInfoRefresh,
   saveDisassemblyCommand,
 } from "../../src/compilationInfo";
+
+function baseStatistics(
+  overrides: Partial<CompilationStatistics> = {},
+): CompilationStatistics {
+  return {
+    instructionCount: 42,
+    tempRegisterCount: 3,
+    tempArrayCount: 1,
+    defineCount: 2,
+    declarationCount: 7,
+    textureNormalInstructionCount: 4,
+    textureLoadInstructionCount: 1,
+    textureComparisonInstructionCount: 2,
+    textureBiasInstructionCount: 0,
+    textureGradientInstructionCount: 1,
+    floatInstructionCount: 18,
+    intInstructionCount: 3,
+    uintInstructionCount: 5,
+    staticFlowControlCount: 2,
+    dynamicFlowControlCount: 1,
+    macroInstructionCount: 0,
+    arrayInstructionCount: 2,
+    cutInstructionCount: 0,
+    emitInstructionCount: 0,
+    geometryShaderMaxOutputVertexCount: 0,
+    geometryShaderInstanceCount: 0,
+    controlPointCount: 0,
+    patchConstantParameterCount: 0,
+    barrierInstructionCount: 0,
+    interlockedInstructionCount: 1,
+    textureStoreInstructionCount: 2,
+    ...overrides,
+  };
+}
 
 function baseInfo(overrides: Partial<CompilationInfo> = {}): CompilationInfo {
   return {
@@ -73,6 +108,7 @@ function baseInfo(overrides: Partial<CompilationInfo> = {}): CompilationInfo {
         },
       ],
       threadGroupSize: null,
+      statistics: baseStatistics(),
       bindingAnalysis: { groups: [], collisions: [] },
     },
     rootSignature: null,
@@ -92,6 +128,10 @@ void test("compilation info HTML renders the full successful result", () => {
   assert.match(html, /Shaders\/Includes/);
   assert.match(html, /dxil/);
   assert.match(html, /1024 bytes/);
+  assert.match(html, /Compiler statistics/);
+  assert.match(html, /42 instructions/);
+  assert.match(html, /Temporary registers/);
+  assert.match(html, /not GPU timing/);
   assert.match(html, /SV_Position/);
   assert.match(html, /MainTexture/);
   assert.match(html, /texture2d/);
@@ -162,6 +202,7 @@ void test("compilation info HTML explains unavailable SPIR-V reflection", () => 
         outputSignature: [],
         resources: [],
         threadGroupSize: null,
+        statistics: null,
         bindingAnalysis: { groups: [], collisions: [] },
       },
     }),
@@ -186,6 +227,7 @@ void test("compilation info HTML renders compute thread-group size", () => {
         outputSignature: [],
         resources: [],
         threadGroupSize: { x: 8, y: 8, z: 1 },
+        statistics: baseStatistics({ barrierInstructionCount: 1 }),
         bindingAnalysis: { groups: [], collisions: [] },
       },
     }),
@@ -193,6 +235,45 @@ void test("compilation info HTML renders compute thread-group size", () => {
 
   assert.match(html, /Thread-group size/);
   assert.match(html, /<td>8<\/td><td>8<\/td><td>1<\/td>/);
+  assert.match(html, /Barrier instructions<\/th><td>1/);
+});
+
+void test("compiler statistics show only applicable stage-specific metrics", () => {
+  const baseReflection = baseInfo().reflection;
+  assert.ok(baseReflection);
+  const geometry = compilationInfoHtml(
+    baseInfo({
+      stage: "geometry",
+      reflection: {
+        ...baseReflection,
+        statistics: baseStatistics({
+          cutInstructionCount: 2,
+          emitInstructionCount: 3,
+          geometryShaderMaxOutputVertexCount: 4,
+          geometryShaderInstanceCount: 1,
+        }),
+      },
+    }),
+  );
+  assert.match(geometry, /Geometry stage/);
+  assert.match(geometry, /Maximum output vertices/);
+  assert.doesNotMatch(geometry, /Tessellation stage/);
+
+  const hull = compilationInfoHtml(
+    baseInfo({
+      stage: "hull",
+      reflection: {
+        ...baseReflection,
+        statistics: baseStatistics({
+          controlPointCount: 3,
+          patchConstantParameterCount: 2,
+        }),
+      },
+    }),
+  );
+  assert.match(hull, /Tessellation stage/);
+  assert.match(hull, /Patch-constant parameters/);
+  assert.doesNotMatch(hull, /Geometry stage/);
 });
 
 void test("compilation info HTML escapes untrusted diagnostic and resource text", () => {
@@ -233,6 +314,7 @@ void test("compilation info HTML escapes untrusted diagnostic and resource text"
           },
         ],
         threadGroupSize: null,
+        statistics: baseStatistics(),
         bindingAnalysis: { groups: [], collisions: [] },
       },
     }),

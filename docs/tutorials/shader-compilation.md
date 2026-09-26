@@ -68,6 +68,8 @@ Create `shadertoolsconfig.json` in the workspace root:
    - additional compiler argument `-Zi`.
 4. Verify the successful result:
    - output type `dxil` and a nonzero byte size;
+   - compiler statistics including total instructions, temporary storage,
+     operation classes, and synchronization counts;
    - reflected CBV `DispatchConstants` and UAV `Output`;
    - thread-group size `8 x 4 x 1`;
    - DXC-generated DXIL disassembly.
@@ -75,6 +77,10 @@ Create `shadertoolsconfig.json` in the workspace root:
 Use **Copy** to place the retained disassembly on the clipboard or **Save** to
 write it as an `.ll` file. HLSL-LSP retains at most 4 MiB and explicitly marks
 truncated output.
+
+Compiler statistics are exact DXC reflection counters for this compilation.
+They can help compare otherwise equivalent edits, but they are not GPU timing,
+occupancy, latency, or hardware-performance estimates.
 
 ## 3. Observe an unsaved compiler error
 

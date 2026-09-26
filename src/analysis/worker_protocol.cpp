@@ -197,9 +197,19 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(ComputeCompilerMetadata, barrier_locations_av
                                    group_shared_declarations, wave_size)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(ComputeMetadataLimits, max_group_shared_declarations,
                                    max_barrier_locations)
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(
+    CompilationStatistics, instruction_count, temp_register_count, temp_array_count, define_count,
+    declaration_count, texture_normal_instruction_count, texture_load_instruction_count,
+    texture_comparison_instruction_count, texture_bias_instruction_count,
+    texture_gradient_instruction_count, float_instruction_count, int_instruction_count,
+    uint_instruction_count, static_flow_control_count, dynamic_flow_control_count,
+    macro_instruction_count, array_instruction_count, cut_instruction_count, emit_instruction_count,
+    geometry_shader_max_output_vertex_count, geometry_shader_instance_count, control_point_count,
+    patch_constant_parameter_count, barrier_instruction_count, interlocked_instruction_count,
+    texture_store_instruction_count)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(CompilationReflection, available, unavailable_reason,
                                    input_signature, output_signature, resources, thread_group_size,
-                                   barrier_instruction_count, binding_analysis)
+                                   statistics, barrier_instruction_count, binding_analysis)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(CompilationOutput, size, type)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(CompilationDisassembly, available, text, unavailable_reason,
                                    truncated, original_size, displayed_size, format)

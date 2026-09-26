@@ -883,6 +883,37 @@ compilation_signature_parameter_json(const dxc::CompilationSignatureParameter& p
     return {{"groups", std::move(groups)}, {"collisions", std::move(collisions)}};
 }
 
+[[nodiscard]] Json compilation_statistics_json(const dxc::CompilationStatistics& statistics) {
+    return {
+        {"instructionCount", statistics.instruction_count},
+        {"tempRegisterCount", statistics.temp_register_count},
+        {"tempArrayCount", statistics.temp_array_count},
+        {"defineCount", statistics.define_count},
+        {"declarationCount", statistics.declaration_count},
+        {"textureNormalInstructionCount", statistics.texture_normal_instruction_count},
+        {"textureLoadInstructionCount", statistics.texture_load_instruction_count},
+        {"textureComparisonInstructionCount", statistics.texture_comparison_instruction_count},
+        {"textureBiasInstructionCount", statistics.texture_bias_instruction_count},
+        {"textureGradientInstructionCount", statistics.texture_gradient_instruction_count},
+        {"floatInstructionCount", statistics.float_instruction_count},
+        {"intInstructionCount", statistics.int_instruction_count},
+        {"uintInstructionCount", statistics.uint_instruction_count},
+        {"staticFlowControlCount", statistics.static_flow_control_count},
+        {"dynamicFlowControlCount", statistics.dynamic_flow_control_count},
+        {"macroInstructionCount", statistics.macro_instruction_count},
+        {"arrayInstructionCount", statistics.array_instruction_count},
+        {"cutInstructionCount", statistics.cut_instruction_count},
+        {"emitInstructionCount", statistics.emit_instruction_count},
+        {"geometryShaderMaxOutputVertexCount", statistics.geometry_shader_max_output_vertex_count},
+        {"geometryShaderInstanceCount", statistics.geometry_shader_instance_count},
+        {"controlPointCount", statistics.control_point_count},
+        {"patchConstantParameterCount", statistics.patch_constant_parameter_count},
+        {"barrierInstructionCount", statistics.barrier_instruction_count},
+        {"interlockedInstructionCount", statistics.interlocked_instruction_count},
+        {"textureStoreInstructionCount", statistics.texture_store_instruction_count},
+    };
+}
+
 [[nodiscard]] Json compilation_reflection_json(
     const dxc::CompilationReflection& reflection,
     const std::unordered_map<std::string, std::string>& resource_location_texts) {
@@ -905,6 +936,9 @@ compilation_signature_parameter_json(const dxc::CompilationSignatureParameter& p
                 {"resources", std::move(resources)},
                 {"barrierInstructionCount", reflection.barrier_instruction_count},
                 {"bindingAnalysis", resource_binding_analysis_json(reflection.binding_analysis)}};
+    result["statistics"] = reflection.statistics.has_value()
+                               ? compilation_statistics_json(*reflection.statistics)
+                               : Json(nullptr);
     if (reflection.thread_group_size.has_value()) {
         result["threadGroupSize"] = Json{{"x", reflection.thread_group_size->x},
                                          {"y", reflection.thread_group_size->y},

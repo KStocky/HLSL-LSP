@@ -4341,6 +4341,14 @@ TEST_CASE("Server compiles hlsl/compilationInfo using DXC and honors the active 
         resources, [](const Json& resource) { return resource["name"] == "MainSampler"; }));
     CHECK(info["reflection"]["threadGroupSize"].is_null());
     CHECK(info["reflection"]["barrierInstructionCount"] == 0);
+    const auto& statistics = info["reflection"]["statistics"];
+    REQUIRE(statistics.is_object());
+    CHECK(statistics["instructionCount"].get<std::uint32_t>() > 0);
+    CHECK(statistics["tempRegisterCount"].is_number_unsigned());
+    CHECK(statistics["textureNormalInstructionCount"].get<std::uint32_t>() > 0);
+    CHECK(statistics["barrierInstructionCount"] == 0);
+    CHECK(statistics["interlockedInstructionCount"].is_number_unsigned());
+    CHECK(statistics["textureStoreInstructionCount"].is_number_unsigned());
 
     // hlsl/compilationInfo backward-compatibly extends each resource with
     // compiler-owned register class, raw reflection flags, range id, sample
@@ -4506,6 +4514,7 @@ TEST_CASE("Server reports SPIR-V compilation info without fabricated reflection"
     REQUIRE(!info["reflection"].is_null());
     CHECK(info["reflection"]["available"] == false);
     CHECK_FALSE(info["reflection"]["unavailableReason"].get<std::string>().empty());
+    CHECK(info["reflection"]["statistics"].is_null());
 
     // Root signatures are a DXIL-container concept; for SPIR-V output this is
     // reported distinctly as "not applicable" rather than absent.
@@ -4567,6 +4576,7 @@ TEST_CASE("Server reports unavailable reflection and unknown compatibility for l
     REQUIRE(!info["reflection"].is_null());
     CHECK(info["reflection"]["available"] == false);
     CHECK_FALSE(info["reflection"]["unavailableReason"].get<std::string>().empty());
+    CHECK(info["reflection"]["statistics"].is_null());
 
     REQUIRE(!info["rootSignature"].is_null());
     CHECK(info["rootSignature"]["availability"] == "absent");

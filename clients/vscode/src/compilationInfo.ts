@@ -156,6 +156,37 @@ export interface CompilationThreadGroupSize {
   readonly z: number;
 }
 
+// Exact D3D12_SHADER_DESC counts reported by DXC. They describe compiler
+// output and are not GPU timing, occupancy, latency, or performance estimates.
+export interface CompilationStatistics {
+  readonly instructionCount: number;
+  readonly tempRegisterCount: number;
+  readonly tempArrayCount: number;
+  readonly defineCount: number;
+  readonly declarationCount: number;
+  readonly textureNormalInstructionCount: number;
+  readonly textureLoadInstructionCount: number;
+  readonly textureComparisonInstructionCount: number;
+  readonly textureBiasInstructionCount: number;
+  readonly textureGradientInstructionCount: number;
+  readonly floatInstructionCount: number;
+  readonly intInstructionCount: number;
+  readonly uintInstructionCount: number;
+  readonly staticFlowControlCount: number;
+  readonly dynamicFlowControlCount: number;
+  readonly macroInstructionCount: number;
+  readonly arrayInstructionCount: number;
+  readonly cutInstructionCount: number;
+  readonly emitInstructionCount: number;
+  readonly geometryShaderMaxOutputVertexCount: number;
+  readonly geometryShaderInstanceCount: number;
+  readonly controlPointCount: number;
+  readonly patchConstantParameterCount: number;
+  readonly barrierInstructionCount: number;
+  readonly interlockedInstructionCount: number;
+  readonly textureStoreInstructionCount: number;
+}
+
 export interface CompilationReflection {
   readonly available: boolean;
   readonly unavailableReason: string;
@@ -163,6 +194,7 @@ export interface CompilationReflection {
   readonly outputSignature: readonly CompilationSignatureParameter[];
   readonly resources: readonly CompilationResourceBinding[];
   readonly threadGroupSize: CompilationThreadGroupSize | null;
+  readonly statistics?: CompilationStatistics | null;
   readonly bindingAnalysis: ResourceBindingAnalysis;
 }
 
@@ -474,6 +506,93 @@ ${body}
 </section>`;
 }
 
+function statisticsTable(
+  title: string,
+  rows: readonly (readonly [string, number])[],
+): string {
+  return `<h3>${escapeHtml(title)}</h3>
+<table>${rows
+    .map(
+      ([label, value]) =>
+        `<tr><th>${escapeHtml(label)}</th><td>${String(value)}</td></tr>`,
+    )
+    .join("")}</table>`;
+}
+
+function compilerStatisticsSection(info: CompilationInfo): string {
+  const reflection = info.reflection;
+  if (reflection === null) {
+    return `<section>
+<h2>Compiler statistics</h2>
+<p class="muted">Compiler statistics are not available because no compiled output was produced.</p>
+</section>`;
+  }
+  if (!reflection.available || reflection.statistics == null) {
+    return `<section>
+<h2>Compiler statistics</h2>
+<p class="unavailable">Compiler statistics are unavailable: ${escapeHtml(reflection.unavailableReason || "DXC reflection did not provide shader statistics for this output.")}</p>
+</section>`;
+  }
+
+  const statistics = reflection.statistics;
+  const stageSpecific =
+    info.stage === "geometry"
+      ? statisticsTable("Geometry stage", [
+          ["Cut instructions", statistics.cutInstructionCount],
+          ["Emit instructions", statistics.emitInstructionCount],
+          [
+            "Maximum output vertices",
+            statistics.geometryShaderMaxOutputVertexCount,
+          ],
+          ["Instances", statistics.geometryShaderInstanceCount],
+        ])
+      : info.stage === "hull" || info.stage === "domain"
+        ? statisticsTable("Tessellation stage", [
+            ["Control points", statistics.controlPointCount],
+            [
+              "Patch-constant parameters",
+              statistics.patchConstantParameterCount,
+            ],
+          ])
+        : "";
+
+  return `<section>
+<h2>Compiler statistics</h2>
+<p class="muted">Exact counts reported by DXC reflection. These are not GPU timing, occupancy, latency, or hardware-performance estimates.</p>
+${statisticsTable("Overview", [
+  ["Instructions", statistics.instructionCount],
+  ["Temporary registers", statistics.tempRegisterCount],
+  ["Temporary arrays", statistics.tempArrayCount],
+])}
+${statisticsTable("Instruction classes", [
+  ["Floating-point", statistics.floatInstructionCount],
+  ["Signed integer", statistics.intInstructionCount],
+  ["Unsigned integer", statistics.uintInstructionCount],
+  ["Array", statistics.arrayInstructionCount],
+  ["Macro", statistics.macroInstructionCount],
+])}
+${statisticsTable("Texture operations", [
+  ["Normal", statistics.textureNormalInstructionCount],
+  ["Load", statistics.textureLoadInstructionCount],
+  ["Comparison", statistics.textureComparisonInstructionCount],
+  ["Bias", statistics.textureBiasInstructionCount],
+  ["Gradient", statistics.textureGradientInstructionCount],
+  ["Store", statistics.textureStoreInstructionCount],
+])}
+${statisticsTable("Flow and synchronization", [
+  ["Static flow-control constructs", statistics.staticFlowControlCount],
+  ["Dynamic flow-control instructions", statistics.dynamicFlowControlCount],
+  ["Barrier instructions", statistics.barrierInstructionCount],
+  ["Interlocked instructions", statistics.interlockedInstructionCount],
+])}
+${statisticsTable("Compiler metadata", [
+  ["Definition instructions", statistics.defineCount],
+  ["Declaration instructions", statistics.declarationCount],
+])}
+${stageSpecific}
+</section>`;
+}
+
 // Renders the compiler-generated disassembly text produced by DXC's own
 // disassembler (see docs/compilation-info.md). Never reconstructed,
 // decoded, or annotated by this client; `text` is HTML-escaped and shown
@@ -590,6 +709,7 @@ export function compilationInfoHtml(info: CompilationInfo): string {
   const resourceCount = info.reflection?.available
     ? info.reflection.resources.length
     : 0;
+  const instructionCount = info.reflection?.statistics?.instructionCount;
   const disassemblyNeedsAttention =
     !info.disassembly?.available || info.disassembly.truncated;
   const summary = analysisSummaryHtml([
@@ -617,6 +737,14 @@ export function compilationInfoHtml(info: CompilationInfo): string {
         ? "Unavailable"
         : String(resourceCount),
       tone: !info.reflection?.available ? "warning" : "neutral",
+    },
+    {
+      label: "Instructions",
+      value:
+        instructionCount === undefined
+          ? "Unavailable"
+          : String(instructionCount),
+      tone: instructionCount === undefined ? "warning" : "neutral",
     },
   ]);
   return `<!doctype html>
@@ -651,6 +779,7 @@ ${effectiveContextHeaderHtml(info.context)}
 ${analysisDetailsHtml("compilation-diagnostics", "Diagnostics", diagnosticsSection(info), { meta: diagnosticCount === 0 ? "None" : `${String(diagnosticCount)} reported`, open: !info.success || diagnosticCount > 0 })}
 ${analysisDetailsHtml("compilation-configuration", "Effective configuration", configurationSection(info), { meta: info.targetProfile || "Not configured" })}
 ${analysisDetailsHtml("compilation-output", "Compiled output", outputSection(info), { meta: info.output?.type ?? "Unavailable", open: true })}
+${analysisDetailsHtml("compilation-statistics", "Compiler statistics", compilerStatisticsSection(info), { meta: instructionCount === undefined ? "Unavailable" : `${String(instructionCount)} instructions`, open: instructionCount !== undefined })}
 ${analysisDetailsHtml("compilation-disassembly", "Disassembly", disassemblySection(info), { meta: info.disassembly?.available ? (info.disassembly.truncated ? "Available · truncated" : "Available") : "Unavailable", open: disassemblyNeedsAttention })}
 ${analysisDetailsHtml("compilation-reflection", "Reflection", reflectionSection(info), { meta: info.reflection?.available ? `${String(resourceCount)} resources` : "Unavailable", open: info.reflection?.available !== true })}
 ${analysisWebviewScript}
