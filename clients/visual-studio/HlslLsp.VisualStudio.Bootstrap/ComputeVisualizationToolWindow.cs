@@ -131,6 +131,8 @@ public sealed class ComputeVisualizationToolWindow : ToolWindowPane, IAnalysisTr
 internal sealed class ComputeVisualizationControl : UserControl
 {
     private readonly StackPanel content = new();
+    private readonly AnalysisViewState viewState = new();
+    private readonly ScrollViewer scrollViewer;
     private readonly StackPanel configuration = new();
     private readonly TextBox dispatchX = Input(string.Empty);
     private readonly TextBox dispatchY = Input(string.Empty);
@@ -154,12 +156,13 @@ internal sealed class ComputeVisualizationControl : UserControl
     {
         ThreadHelper.ThrowIfNotOnUIThread();
         VisualStudioTheme.ApplyToolWindowTheme(this);
-        Content = VisualStudioTheme.ApplyScrollViewerStyle(new ScrollViewer
+        scrollViewer = VisualStudioTheme.ApplyScrollViewerStyle(new ScrollViewer
         {
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
             Content = content,
         });
+        Content = scrollViewer;
         BuildConfiguration();
         SetReport(null, null);
     }
@@ -195,6 +198,7 @@ internal sealed class ComputeVisualizationControl : UserControl
         ComputeHardwareProfileModel submittedHardwareProfile)
     {
         ThreadHelper.ThrowIfNotOnUIThread();
+        var scrollOffset = AnalysisViewPresentation.CaptureScrollOffset(scrollViewer);
         inputError.Text = string.Empty;
         hasContent = report != null;
         content.Children.Clear();
@@ -205,6 +209,7 @@ internal sealed class ComputeVisualizationControl : UserControl
             AddText(
                 "Open an HLSL document, then choose HLSL > Compute Visualization.",
                 Brushes.Gray);
+            AnalysisViewPresentation.RestoreScrollOffset(scrollViewer, scrollOffset);
             return;
         }
         EffectiveShaderContextDisplay.AddHeader(
@@ -213,28 +218,66 @@ internal sealed class ComputeVisualizationControl : UserControl
             report.Context);
         if (!report.Applicable)
         {
+            AnalysisViewPresentation.AddSummary(
+                content,
+                AnalysisSummaryKind.Unavailable,
+                "Compute visualization is unavailable",
+                ComputeVisualizationDisplay.UnavailableReason(
+                    report.Explanation,
+                    "Compute visualization is not available for this document."));
             AddText(
                 ComputeVisualizationDisplay.UnavailableReason(
                     report.Explanation,
                     "Compute visualization is not available for this document."),
                 Brushes.Goldenrod);
+            AnalysisViewPresentation.RestoreScrollOffset(scrollViewer, scrollOffset);
             return;
         }
 
-        AddSection("Dispatch geometry");
-        AddRows(new[]
-        {
-            ("Threads per group", ComputeVisualizationDisplay.Dimensions(report.ThreadGroupSize)),
-            ("Desired logical workload (total threads/elements)", ComputeVisualizationDisplay.Dimensions(report.DispatchDimensions)),
-            ("Derived D3D Dispatch() group count", ComputeVisualizationDisplay.Dimensions(report.GroupCount)),
-            ("Launched threads", ComputeVisualizationDisplay.Number(report.LaunchedThreads)),
-            ("Inactive edge threads", ComputeVisualizationDisplay.Number(report.InactiveThreads)),
-        });
-        AddSystemValues(report.SystemValues);
-        AddGroupShared(report.GroupShared);
-        AddBarriers(report.Barriers);
-        AddWaveSize(report.WaveSize);
-        AddOccupancy(report.Occupancy, submittedHardwareProfile);
+        AnalysisViewPresentation.AddSummary(
+            content,
+            report.GroupShared?.Truncated == true ||
+            report.Barriers?.LocationsTruncated == true
+                ? AnalysisSummaryKind.Attention
+                : AnalysisSummaryKind.Success,
+            $"Dispatch groups {ComputeVisualizationDisplay.Dimensions(report.GroupCount)}",
+            $"{ComputeVisualizationDisplay.Number(report.LaunchedThreads)} launched thread(s); " +
+            $"{ComputeVisualizationDisplay.Number(report.InactiveThreads)} inactive edge thread(s)." +
+            (report.GroupShared?.Truncated == true ||
+             report.Barriers?.LocationsTruncated == true
+                ? " One or more compiler result sets are truncated."
+                : string.Empty));
+        AnalysisViewPresentation.AddSection(
+            content,
+            viewState,
+            "Dispatch geometry",
+            true,
+            () => AddRows(new[]
+            {
+                ("Threads per group", ComputeVisualizationDisplay.Dimensions(report.ThreadGroupSize)),
+                ("Desired logical workload (total threads/elements)", ComputeVisualizationDisplay.Dimensions(report.DispatchDimensions)),
+                ("Derived D3D Dispatch() group count", ComputeVisualizationDisplay.Dimensions(report.GroupCount)),
+                ("Launched threads", ComputeVisualizationDisplay.Number(report.LaunchedThreads)),
+                ("Inactive edge threads", ComputeVisualizationDisplay.Number(report.InactiveThreads)),
+            }));
+        AddDetailSection(
+            "System-value mapping",
+            true,
+            () => AddSystemValues(report.SystemValues));
+        AddDetailSection(
+            "Group-shared memory",
+            true,
+            () => AddGroupShared(report.GroupShared));
+        AddDetailSection(
+            "Compiler barriers",
+            false,
+            () => AddBarriers(report.Barriers));
+        AddDetailSection("Wave size", false, () => AddWaveSize(report.WaveSize));
+        AddDetailSection(
+            ComputeVisualizationDisplay.OccupancyHeading,
+            false,
+            () => AddOccupancy(report.Occupancy, submittedHardwareProfile));
+        AnalysisViewPresentation.RestoreScrollOffset(scrollViewer, scrollOffset);
     }
 
     internal void SetError(string message, bool preserveContent)
@@ -384,7 +427,6 @@ internal sealed class ComputeVisualizationControl : UserControl
 
     private void AddSystemValues(IReadOnlyList<ComputeSystemValueModel> values)
     {
-        AddSection("System-value mapping");
         if (values == null || values.Count == 0)
         {
             AddText("(no mappings reported)", Brushes.Gray);
@@ -401,7 +443,6 @@ internal sealed class ComputeVisualizationControl : UserControl
     private void AddGroupShared(ComputeGroupSharedAnalysisModel groupShared)
     {
         ThreadHelper.ThrowIfNotOnUIThread();
-        AddSection("Group-shared memory");
         if (groupShared == null || !groupShared.Available)
         {
             AddText(
@@ -445,7 +486,6 @@ internal sealed class ComputeVisualizationControl : UserControl
     private void AddBarriers(ComputeBarrierAnalysisModel barriers)
     {
         ThreadHelper.ThrowIfNotOnUIThread();
-        AddSection("Compiler barriers");
         if (barriers == null || !barriers.Available)
         {
             AddText(
@@ -482,7 +522,6 @@ internal sealed class ComputeVisualizationControl : UserControl
 
     private void AddWaveSize(ComputeWaveSizeModel wave)
     {
-        AddSection("Wave size");
         if (wave == null || !wave.Known)
         {
             AddText(
@@ -510,7 +549,6 @@ internal sealed class ComputeVisualizationControl : UserControl
         ComputeOccupancyModel occupancy,
         ComputeHardwareProfileModel submittedHardwareProfile)
     {
-        AddSection(ComputeVisualizationDisplay.OccupancyHeading);
         if (occupancy == null)
         {
             AddText(
@@ -618,14 +656,16 @@ internal sealed class ComputeVisualizationControl : UserControl
             OLEMSGBUTTON.OLEMSGBUTTON_OK,
             OLEMSGDEFBUTTON.OLEMSGDEFBUTTON_FIRST);
 
-    private void AddSection(string title)
-        => content.Children.Add(new TextBlock
-        {
-            Text = title,
-            FontSize = 14,
-            FontWeight = FontWeights.SemiBold,
-            Margin = new Thickness(0, 12, 0, 5),
-        });
+    private void AddDetailSection(
+        string title,
+        bool initiallyExpanded,
+        Action addBody)
+        => AnalysisViewPresentation.AddSection(
+            content,
+            viewState,
+            title,
+            initiallyExpanded,
+            addBody);
 
     private void AddRows(IEnumerable<(string Label, string Value)> rows)
     {

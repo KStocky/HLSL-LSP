@@ -98,22 +98,26 @@ public sealed class CompilationInfoToolWindow : ToolWindowPane, IAnalysisTrackin
 internal sealed class CompilationInfoControl : UserControl
 {
     private readonly StackPanel content = new();
+    private readonly AnalysisViewState viewState = new();
+    private readonly ScrollViewer scrollViewer;
     private bool hasContent;
 
     internal CompilationInfoControl()
     {
         VisualStudioTheme.ApplyToolWindowTheme(this);
-        Content = VisualStudioTheme.ApplyScrollViewerStyle(new ScrollViewer
+        scrollViewer = VisualStudioTheme.ApplyScrollViewerStyle(new ScrollViewer
         {
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
             Content = content,
         });
+        Content = scrollViewer;
         SetInfo(null, null);
     }
 
     internal void SetInfo(Uri documentUri, CompilationInfoModel info)
     {
+        var scrollOffset = AnalysisViewPresentation.CaptureScrollOffset(scrollViewer);
         hasContent = info != null;
         content.Children.Clear();
         content.Margin = new Thickness(12);
@@ -125,6 +129,7 @@ internal sealed class CompilationInfoControl : UserControl
                        "HLSL > Shader Compilation.",
                 TextWrapping = TextWrapping.Wrap,
             });
+            AnalysisViewPresentation.RestoreScrollOffset(scrollViewer, scrollOffset);
             return;
         }
 
@@ -137,6 +142,7 @@ internal sealed class CompilationInfoControl : UserControl
         }
         AddSection("Disassembly", () => AddDisassembly(documentUri, info.Disassembly));
         AddSection("Reflection", () => AddReflection(info.Reflection));
+        AnalysisViewPresentation.RestoreScrollOffset(scrollViewer, scrollOffset);
     }
 
     internal void SetError(string message, bool preserveContent)
@@ -175,13 +181,30 @@ internal sealed class CompilationInfoControl : UserControl
 
     private void AddStatus(CompilationInfoModel info)
     {
-        content.Children.Add(new TextBlock
+        var diagnosticCount =
+            (info.Diagnostics ?? Array.Empty<CompilationDiagnosticModel>()).Count;
+        AnalysisViewPresentation.AddSummary(
+            content,
+            info.Success && info.Disassembly?.Truncated != true
+                ? AnalysisSummaryKind.Success
+                : AnalysisSummaryKind.Attention,
+            info.Success
+                ? info.Disassembly?.Truncated == true
+                    ? "Compilation succeeded; disassembly is truncated"
+                    : "Compilation succeeded"
+                : "Compilation failed",
+            diagnosticCount == 0
+                ? "No compiler diagnostics."
+                : $"{diagnosticCount} compiler diagnostic(s).");
+        if (diagnosticCount > 0)
         {
-            Text = info.Success ? "Compilation succeeded" : "Compilation failed",
-            Foreground = info.Success ? Brushes.LimeGreen : Brushes.OrangeRed,
-            FontWeight = FontWeights.SemiBold,
-            Margin = new Thickness(0, 0, 0, 6),
-        });
+            content.Children.Add(new TextBlock
+            {
+                Text = "Diagnostics",
+                FontWeight = FontWeights.SemiBold,
+                Margin = new Thickness(0, 0, 0, 4),
+            });
+        }
         foreach (var diagnostic in info.Diagnostics ??
                                    Array.Empty<CompilationDiagnosticModel>())
         {
@@ -207,16 +230,12 @@ internal sealed class CompilationInfoControl : UserControl
         };
 
     private void AddSection(string title, Action addBody)
-    {
-        content.Children.Add(new TextBlock
-        {
-            Text = title,
-            FontSize = 14,
-            FontWeight = FontWeights.SemiBold,
-            Margin = new Thickness(0, 14, 0, 6),
-        });
-        addBody();
-    }
+        => AnalysisViewPresentation.AddSection(
+            content,
+            viewState,
+            title,
+            title == "Output",
+            addBody);
 
     private void AddConfiguration(CompilationInfoModel info)
     {

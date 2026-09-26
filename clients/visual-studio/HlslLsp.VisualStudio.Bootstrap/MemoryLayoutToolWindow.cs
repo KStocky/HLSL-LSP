@@ -150,22 +150,28 @@ internal sealed class MemoryLayoutControl : UserControl
     };
 
     private readonly StackPanel content = new();
+    private readonly AnalysisViewState viewState = new();
+    private readonly ScrollViewer scrollViewer;
+    private MemoryLayoutModel currentLayout;
     private bool hasContent;
 
     internal MemoryLayoutControl()
     {
         VisualStudioTheme.ApplyToolWindowTheme(this);
-        Content = VisualStudioTheme.ApplyScrollViewerStyle(new ScrollViewer
+        scrollViewer = VisualStudioTheme.ApplyScrollViewerStyle(new ScrollViewer
         {
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
             Content = content,
         });
+        Content = scrollViewer;
         SetLayout(null);
     }
 
     internal void SetLayout(MemoryLayoutModel layout)
     {
+        var scrollOffset = AnalysisViewPresentation.CaptureScrollOffset(scrollViewer);
+        currentLayout = layout;
         hasContent = layout != null;
         content.Children.Clear();
         content.Margin = new Thickness(12);
@@ -177,6 +183,7 @@ internal sealed class MemoryLayoutControl : UserControl
                        "HLSL > Memory Layout.",
                 TextWrapping = TextWrapping.Wrap,
             });
+            AnalysisViewPresentation.RestoreScrollOffset(scrollViewer, scrollOffset);
             return;
         }
 
@@ -191,6 +198,14 @@ internal sealed class MemoryLayoutControl : UserControl
             Margin = new Thickness(0, 0, 0, 12),
             Opacity = 0.75,
         });
+        AnalysisViewPresentation.AddSummary(
+            content,
+            (layout.Diagnostics?.Count ?? 0) > 0
+                ? AnalysisSummaryKind.Attention
+                : AnalysisSummaryKind.Success,
+            $"{layout.Size} byte layout",
+            $"{layout.Members?.Count ?? 0} top-level member(s); " +
+            $"{layout.Diagnostics?.Count ?? 0} diagnostic(s).");
         foreach (var diagnostic in layout.Diagnostics ?? Array.Empty<string>())
         {
             content.Children.Add(new TextBlock
@@ -201,8 +216,24 @@ internal sealed class MemoryLayoutControl : UserControl
                 Margin = new Thickness(0, 0, 0, 4),
             });
         }
-        AddDiagram(layout);
-        AddMemberTable(layout);
+        AnalysisViewPresentation.AddFilter(
+            content,
+            viewState,
+            "Filter layout members",
+            () => SetLayout(currentLayout));
+        AnalysisViewPresentation.AddSection(
+            content,
+            viewState,
+            "Byte diagram",
+            true,
+            () => AddDiagram(layout));
+        AnalysisViewPresentation.AddSection(
+            content,
+            viewState,
+            "Members",
+            true,
+            () => AddMemberTable(layout));
+        AnalysisViewPresentation.RestoreScrollOffset(scrollViewer, scrollOffset);
     }
 
     internal void SetError(string message, bool preserveContent)
@@ -353,7 +384,7 @@ internal sealed class MemoryLayoutControl : UserControl
         content.Children.Add(grid);
     }
 
-    private static void AddMembers(
+    private void AddMembers(
         Grid grid,
         IEnumerable<MemoryLayoutMemberModel> members,
         long baseOffset,
@@ -362,6 +393,10 @@ internal sealed class MemoryLayoutControl : UserControl
     {
         foreach (var member in members)
         {
+            if (!MemberMatches(member))
+            {
+                continue;
+            }
             var absoluteOffset = baseOffset + member.Offset;
             AddTableRow(
                 grid,
@@ -384,6 +419,11 @@ internal sealed class MemoryLayoutControl : UserControl
                 ref row);
         }
     }
+
+    private bool MemberMatches(MemoryLayoutMemberModel member)
+        => viewState.Matches(member.Name, member.Type) ||
+           (member.Members ?? Array.Empty<MemoryLayoutMemberModel>())
+           .Any(MemberMatches);
 
     private static void AddTableRow(Grid grid, int row, string[] values, bool header)
     {

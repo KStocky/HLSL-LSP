@@ -19,3 +19,4 @@ import "./runtime.test";
 import "./settingsSynchronizer.test";
 import "./variants.test";
 import "./watchers.test";
+import "./webviewUi.test";

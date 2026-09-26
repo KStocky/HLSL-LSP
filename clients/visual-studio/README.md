@@ -115,6 +115,14 @@ persist it safely. Last good content stays visible during refresh/failure, and
 known causes are reported consistently. See
 [analysis result freshness](../../docs/analysis-freshness.md).
 
+Analysis windows put a concise result summary before secondary detail.
+Long detail sections can be expanded or collapsed, and their expansion state
+and scroll position survive automatic refreshes. Resource, preprocessing,
+memory-layout, data-flow, and call-hierarchy collections provide a keyboard-
+accessible filter; press **Enter** or choose **Apply filter**. Truncation,
+compiler limitations, collisions, and unavailable analysis remain visible
+near the summary rather than being hidden by filtering.
+
 Choose **HLSL > Shader Compilation** from the editor context menu to open a tool window with the active
 HLSL document's effective compiler configuration, compiler success/failure and
 diagnostics, output type and size, DXC reflection (signatures, resource

@@ -420,6 +420,12 @@ public sealed class CallHierarchyExplorerToolWindow : ToolWindowPane, IAnalysisT
 internal sealed class CallHierarchyExplorerControl : UserControl
 {
     private readonly StackPanel content = new();
+    private readonly AnalysisViewState viewState = new();
+    private readonly ScrollViewer scrollViewer;
+    private CallHierarchyFrame currentFrame;
+    private bool currentCanGoBack;
+    private string currentBanner;
+    private string currentPlaceholder;
 
     internal event Action<CallHierarchyItemModel, CallHierarchySection> DrillInRequested;
 
@@ -429,18 +435,24 @@ internal sealed class CallHierarchyExplorerControl : UserControl
     {
         ThreadHelper.ThrowIfNotOnUIThread();
         VisualStudioTheme.ApplyToolWindowTheme(this);
-        Content = VisualStudioTheme.ApplyScrollViewerStyle(new ScrollViewer
+        scrollViewer = VisualStudioTheme.ApplyScrollViewerStyle(new ScrollViewer
         {
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
             Content = content,
         });
+        Content = scrollViewer;
         Render(null, false, null, "Right-click a function in an HLSL document, then choose HLSL > Call Hierarchy.");
     }
 
     internal void Render(CallHierarchyFrame frame, bool canGoBack, string banner, string placeholderMessage)
     {
         ThreadHelper.ThrowIfNotOnUIThread();
+        var scrollOffset = AnalysisViewPresentation.CaptureScrollOffset(scrollViewer);
+        currentFrame = frame;
+        currentCanGoBack = canGoBack;
+        currentBanner = banner;
+        currentPlaceholder = placeholderMessage;
         content.Children.Clear();
         content.Margin = new Thickness(12);
         if (frame == null)
@@ -458,6 +470,7 @@ internal sealed class CallHierarchyExplorerControl : UserControl
                 TextWrapping = TextWrapping.Wrap,
                 Margin = new Thickness(0, 6, 0, 0),
             });
+            AnalysisViewPresentation.RestoreScrollOffset(scrollViewer, scrollOffset);
             return;
         }
 
@@ -476,6 +489,16 @@ internal sealed class CallHierarchyExplorerControl : UserControl
         }
 
         AddSelectedHeader(frame.Item);
+        AnalysisViewPresentation.AddSummary(
+            content,
+            string.IsNullOrEmpty(banner)
+                ? AnalysisSummaryKind.Success
+                : AnalysisSummaryKind.Attention,
+            $"{frame.Incoming?.Count ?? 0} caller(s), " +
+            $"{frame.Outgoing?.Count ?? 0} callee(s)",
+            string.IsNullOrEmpty(banner)
+                ? "Compiler-authoritative call relationships."
+                : banner);
 
         if (!string.IsNullOrEmpty(banner))
         {
@@ -487,9 +510,19 @@ internal sealed class CallHierarchyExplorerControl : UserControl
                 Margin = new Thickness(0, 8, 0, 8),
             });
         }
+        AnalysisViewPresentation.AddFilter(
+            content,
+            viewState,
+            "Filter call hierarchy",
+            () => Render(
+                currentFrame,
+                currentCanGoBack,
+                currentBanner,
+                currentPlaceholder));
 
         AddSection("Incoming calls (callers)", () => AddIncomingCalls(frame.Incoming));
         AddSection("Outgoing calls (callees)", () => AddOutgoingCalls(frame.Outgoing));
+        AnalysisViewPresentation.RestoreScrollOffset(scrollViewer, scrollOffset);
     }
     private void AddSelectedHeader(CallHierarchyItemModel item)
     {
@@ -519,16 +552,12 @@ internal sealed class CallHierarchyExplorerControl : UserControl
     }
 
     private void AddSection(string title, Action addBody)
-    {
-        content.Children.Add(new TextBlock
-        {
-            Text = title,
-            FontSize = 13,
-            FontWeight = FontWeights.SemiBold,
-            Margin = new Thickness(0, 14, 0, 6),
-        });
-        addBody();
-    }
+        => AnalysisViewPresentation.AddSection(
+            content,
+            viewState,
+            title,
+            true,
+            addBody);
 
     private void AddIncomingCalls(IReadOnlyList<CallHierarchyIncomingCallModel> incoming)
     {
@@ -540,6 +569,13 @@ internal sealed class CallHierarchyExplorerControl : UserControl
         }
         foreach (var call in incoming)
         {
+            if (!viewState.Matches(
+                    call?.From?.Name,
+                    call?.From?.Detail,
+                    call?.From?.Uri))
+            {
+                continue;
+            }
             AddCallRow(call?.From, call?.FromRanges?.Count ?? 0, CallHierarchySection.Incoming);
         }
     }
@@ -554,6 +590,13 @@ internal sealed class CallHierarchyExplorerControl : UserControl
         }
         foreach (var call in outgoing)
         {
+            if (!viewState.Matches(
+                    call?.To?.Name,
+                    call?.To?.Detail,
+                    call?.To?.Uri))
+            {
+                continue;
+            }
             AddCallRow(call?.To, call?.FromRanges?.Count ?? 0, CallHierarchySection.Outgoing);
         }
     }

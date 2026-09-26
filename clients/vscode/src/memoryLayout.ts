@@ -2,6 +2,14 @@ import {
   EffectiveShaderContext,
   effectiveContextHeaderHtml,
 } from "./effectiveContext";
+import {
+  analysisDetailsHtml,
+  analysisFilterHtml,
+  analysisSummaryHtml,
+  analysisWebviewScript,
+  analysisWebviewStyles,
+  filterableAttributes,
+} from "./webviewUi";
 
 export interface MemoryLayoutMember {
   readonly name: string;
@@ -286,7 +294,7 @@ function memberRows(
   return members
     .map((member) => {
       const absoluteOffset = baseOffset + member.offset;
-      const row = `<tr><td style="padding-left:${String(depth * 1.25 + 0.5)}rem">${escapeHtml(member.name)}</td><td><code>${escapeHtml(member.type)}</code></td><td>${String(absoluteOffset)}</td><td>${String(member.size)}</td><td>${String(member.alignment)}</td><td>${String(member.paddingBefore)}</td></tr>`;
+      const row = `<tr ${filterableAttributes("memory-members", `${member.name} ${member.type} ${String(absoluteOffset)} ${String(member.size)} ${String(member.alignment)}`)}><td style="padding-left:${String(depth * 1.25 + 0.5)}rem">${escapeHtml(member.name)}</td><td><code>${escapeHtml(member.type)}</code></td><td>${String(absoluteOffset)}</td><td>${String(member.size)}</td><td>${String(member.alignment)}</td><td>${String(member.paddingBefore)}</td></tr>`;
       return row + memberRows(member.members, absoluteOffset, depth + 1);
     })
     .join("");
@@ -305,19 +313,36 @@ export function memoryLayoutHtml(layout: MemoryLayout): string {
       ? ""
       : `<section class="diagnostics">${layout.diagnostics.map((message) => `<p>${escapeHtml(message)}</p>`).join("")}</section>`;
 
-  const summary = hasContent
-    ? `<div class="summary">${mode} · size ${String(layout.size)} bytes · alignment ${String(layout.alignment)} bytes · allocation ${String(layout.allocationSize)} bytes</div>`
-    : `<div class="summary">${mode}</div>`;
+  const summary = analysisSummaryHtml([
+    {
+      label: "Layout",
+      value: mode,
+      tone: hasContent ? "success" : "warning",
+    },
+    { label: "Size", value: `${String(layout.size)} bytes`, tone: "neutral" },
+    {
+      label: "Alignment",
+      value: `${String(layout.alignment)} bytes`,
+      tone: "neutral",
+    },
+    {
+      label: "Allocation",
+      value: `${String(layout.allocationSize)} bytes`,
+      tone: "info",
+    },
+  ]);
 
   const diagram = hasContent
-    ? `<div class="diagram">${rowDiagram(layout)}</div>`
+    ? `<section><h2>Byte map</h2><div class="diagram" role="img" aria-label="Byte layout for ${escapeHtml(layout.name || layout.type)}">${rowDiagram(layout)}</div></section>`
     : "";
 
   const table = hasContent
-    ? `<table>
+    ? `<section><h2>Members</h2>
+${analysisFilterHtml("memory-members", "Filter members", "Name, type, offset, size…")}
+<table>
 <thead><tr><th>Member</th><th>Type</th><th>Offset</th><th>Size</th><th>Alignment</th><th>Padding before</th></tr></thead>
 <tbody>${memberRows(layout.members)}</tbody>
-</table>`
+</table></section>`
     : "";
 
   return `<!doctype html>
@@ -351,15 +376,18 @@ export function memoryLayoutHtml(layout: MemoryLayout): string {
   th, td { border-bottom: 1px solid var(--vscode-panel-border); padding: .45rem .5rem; text-align: left; }
   th { color: var(--vscode-descriptionForeground); }
   .diagnostics { border-left: 3px solid var(--vscode-editorWarning-foreground); padding-left: .75rem; margin: 1rem 0; }
+  h2 { font-size:1.05rem; margin:1rem 0 .4rem; }
+${analysisWebviewStyles}
 </style>
 </head>
 <body>
 <h1>${escapeHtml(layout.name || layout.type)}</h1>
-${effectiveContextHeaderHtml(layout.context)}
 ${summary}
+${effectiveContextHeaderHtml(layout.context)}
 ${diagnostics}
-${diagram}
-${table}
+${hasContent ? analysisDetailsHtml("memory-diagram", "Byte map", diagram, { meta: `${String(layout.allocationSize)} bytes`, open: true }) : `<p class="unavailable">No layout members were reported.</p>`}
+${hasContent ? analysisDetailsHtml("memory-members-section", "Members", table, { meta: String(memoryLayoutSegments(layout).filter((segment) => segment.kind === "value").length) }) : ""}
+${analysisWebviewScript}
 </body>
 </html>`;
 }

@@ -20,6 +20,14 @@ import {
   RootSignatureStaticSampler,
 } from "./compilationInfo";
 import { effectiveContextHeaderHtml } from "./effectiveContext";
+import {
+  analysisDetailsHtml,
+  analysisFilterHtml,
+  analysisSummaryHtml,
+  analysisWebviewScript,
+  analysisWebviewStyles,
+  filterableAttributes,
+} from "./webviewUi";
 
 // Dedicated **HLSL Resource Bindings** view: register-space/class grouping,
 // collisions, embedded root-signature state, and root-signature
@@ -115,9 +123,9 @@ function resourceLookup(
 // The one command this view's webview may invoke through a plain
 // `command:` URI. Webview panels pass
 // `enableCommandUris: [openResourceLocationCommand]` (never `true`) so no
-// other command can ever be triggered from this view's static HTML, and
-// `enableScripts` stays `false` throughout -- no script execution is
-// needed at all for navigation.
+// other command can ever be triggered from this view. Its small local
+// script only preserves disclosure/filter/scroll state and never posts
+// messages or constructs command URIs.
 export const openResourceLocationCommand = "hlsl.resourceBindings.openLocation";
 
 function resourceLocationCommandUri(
@@ -206,7 +214,7 @@ function resourcesByGroupTable(
       const resource = lookup.get(
         resourceKey(group.registerClass, group.space, range.resourceName),
       );
-      return `<tr>
+      return `<tr ${filterableAttributes("resource-bindings", `${range.resourceName} ${rangeText(range)} ${resource?.type ?? ""} ${resource?.dimension ?? ""} ${resource?.returnType ?? ""} ${resource?.usage ?? "unknown"} space ${String(group.space)} ${registerClassLabels[group.registerClass]}`)}>
 <td>${resourceNameLabel(range.resourceName, resource?.sourceLocation ?? null)}</td>
 <td>${escapeHtml(rangeText(range))}</td>
 <td>${escapeHtml(arrayText(resource))}</td>
@@ -258,6 +266,7 @@ ${resourcesByGroupTable(group, lookup)}`;
   return `<section>
 <h2>Resources</h2>
 <p class="muted">Grouped by register space, then register class. System-reserved spaces (0xfffffff0&ndash;0xffffffff) are compiler/driver-internal and are excluded from collision detection.</p>
+${analysisFilterHtml("resource-bindings", "Filter resources", "Name, type, register, space, usage…")}
 ${body}
 </section>`;
 }
@@ -484,6 +493,56 @@ ${status}
 
 export function resourceBindingsHtml(info: CompilationInfo): string {
   const title = info.entryPoint || "Not configured";
+  const resourceCount = info.reflection?.available
+    ? info.reflection.resources.length
+    : 0;
+  const collisionCount = info.reflection?.available
+    ? info.reflection.bindingAnalysis.collisions.length
+    : undefined;
+  const compatibility =
+    info.compatibility === null
+      ? "Unavailable"
+      : info.compatibility.status === "compatible"
+        ? "Compatible"
+        : info.compatibility.status === "incompatible"
+          ? "Incompatible"
+          : "Unknown";
+  const compatibilityTone =
+    info.compatibility?.status === "compatible"
+      ? "success"
+      : info.compatibility?.status === "incompatible"
+        ? "error"
+        : "warning";
+  const summary = analysisSummaryHtml([
+    {
+      label: "Compilation",
+      value: info.success ? "Succeeded" : "Failed",
+      tone: info.success ? "success" : "error",
+    },
+    {
+      label: "Resources",
+      value: !info.reflection?.available
+        ? "Unavailable"
+        : String(resourceCount),
+      tone: !info.reflection?.available ? "warning" : "neutral",
+    },
+    {
+      label: "Collisions",
+      value:
+        collisionCount === undefined ? "Unavailable" : String(collisionCount),
+      tone:
+        collisionCount === undefined
+          ? "warning"
+          : collisionCount === 0
+            ? "success"
+            : "error",
+    },
+    {
+      label: "Compatibility",
+      value: compatibility,
+      tone: compatibilityTone,
+    },
+  ]);
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -507,16 +566,19 @@ export function resourceBindingsHtml(info: CompilationInfo): string {
   ul { margin: 0; padding-left: 1.25rem; }
   .badge { font-size: .75rem; border-radius: .75rem; padding: .05rem .5rem; border: 1px solid var(--vscode-panel-border); }
   .badge.reserved { color: var(--vscode-editorWarning-foreground); }
+${analysisWebviewStyles}
 </style>
 </head>
 <body>
 <h1>Resource Bindings: ${escapeHtml(title)}</h1>
+${summary}
 ${effectiveContextHeaderHtml(info.context)}
 ${headerSection(info)}
-${groupsSection(info)}
-${collisionsSection(info)}
-${rootSignatureSection(info.rootSignature)}
-${compatibilitySection(info.compatibility)}
+${analysisDetailsHtml("resource-bindings-resources", "Resources", groupsSection(info), { meta: info.reflection?.available ? `${String(resourceCount)} reflected` : "Unavailable", open: true })}
+${analysisDetailsHtml("resource-bindings-collisions", "Collisions", collisionsSection(info), { meta: collisionCount === undefined ? "Unavailable" : collisionCount === 0 ? "None" : String(collisionCount), open: collisionCount !== undefined && collisionCount > 0 })}
+${analysisDetailsHtml("resource-bindings-root-signature", "Root signature", rootSignatureSection(info.rootSignature), { meta: info.rootSignature?.availability ?? "Unavailable", open: info.rootSignature === null || info.rootSignature.availability === "presentDetailsUnavailable" || (info.rootSignature.availability === "present" && info.rootSignature.details === null) })}
+${analysisDetailsHtml("resource-bindings-compatibility", "Compatibility", compatibilitySection(info.compatibility), { meta: compatibility, open: info.compatibility?.status !== "compatible" })}
+${analysisWebviewScript}
 </body>
 </html>`;
 }

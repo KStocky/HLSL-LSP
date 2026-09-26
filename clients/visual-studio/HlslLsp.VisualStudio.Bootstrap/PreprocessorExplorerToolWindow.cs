@@ -109,24 +109,30 @@ public sealed class PreprocessorExplorerToolWindow : ToolWindowPane, IAnalysisTr
 internal sealed class PreprocessorExplorerControl : UserControl
 {
     private readonly StackPanel content = new();
+    private readonly AnalysisViewState viewState = new();
+    private readonly ScrollViewer scrollViewer;
+    private PreprocessorExplorerModel currentReport;
     private bool hasContent;
 
     internal PreprocessorExplorerControl()
     {
         ThreadHelper.ThrowIfNotOnUIThread();
         VisualStudioTheme.ApplyToolWindowTheme(this);
-        Content = VisualStudioTheme.ApplyScrollViewerStyle(new ScrollViewer
+        scrollViewer = VisualStudioTheme.ApplyScrollViewerStyle(new ScrollViewer
         {
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
             Content = content,
         });
+        Content = scrollViewer;
         SetReport(null);
     }
 
     internal void SetReport(PreprocessorExplorerModel report)
     {
         ThreadHelper.ThrowIfNotOnUIThread();
+        var scrollOffset = AnalysisViewPresentation.CaptureScrollOffset(scrollViewer);
+        currentReport = report;
         hasContent = report != null;
         content.Children.Clear();
         content.Margin = new Thickness(12);
@@ -138,10 +144,43 @@ internal sealed class PreprocessorExplorerControl : UserControl
                        "HLSL > Preprocessor Explorer.",
                 TextWrapping = TextWrapping.Wrap,
             });
+            AnalysisViewPresentation.RestoreScrollOffset(scrollViewer, scrollOffset);
             return;
         }
 
         AddHeader(report);
+        var unresolvedIncludes =
+            (report.Files ?? Array.Empty<PreprocessorFileModel>())
+            .SelectMany(file =>
+                file.Includes ?? Array.Empty<PreprocessorIncludeModel>())
+            .Count(include =>
+                !string.Equals(
+                    include.Status,
+                    "resolved",
+                    StringComparison.OrdinalIgnoreCase));
+        var skippedRegionsUnavailable =
+            report.CompilerAnalysis?.SkippedRegions?.Available == false;
+        var compilerMacrosUnavailable =
+            report.CompilerAnalysis?.CompilerMacros?.Available == false;
+        var hasAttention =
+            (report.Diagnostics?.Count ?? 0) > 0 ||
+            unresolvedIncludes > 0 ||
+            skippedRegionsUnavailable ||
+            compilerMacrosUnavailable;
+        AnalysisViewPresentation.AddSummary(
+            content,
+            hasAttention
+                ? AnalysisSummaryKind.Attention
+                : AnalysisSummaryKind.Success,
+            unresolvedIncludes > 0
+                ? $"{unresolvedIncludes} unresolved include(s)"
+                : skippedRegionsUnavailable || compilerMacrosUnavailable
+                    ? "Compiler analysis is partially unavailable"
+                    : $"{report.Files?.Count ?? 0} file(s), " +
+                      $"{report.Macros?.Count ?? 0} macro(s)",
+            $"{report.SkippedRegions?.Count ?? 0} skipped region(s); " +
+            $"{report.Diagnostics?.Count ?? 0} diagnostic(s); " +
+            $"{unresolvedIncludes} unresolved include(s).");
         foreach (var diagnostic in report.Diagnostics ?? Array.Empty<string>())
         {
             content.Children.Add(new TextBlock
@@ -152,6 +191,11 @@ internal sealed class PreprocessorExplorerControl : UserControl
                 Margin = new Thickness(0, 0, 0, 4),
             });
         }
+        AnalysisViewPresentation.AddFilter(
+            content,
+            viewState,
+            "Filter preprocessor files and macros",
+            () => SetReport(currentReport));
         AddSection("Files", () => AddFiles(report.Files));
         AddSection(
             "Preprocessor-skipped regions",
@@ -162,6 +206,7 @@ internal sealed class PreprocessorExplorerControl : UserControl
             "Macros",
             () => AddMacros(report.Macros, report.CompilerAnalysis?.CompilerMacros));
         AddSection("Effective settings", () => AddSettings(report.Settings));
+        AnalysisViewPresentation.RestoreScrollOffset(scrollViewer, scrollOffset);
     }
 
     internal void SetError(string message, bool preserveContent)
@@ -192,16 +237,14 @@ internal sealed class PreprocessorExplorerControl : UserControl
     }
 
     private void AddSection(string title, Action addBody)
-    {
-        content.Children.Add(new TextBlock
-        {
-            Text = title,
-            FontSize = 14,
-            FontWeight = FontWeights.SemiBold,
-            Margin = new Thickness(0, 14, 0, 6),
-        });
-        addBody();
-    }
+        => AnalysisViewPresentation.AddSection(
+            content,
+            viewState,
+            title,
+            title is "Files" or "Preprocessor-skipped regions" ||
+            title == "Macros" &&
+            currentReport?.CompilerAnalysis?.CompilerMacros?.Available == false,
+            addBody);
 
     // --- Files / includes -------------------------------------------------
 
@@ -213,8 +256,19 @@ internal sealed class PreprocessorExplorerControl : UserControl
             content.Children.Add(new TextBlock { Text = "(none)", Opacity = 0.75 });
             return;
         }
+        var visibleFiles = 0;
         foreach (var file in files)
         {
+            if (!viewState.Matches(
+                    file.LogicalPath,
+                    file.PhysicalPath,
+                    file.Source) &&
+                !(file.Includes ?? Array.Empty<PreprocessorIncludeModel>())
+                .Any(IncludeMatches))
+            {
+                continue;
+            }
+            ++visibleFiles;
             var heading = new TextBlock
             {
                 TextWrapping = TextWrapping.Wrap,
@@ -245,13 +299,23 @@ internal sealed class PreprocessorExplorerControl : UserControl
             });
             AddIncludeTable(file);
         }
+        if (visibleFiles == 0)
+        {
+            content.Children.Add(new TextBlock
+            {
+                Text = "No files or includes match the current filter.",
+                Opacity = 0.75,
+            });
+        }
     }
 
     private void AddIncludeTable(PreprocessorFileModel file)
     {
         ThreadHelper.ThrowIfNotOnUIThread();
-        var includes = file.Includes ?? Array.Empty<PreprocessorIncludeModel>();
-        if (includes.Count == 0)
+        var includes = (file.Includes ?? Array.Empty<PreprocessorIncludeModel>())
+            .Where(IncludeMatches)
+            .ToArray();
+        if (includes.Length == 0)
         {
             content.Children.Add(new TextBlock
             {
@@ -261,6 +325,7 @@ internal sealed class PreprocessorExplorerControl : UserControl
             });
             return;
         }
+
         var grid = new Grid { Margin = new Thickness(12, 0, 0, 8) };
         foreach (var width in new[] { 220d, 100d, 90d, 260d })
         {
@@ -371,6 +436,15 @@ internal sealed class PreprocessorExplorerControl : UserControl
         content.Children.Add(grid);
     }
 
+    private bool IncludeMatches(PreprocessorIncludeModel include)
+        => viewState.Matches(
+            include.Path,
+            include.ExpandedPath,
+            include.LogicalPath,
+            include.Status,
+            include.Mapping,
+            include.ConfigurationMacro);
+
     private static string DirectiveLabel(PreprocessorIncludeModel include)
         => include.Kind switch
         {
@@ -477,6 +551,14 @@ internal sealed class PreprocessorExplorerControl : UserControl
         AddTableHeaderRow(grid, row++, new[] { "Name", "Value", "Source", "Origin" });
         foreach (var macro in macros)
         {
+            if (!viewState.Matches(
+                    macro.Name,
+                    macro.Value,
+                    macro.Source,
+                    macro.Origin))
+            {
+                continue;
+            }
             grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
 
             var nameCell = new TextBlock
@@ -523,7 +605,18 @@ internal sealed class PreprocessorExplorerControl : UserControl
 
             ++row;
         }
-        content.Children.Add(grid);
+        if (row == 1)
+        {
+            content.Children.Add(new TextBlock
+            {
+                Text = "No macros match the current filter.",
+                Opacity = 0.75,
+            });
+        }
+        else
+        {
+            content.Children.Add(grid);
+        }
     }
 
     private void AddUnavailable(string reason)

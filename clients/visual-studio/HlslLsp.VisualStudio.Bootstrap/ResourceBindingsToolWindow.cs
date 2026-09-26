@@ -122,24 +122,30 @@ internal sealed class ResourceBindingsControl : UserControl
         };
 
     private readonly StackPanel content = new();
+    private readonly AnalysisViewState viewState = new();
+    private readonly ScrollViewer scrollViewer;
+    private CompilationInfoModel currentInfo;
     private bool hasContent;
 
     internal ResourceBindingsControl()
     {
         ThreadHelper.ThrowIfNotOnUIThread();
         VisualStudioTheme.ApplyToolWindowTheme(this);
-        Content = VisualStudioTheme.ApplyScrollViewerStyle(new ScrollViewer
+        scrollViewer = VisualStudioTheme.ApplyScrollViewerStyle(new ScrollViewer
         {
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
             Content = content,
         });
+        Content = scrollViewer;
         SetInfo(null);
     }
 
     internal void SetInfo(CompilationInfoModel info)
     {
         ThreadHelper.ThrowIfNotOnUIThread();
+        var scrollOffset = AnalysisViewPresentation.CaptureScrollOffset(scrollViewer);
+        currentInfo = info;
         hasContent = info != null;
         content.Children.Clear();
         content.Margin = new Thickness(12);
@@ -151,14 +157,49 @@ internal sealed class ResourceBindingsControl : UserControl
                        "HLSL > Resource Bindings.",
                 TextWrapping = TextWrapping.Wrap,
             });
+            AnalysisViewPresentation.RestoreScrollOffset(scrollViewer, scrollOffset);
             return;
         }
 
         AddHeader(info);
+        var collisions =
+            info.Reflection?.BindingAnalysis?.Collisions ??
+            Array.Empty<ResourceBindingCollisionModel>();
+        var resources =
+            info.Reflection?.Resources ??
+            Array.Empty<CompilationResourceBindingModel>();
+        var compatibility = info.Compatibility?.Status ?? "unknown";
+        AnalysisViewPresentation.AddSummary(
+            content,
+            !info.Success ||
+            collisions.Count > 0 ||
+            !string.Equals(
+                compatibility,
+                "compatible",
+                StringComparison.OrdinalIgnoreCase)
+                ? AnalysisSummaryKind.Attention
+                : AnalysisSummaryKind.Success,
+            collisions.Count > 0
+                ? $"{collisions.Count} binding collision(s)"
+                : !string.Equals(
+                    compatibility,
+                    "compatible",
+                    StringComparison.OrdinalIgnoreCase)
+                    ? $"Compatibility is {compatibility}"
+                    : "No binding collisions detected",
+            $"{resources.Count} reflected resource(s); " +
+            $"root-signature compatibility: {compatibility}.");
+        AnalysisViewPresentation.AddFilter(
+            content,
+            viewState,
+            "Filter resources",
+            () => SetInfo(currentInfo));
         AddSection("Resources", () => AddResources(info.Reflection));
         AddSection("Collisions", () => AddCollisions(info.Reflection));
         AddSection("Root signature", () => AddRootSignature(info.RootSignature));
         AddSection("Compatibility", () => AddCompatibility(info.Compatibility));
+        AddSection("Navigation limitations", AddNavigationLimitations);
+        AnalysisViewPresentation.RestoreScrollOffset(scrollViewer, scrollOffset);
     }
 
     internal void SetError(string message, bool preserveContent)
@@ -204,32 +245,24 @@ internal sealed class ResourceBindingsControl : UserControl
                 Margin = new Thickness(0, 0, 0, 6),
             });
         }
-        content.Children.Add(new TextBlock
-        {
-            Text = "Resource names and collision participants are clickable only " +
-                   "when DXC's reflection supplies an unambiguous declaration " +
-                   "location for them; a resource whose name cannot be found, or " +
-                   "that matches more than one declaration, renders as plain " +
-                   "text instead of a guessed link. Embedded root-signature " +
-                   "entries have no declaration location in this protocol, so " +
-                   "they are never clickable.",
-            TextWrapping = TextWrapping.Wrap,
-            Opacity = 0.75,
-            Margin = new Thickness(0, 0, 0, 12),
-        });
+    }
+
+    private void AddNavigationLimitations()
+    {
+        AddMuted(
+            "Resource names and collision participants are clickable only " +
+            "when DXC reflection supplies an unambiguous declaration location. " +
+            "Ambiguous resources render as plain text, and embedded root-signature " +
+            "entries have no declaration locations in this protocol.");
     }
 
     private void AddSection(string title, Action addBody)
-    {
-        content.Children.Add(new TextBlock
-        {
-            Text = title,
-            FontSize = 14,
-            FontWeight = FontWeights.SemiBold,
-            Margin = new Thickness(0, 14, 0, 6),
-        });
-        addBody();
-    }
+        => AnalysisViewPresentation.AddSection(
+            content,
+            viewState,
+            title,
+            title is "Resources" or "Collisions",
+            addBody);
 
     // --- Resources ---------------------------------------------------
 
@@ -261,8 +294,33 @@ internal sealed class ResourceBindingsControl : UserControl
             "spaces (0xfffffff0\u20130xffffffff) are compiler/driver-internal and " +
             "are excluded from collision detection.");
         var lookup = ResourceLookup(reflection.Resources);
+        var visibleGroups = 0;
         foreach (var group in groups)
         {
+            var visibleRanges =
+                (group.Ranges ?? Array.Empty<ResourceBindingRangeModel>())
+                .Where(range =>
+                {
+                    lookup.TryGetValue(
+                        ResourceKey(
+                            group.RegisterClass,
+                            group.Space,
+                            range.ResourceName),
+                        out var resource);
+                    return viewState.Matches(
+                        range.ResourceName,
+                        resource?.Type,
+                        resource?.Dimension,
+                        resource?.Usage,
+                        group.RegisterClass,
+                        group.Space.ToString(CultureInfo.InvariantCulture));
+                })
+                .ToArray();
+            if (visibleRanges.Length == 0)
+            {
+                continue;
+            }
+            ++visibleGroups;
             var reserved = group.SystemReservedSpace ? "  [system-reserved]" : string.Empty;
             var heading = new TextBlock
             {
@@ -276,7 +334,11 @@ internal sealed class ResourceBindingsControl : UserControl
                 heading.Foreground = Brushes.Goldenrod;
             }
             content.Children.Add(heading);
-            AddResourceRangeTable(group, lookup);
+            AddResourceRangeTable(group, visibleRanges, lookup);
+        }
+        if (visibleGroups == 0)
+        {
+            AddMuted("No resources match the current filter.");
         }
     }
 
@@ -396,6 +458,7 @@ internal sealed class ResourceBindingsControl : UserControl
 
     private void AddResourceRangeTable(
         ResourceBindingGroupModel group,
+        IReadOnlyList<ResourceBindingRangeModel> ranges,
         IReadOnlyDictionary<string, CompilationResourceBindingModel> lookup)
     {
         ThreadHelper.ThrowIfNotOnUIThread();
@@ -414,7 +477,7 @@ internal sealed class ResourceBindingsControl : UserControl
                 "Sample count / stride", "Usage",
             },
             true);
-        foreach (var range in group.Ranges ?? Array.Empty<ResourceBindingRangeModel>())
+        foreach (var range in ranges)
         {
             lookup.TryGetValue(
                 ResourceKey(group.RegisterClass, group.Space, range.ResourceName),

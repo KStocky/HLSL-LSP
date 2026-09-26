@@ -3,6 +3,14 @@ import {
   EffectiveShaderContext,
   effectiveContextHeaderHtml,
 } from "./effectiveContext";
+import {
+  analysisDetailsHtml,
+  analysisFilterHtml,
+  analysisSummaryHtml,
+  analysisWebviewScript,
+  analysisWebviewStyles,
+  filterableAttributes,
+} from "./webviewUi";
 
 // Renders the `hlsl/entryPointDataFlow` response: the whole-program
 // reachability walk from the document's already-configured entry point,
@@ -176,8 +184,9 @@ export interface EntryPointDataFlow {
 // `command:` URI. Webview panels pass
 // `enableCommandUris: [openEntryPointDataFlowLocationCommand]` (never
 // `true`) so no other command can ever be triggered from this view's
-// static HTML, and `enableScripts` stays `false` throughout -- no script
-// execution is needed at all for navigation.
+// static command surface. Its small local script only preserves
+// disclosure/filter/scroll state and never posts messages or constructs
+// command URIs.
 export const openEntryPointDataFlowLocationCommand =
   "hlsl.entryPointDataFlow.openLocation";
 
@@ -271,15 +280,15 @@ function reachableRow(entry: ReachableFunctionEntry): string {
   const recursiveBadge = entry.recursive
     ? ` <span class="badge recursive" title="Part of a call cycle reachable from the entry point">recursive</span>`
     : "";
-  return `<tr><td>${callableLink(entry.function)}${recursiveBadge}</td><td>${escapeHtml(entry.function.detail)}</td><td>${String(entry.depth)}</td></tr>`;
+  return `<tr ${filterableAttributes("data-flow-reachable", `${entry.function.name} ${entry.function.detail} depth ${String(entry.depth)} ${entry.recursive ? "recursive" : ""}`)}><td>${callableLink(entry.function)}${recursiveBadge}</td><td>${escapeHtml(entry.function.detail)}</td><td>${String(entry.depth)}</td></tr>`;
 }
 
 function unreachableRow(item: CallHierarchyItem): string {
-  return `<tr><td>${callableLink(item)}</td><td>${escapeHtml(item.detail)}</td></tr>`;
+  return `<tr ${filterableAttributes("data-flow-unreachable", `${item.name} ${item.detail}`)}><td>${callableLink(item)}</td><td>${escapeHtml(item.detail)}</td></tr>`;
 }
 
 function unusedDeclarationRow(symbol: NavigableSymbol): string {
-  return `<tr><td>${symbolLink(symbol, symbol.name)}</td><td>${escapeHtml(kindLabel(symbol.kind))}</td></tr>`;
+  return `<tr ${filterableAttributes("data-flow-unused", `${symbol.name} ${kindLabel(symbol.kind)}`)}><td>${symbolLink(symbol, symbol.name)}</td><td>${escapeHtml(kindLabel(symbol.kind))}</td></tr>`;
 }
 
 function globalAccessRow(entry: GlobalAccessEntry): string {
@@ -289,7 +298,7 @@ function globalAccessRow(entry: GlobalAccessEntry): string {
       : entry.name;
   const link = symbolLink(entry, nameLabel);
   const accessBadge = `<span class="badge access-${entry.access}">${accessLabels[entry.access]}</span>`;
-  return `<tr><td>${link}</td><td>${accessBadge}</td><td>${escapeHtml(kindLabel(entry.kind))}</td></tr>`;
+  return `<tr ${filterableAttributes("data-flow-accesses", `${nameLabel} ${accessLabels[entry.access]} ${kindLabel(entry.kind)}`)}><td>${link}</td><td>${accessBadge}</td><td>${escapeHtml(kindLabel(entry.kind))}</td></tr>`;
 }
 
 function reachableSection(flow: EntryPointDataFlow): string {
@@ -310,6 +319,7 @@ function reachableSection(flow: EntryPointDataFlow): string {
   return `<section>
 <h2>Reachable functions</h2>
 ${truncatedNote}
+${flow.reachableFunctions.length === 0 ? "" : analysisFilterHtml("data-flow-reachable", "Filter reachable functions", "Name, signature, depth…")}
 <table>
 <thead><tr><th>Function</th><th>Signature</th><th>Depth</th></tr></thead>
 <tbody>${rows}</tbody>
@@ -342,6 +352,7 @@ function globalAccessesSection(flow: EntryPointDataFlow): string {
   return `<section>
 <h2>Global &amp; resource accesses</h2>
 ${truncatedNote}
+${flow.globalAccesses.length === 0 ? "" : analysisFilterHtml("data-flow-accesses", "Filter global and resource accesses", "Name, access, kind…")}
 <table>
 <thead><tr><th>Name</th><th>Access</th><th>Kind</th></tr></thead>
 <tbody>${rows}</tbody>
@@ -379,6 +390,7 @@ function unreachableSection(flow: EntryPointDataFlow): string {
   return `<section>
 <h2>Unreachable functions</h2>
 <p class="muted">Function definitions in the translation unit not reachable from the entry point for the active variant.</p>
+${flow.unreachableFunctions.length === 0 ? "" : analysisFilterHtml("data-flow-unreachable", "Filter unreachable functions", "Name or signature…")}
 <table>
 <thead><tr><th>Function</th><th>Signature</th></tr></thead>
 <tbody>${rows}</tbody>
@@ -404,6 +416,7 @@ function unusedDeclarationsSection(flow: EntryPointDataFlow): string {
 <h2>Unused declarations</h2>
 <p class="muted">Top-level declarations DXC reports zero references to anywhere in the current snapshot.</p>
 ${truncatedNote}
+${flow.unusedDeclarations.length === 0 ? "" : analysisFilterHtml("data-flow-unused", "Filter unused declarations", "Name or kind…")}
 <table>
 <thead><tr><th>Name</th><th>Kind</th></tr></thead>
 <tbody>${rows}</tbody>
@@ -452,12 +465,9 @@ function truncationCauses(flow: EntryPointDataFlow): string[] {
   return causes;
 }
 
-function headerSection(flow: EntryPointDataFlow, documentUri: string): string {
-  const label = escapeHtml(documentLabel(documentUri));
+function headerSection(flow: EntryPointDataFlow): string {
   if (!flow.found) {
-    return `<h1>Entry-Point Data Flow: ${label}</h1>
-${effectiveContextHeaderHtml(flow.context)}
-<p class="not-found">${escapeHtml(flow.explanation || "No entry point is configured for this document.")}</p>`;
+    return `<p class="not-found">${escapeHtml(flow.explanation || "No entry point is configured for this document.")}</p>`;
   }
   const entryPointLine =
     flow.entryPoint === null
@@ -468,9 +478,7 @@ ${effectiveContextHeaderHtml(flow.context)}
     causes.length > 0
       ? `<p class="truncated">Analysis was truncated: ${causes.join("; ")}. Functions visited before truncation: ${String(flow.functionsVisited)}.</p>`
       : `<p class="muted">Functions visited: ${String(flow.functionsVisited)}</p>`;
-  return `<h1>Entry-Point Data Flow: ${label}</h1>
-${effectiveContextHeaderHtml(flow.context)}
-${entryPointLine}
+  return `${entryPointLine}
 ${truncatedBanner}`;
 }
 
@@ -478,11 +486,39 @@ export function entryPointDataFlowHtml(
   flow: EntryPointDataFlow,
   documentUri: string,
 ): string {
+  const summary = analysisSummaryHtml([
+    {
+      label: "Analysis",
+      value: !flow.found
+        ? "Unavailable"
+        : flow.truncated
+          ? "Incomplete"
+          : "Complete",
+      tone: !flow.found || flow.truncated ? "warning" : "success",
+    },
+    {
+      label: "Reachable",
+      value: String(flow.reachableFunctions.length),
+      tone: "neutral",
+    },
+    {
+      label: "Global accesses",
+      value: String(flow.globalAccesses.length),
+      tone: flow.globalAccessesTruncated ? "warning" : "neutral",
+    },
+    {
+      label: "Dead-code signals",
+      value: String(
+        flow.unreachableFunctions.length + flow.unusedDeclarations.length,
+      ),
+      tone: "info",
+    },
+  ]);
   const body = flow.found
-    ? `${reachableSection(flow)}
-${globalAccessesSection(flow)}
-${unreachableSection(flow)}
-${unusedDeclarationsSection(flow)}`
+    ? `${analysisDetailsHtml("data-flow-reachable-section", "Reachable functions", reachableSection(flow), { meta: String(flow.reachableFunctions.length), open: true })}
+${analysisDetailsHtml("data-flow-accesses-section", "Global & resource accesses", globalAccessesSection(flow), { meta: String(flow.globalAccesses.length), open: flow.globalAccessesTruncated })}
+${analysisDetailsHtml("data-flow-unreachable-section", "Unreachable functions", unreachableSection(flow), { meta: flow.functionsVisitedTruncated || flow.definitionsTruncated ? "Unknown" : String(flow.unreachableFunctions.length), open: flow.functionsVisitedTruncated || flow.definitionsTruncated })}
+${analysisDetailsHtml("data-flow-unused-section", "Unused declarations", unusedDeclarationsSection(flow), { meta: String(flow.unusedDeclarations.length), open: flow.unusedDeclarationsTruncated })}`
     : "";
   return `<!doctype html>
 <html lang="en">
@@ -506,11 +542,16 @@ ${unusedDeclarationsSection(flow)}`
   .badge.access-read { color: var(--vscode-terminal-ansiGreen); border-color: var(--vscode-terminal-ansiGreen); }
   .badge.access-write { color: var(--vscode-terminal-ansiYellow); border-color: var(--vscode-terminal-ansiYellow); }
   .badge.access-readWrite { color: var(--vscode-editorWarning-foreground); border-color: var(--vscode-editorWarning-foreground); }
+${analysisWebviewStyles}
 </style>
 </head>
 <body>
-${headerSection(flow, documentUri)}
+<h1>Entry-Point Data Flow: ${escapeHtml(documentLabel(documentUri))}</h1>
+${summary}
+${effectiveContextHeaderHtml(flow.context)}
+${headerSection(flow)}
 ${body}
+${analysisWebviewScript}
 </body>
 </html>`;
 }

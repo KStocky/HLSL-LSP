@@ -55,10 +55,13 @@ void test("preprocessor explorer HTML renders each file's includes with directiv
     }),
   );
   assert.match(html, /&quot;common\.hlsli&quot;/);
-  assert.match(html, /class="status resolved"/);
-  assert.match(html, /class="status missing"/);
+  assert.match(html, /class="status resolved status-badge success"/);
+  assert.match(html, /class="status missing status-badge error"/);
   assert.match(html, /&quot;missing\.hlsli&quot;/);
   assert.match(html, /<td>-<\/td>/);
+  assert.match(html, /class="analysis-summary"/);
+  assert.match(html, /data-state-key="preprocessor-includes-section" open/);
+  assert.match(html, /data-filter-input="preprocessor-includes"/);
 });
 
 void test("preprocessor explorer HTML links an include directive to its own reported position, never a guessed one", () => {
@@ -126,7 +129,7 @@ void test("preprocessor explorer HTML shows a macro-expanded include without a r
       ],
     }),
   );
-  assert.match(html, /class="status dynamic"/);
+  assert.match(html, /class="status dynamic status-badge neutral"/);
   assert.match(html, /macro-expanded/);
 });
 

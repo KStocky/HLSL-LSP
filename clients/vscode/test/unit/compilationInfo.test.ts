@@ -95,6 +95,10 @@ void test("compilation info HTML renders the full successful result", () => {
   assert.match(html, /SV_Position/);
   assert.match(html, /MainTexture/);
   assert.match(html, /texture2d/);
+  assert.match(html, /class="analysis-summary"/);
+  assert.match(html, /data-state-key="compilation-configuration"/);
+  assert.match(html, /data-filter-input="compilation-resources"/);
+  assert.match(html, /vscode\.getState\(\)/);
   // Full-mask components render as letters rather than raw numbers.
   assert.match(html, /<td>xyzw<\/td>/);
 });
