@@ -753,11 +753,38 @@ resource_compatibility_status(dxc::ResourceCompatibilityStatus status) {
 
 [[nodiscard]] Json
 compilation_signature_parameter_json(const dxc::CompilationSignatureParameter& parameter) {
-    return {
-        {"semanticName", parameter.semantic_name},    {"semanticIndex", parameter.semantic_index},
-        {"register", parameter.register_index},       {"systemValue", parameter.system_value},
-        {"componentType", parameter.component_type},  {"mask", parameter.mask},
-        {"readWriteMask", parameter.read_write_mask}, {"stream", parameter.stream}};
+    const auto interpolation = [&] {
+        switch (parameter.interpolation) {
+        case dxc::InterpolationMode::undefined:
+            return "undefined";
+        case dxc::InterpolationMode::constant:
+            return "constant";
+        case dxc::InterpolationMode::linear:
+            return "linear";
+        case dxc::InterpolationMode::linear_centroid:
+            return "linearCentroid";
+        case dxc::InterpolationMode::linear_noperspective:
+            return "linearNoperspective";
+        case dxc::InterpolationMode::linear_noperspective_centroid:
+            return "linearNoperspectiveCentroid";
+        case dxc::InterpolationMode::linear_sample:
+            return "linearSample";
+        case dxc::InterpolationMode::linear_noperspective_sample:
+            return "linearNoperspectiveSample";
+        case dxc::InterpolationMode::invalid:
+            return "invalid";
+        }
+        return "invalid";
+    }();
+    return {{"semanticName", parameter.semantic_name},
+            {"semanticIndex", parameter.semantic_index},
+            {"register", parameter.register_index},
+            {"systemValue", parameter.system_value},
+            {"componentType", parameter.component_type},
+            {"mask", parameter.mask},
+            {"readWriteMask", parameter.read_write_mask},
+            {"stream", parameter.stream},
+            {"interpolation", interpolation}};
 }
 
 // Builds an LSP `{uri, range}` location for a reflected resource's
