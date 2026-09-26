@@ -83,6 +83,18 @@ struct ConfigFile {
                                  "' must be " + std::string{expected}};
 }
 
+[[nodiscard]] Json parse_json(std::string_view content, const std::filesystem::path& path) {
+    try {
+        return Json::parse(content, nullptr, true, true);
+    } catch (const Json::parse_error& error) {
+        throw ConfigurationError{ConfigurationErrorCode::invalid_json,
+                                 path,
+                                 {},
+                                 "Invalid JSON in configuration file '" + path.string() +
+                                     "': " + error.what()};
+    }
+}
+
 [[nodiscard]] Json read_json(const std::filesystem::path& path) {
     std::ifstream stream{path};
     if (!stream) {
@@ -91,16 +103,9 @@ struct ConfigFile {
                                  {},
                                  "Unable to read configuration file '" + path.string() + "'"};
     }
-
-    try {
-        return Json::parse(stream, nullptr, true, true);
-    } catch (const Json::parse_error& error) {
-        throw ConfigurationError{ConfigurationErrorCode::invalid_json,
-                                 path,
-                                 {},
-                                 "Invalid JSON in configuration file '" + path.string() +
-                                     "': " + error.what()};
-    }
+    return parse_json(
+        std::string{std::istreambuf_iterator<char>{stream}, std::istreambuf_iterator<char>{}},
+        path);
 }
 
 [[nodiscard]] std::filesystem::path resolve_directory(const std::filesystem::path& config_path,
@@ -775,8 +780,7 @@ optional_non_empty_string(const Json& object, std::string_view property,
     return result;
 }
 
-[[nodiscard]] ConfigFile parse_config_file(const std::filesystem::path& path) {
-    const auto json = read_json(path);
+[[nodiscard]] ConfigFile parse_config_file(const Json& json, const std::filesystem::path& path) {
     if (!json.is_object()) {
         throw_type_error(path, "<root>", "an object");
     }
@@ -796,6 +800,10 @@ optional_non_empty_string(const Json& object, std::string_view property,
     result.variants = parse_variants(json, path);
     result.pipelines = parse_pipelines(json, path);
     return result;
+}
+
+[[nodiscard]] ConfigFile parse_config_file(const std::filesystem::path& path) {
+    return parse_config_file(read_json(path), path);
 }
 
 [[nodiscard]] std::vector<ConfigFile>
@@ -1380,6 +1388,7 @@ auto load_workspace_configuration_for_file(const std::filesystem::path& shader_f
                                  "Shader path '" + absolute_shader.string() +
                                      "' identifies a directory rather than a file"};
     }
+
     if (error && error != std::errc::no_such_file_or_directory) {
         throw ConfigurationError{ConfigurationErrorCode::invalid_directory,
                                  absolute_shader,
@@ -1393,6 +1402,11 @@ auto load_workspace_configuration_for_file(const std::filesystem::path& shader_f
     const auto canonical_shader_directory = std::filesystem::weakly_canonical(shader_directory);
     const auto canonical_shader = canonical_shader_directory / absolute_shader.filename();
     return merge_configurations(configs, canonical_shader);
+}
+
+void validate_workspace_configuration_content(std::string_view content,
+                                              const std::filesystem::path& path) {
+    static_cast<void>(parse_config_file(parse_json(content, path), path));
 }
 
 auto apply_configuration_overrides(WorkspaceConfiguration configuration,

@@ -46,6 +46,7 @@ add_library(hlsl_workspace STATIC)
 target_sources(hlsl_workspace
     PRIVATE
         src/workspace/configuration.cpp
+        src/workspace/configuration_authoring.cpp
         src/workspace/document_store.cpp
         src/workspace/document_uri.cpp
         src/workspace/include_resolver.cpp
@@ -55,6 +56,7 @@ target_sources(hlsl_workspace
         BASE_DIRS include
         FILES
             include/hlsl_intellisense/workspace/configuration.h
+            include/hlsl_intellisense/workspace/configuration_authoring.h
             include/hlsl_intellisense/workspace/document_store.h
             include/hlsl_intellisense/workspace/document_uri.h
             include/hlsl_intellisense/workspace/error.h
@@ -215,6 +217,7 @@ if(BUILD_TESTING)
     hlsl_enable_clang_tidy(hlsl-json-rpc-tests)
 
     add_executable(hlsl-workspace-tests
+        tests/workspace/configuration_authoring_tests.cpp
         tests/workspace/configuration_tests.cpp
         tests/workspace/document_store_tests.cpp
         tests/workspace/document_uri_tests.cpp
@@ -223,7 +226,8 @@ if(BUILD_TESTING)
     target_link_libraries(hlsl-workspace-tests PRIVATE
         Catch2::Catch2WithMain
         hlsl_workspace
-        hlsl_project_options)
+        hlsl_project_options
+        nlohmann_json::nlohmann_json)
     hlsl_enable_clang_tidy(hlsl-workspace-tests)
 
     add_executable(hlsl-analysis-benchmark

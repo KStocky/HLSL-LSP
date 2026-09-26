@@ -13,6 +13,12 @@ The shared fields make existing HLSL Tools configurations reusable. HLSL-LSP
 also adds DXC-oriented language-version, target, entry-point, and argument
 settings.
 
+Both editor clients can build a guided preview through the shared, read-only
+[`hlsl/configurationAuthoring`](configuration-authoring.md) protocol. Discovery,
+compiler-authoritative entry-point/profile candidates, deterministic merging,
+validation errors, and concurrent-edit guards are implemented by the server;
+clients remain responsible for presenting and applying the returned text.
+
 ## Example
 
 JSON comments are accepted.

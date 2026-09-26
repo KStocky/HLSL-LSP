@@ -240,6 +240,119 @@ TEST_CASE("LSP handler enforces lifecycle and invalid parameters", "[lsp][handle
     CHECK(server.exit_code() == 1);
 }
 
+TEST_CASE("Configuration authoring protocol discovers DXC entry points without writing files",
+          "[lsp][configuration-authoring][integration]") {
+    TestDirectory directory;
+    const auto shader = directory.path() / "Shaders" / "compute.hlsl";
+    std::filesystem::create_directories(shader.parent_path());
+    {
+        std::ofstream stream{shader};
+        REQUIRE(stream);
+        stream << "[numthreads(1, 1, 1)]\n"
+                  "void Main(uint3 id : SV_DispatchThreadID) { uint sink = id.x; }\n";
+    }
+    const auto folder_uri =
+        hlsl_intellisense::workspace::DocumentUri::from_path(directory.path().string()).uri();
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    hlsl_intellisense::lsp::Server server{[&notifications](const auto& notification_value) {
+        notifications.push_back(notification_value);
+    }};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1},
+        .method = "initialize",
+        .params = Json{{"workspaceFolders",
+                        Json::array({Json{{"uri", folder_uri}, {"name", "workspace"}}})}}}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+
+    const auto response = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{2},
+        .method = "hlsl/configurationAuthoring",
+        .params = Json{{"protocolVersion", 1}, {"workspaceFolder", {{"uri", folder_uri}}}}});
+    REQUIRE(response.has_value());
+    const auto* result = std::get_if<hlsl_intellisense::json_rpc::Response>(&*response);
+    if (const auto* error = std::get_if<hlsl_intellisense::json_rpc::ErrorResponse>(&*response)) {
+        FAIL(error->error.message);
+    }
+    REQUIRE(result != nullptr);
+    CHECK(result->result["protocolVersion"] == 1);
+    CHECK(result->result["configuration"]["exists"] == false);
+    CHECK(result->result["configuration"]["expectedContentHash"].is_null());
+    REQUIRE(result->result["discovery"]["files"].size() == 1);
+    const auto& file = result->result["discovery"]["files"][0];
+    CHECK(file["relativePath"] == "Shaders/compute.hlsl");
+    REQUIRE(file["entryPoints"].size() == 1);
+    CHECK(file["entryPoints"][0]["name"] == "Main");
+    CHECK(file["entryPoints"][0]["targetProfiles"] == Json::array({"cs_6_6"}));
+    CHECK(file["entryPoints"][0]["state"] == "resolved");
+    CHECK(result->result["preview"]["valid"] == true);
+    CHECK(result->result["preview"]["changed"] == true);
+    CHECK_FALSE(std::filesystem::exists(directory.path() / "shadertoolsconfig.json"));
+    const auto preview = Json::parse(result->result["preview"]["content"].get<std::string>());
+    CHECK(preview["hlsl.fileGroups"][0]["hlsl.entryPoint"] == "Main");
+    CHECK(preview["hlsl.fileGroups"][0]["hlsl.targetProfile"] == "cs_6_6");
+}
+
+TEST_CASE("Configuration authoring protocol rejects stale hashes and reports malformed content",
+          "[lsp][configuration-authoring]") {
+    TestDirectory directory;
+    const auto folder_uri =
+        hlsl_intellisense::workspace::DocumentUri::from_path(directory.path().string()).uri();
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    hlsl_intellisense::lsp::Server server{[&notifications](const auto& notification_value) {
+        notifications.push_back(notification_value);
+    }};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1},
+        .method = "initialize",
+        .params = Json{{"workspaceFolders",
+                        Json::array({Json{{"uri", folder_uri}, {"name", "workspace"}}})}}}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+
+    const auto stale = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{2},
+        .method = "hlsl/configurationAuthoring",
+        .params = Json{{"protocolVersion", 1},
+                       {"workspaceFolder", {{"uri", folder_uri}}},
+                       {"existingConfiguration",
+                        {{"content", "{}"}, {"version", 7}, {"contentHash", "sha256:stale"}}}}});
+    REQUIRE(stale.has_value());
+    const auto* stale_error = std::get_if<hlsl_intellisense::json_rpc::ErrorResponse>(&*stale);
+    REQUIRE(stale_error != nullptr);
+    CHECK(stale_error->error.code == hlsl_intellisense::json_rpc::invalid_params_code);
+
+    const std::string malformed = R"({"hlsl.variants":[)";
+    const auto malformed_response = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{3},
+        .method = "hlsl/configurationAuthoring",
+        .params = Json{{"protocolVersion", 1},
+                       {"workspaceFolder", {{"uri", folder_uri}}},
+                       {"existingConfiguration", {{"content", malformed}, {"version", 8}}}}});
+    REQUIRE(malformed_response.has_value());
+    const auto* malformed_result =
+        std::get_if<hlsl_intellisense::json_rpc::Response>(&*malformed_response);
+    REQUIRE(malformed_result != nullptr);
+    CHECK(malformed_result->result["configuration"]["exists"] == false);
+    CHECK(malformed_result->result["configuration"]["expectedContentVersion"] == 8);
+    CHECK(malformed_result->result["preview"]["valid"] == false);
+    CHECK(malformed_result->result["preview"]["content"] == malformed);
+    CHECK(malformed_result->result["preview"]["errors"][0]["field"] == "$");
+
+    hlsl_intellisense::json_rpc::CancellationToken cancellation;
+    cancellation.cancel();
+    const auto cancelled = server.handle(
+        hlsl_intellisense::json_rpc::Request{
+            .id = std::int64_t{4},
+            .method = "hlsl/configurationAuthoring",
+            .params = Json{{"protocolVersion", 1}, {"workspaceFolder", {{"uri", folder_uri}}}}},
+        cancellation);
+    const auto* cancelled_error =
+        std::get_if<hlsl_intellisense::json_rpc::ErrorResponse>(&cancelled);
+    REQUIRE(cancelled_error != nullptr);
+    CHECK(cancelled_error->error.code == hlsl_intellisense::json_rpc::request_cancelled_code);
+}
+
 TEST_CASE("Server exposes memory layouts through hover and the custom protocol",
           "[lsp][memory-layout][integration]") {
     const auto uri = shader_uri();
