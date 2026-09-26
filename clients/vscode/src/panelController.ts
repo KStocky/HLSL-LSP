@@ -70,6 +70,7 @@ export class PanelController<TResult> {
     private readonly scheduler: Scheduler = nodeScheduler,
     private readonly debounceMs = 500,
     private readonly freshness: AnalysisFreshness = new AnalysisFreshness(),
+    private readonly onFailure?: (error: unknown) => void,
   ) {}
 
   public get trackedUri(): string | undefined {
@@ -108,6 +109,7 @@ export class PanelController<TResult> {
     try {
       result = await this.request(uri);
     } catch (error) {
+      this.onFailure?.(error);
       failureMessage =
         error instanceof Error ? error.message : "The request failed.";
     }

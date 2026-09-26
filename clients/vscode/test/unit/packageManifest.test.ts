@@ -77,10 +77,11 @@ void test("HLSL submenu exposes every custom shader workflow in stable groups", 
   assert.deepEqual(
     entries.map((entry) => [entry.command, entry.group]),
     [
-      ["hlsl.openEffectiveConfigurationFile", "1_configuration@0"],
-      ["hlsl.selectVariant", "1_configuration@1"],
-      ["hlsl.showCompilationInfo", "1_configuration@2"],
-      ["hlsl.showPreprocessorExplorer", "1_configuration@3"],
+      ["hlsl.showStatus", "1_configuration@0"],
+      ["hlsl.openEffectiveConfigurationFile", "1_configuration@1"],
+      ["hlsl.selectVariant", "1_configuration@2"],
+      ["hlsl.showCompilationInfo", "1_configuration@3"],
+      ["hlsl.showPreprocessorExplorer", "1_configuration@4"],
       ["hlsl.expandMacro", "2_inspection@0"],
       ["hlsl.showMemoryLayout", "2_inspection@1"],
       ["hlsl.showResourceBindings", "2_inspection@2"],
@@ -116,6 +117,7 @@ void test("HLSL submenu uses concise command labels", () => {
       shortTitles.get(entry.command ?? ""),
     ),
     [
+      "Status and Recovery",
       "Open Effective Configuration",
       "Select Shader Variant",
       "Shader Compilation",

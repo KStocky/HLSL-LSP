@@ -2,9 +2,10 @@
 
 Linux support uses Microsoft's official
 [DXC v1.9.2607 release](https://github.com/microsoft/DirectXShaderCompiler/releases/tag/v1.9.2607),
-the July 2026 release corresponding to the `1.9.2607` compiler line used by the
-Windows `Microsoft.Direct3D.DXC` `1.9.2607.13` package. Microsoft does not
-publish the NuGet packaging revision in the Linux asset's version.
+the July 2026 release. Windows instead uses KStocky's `2609-kstocky.1` fork
+release, which fixes the uninitialized `ExpandTokPastingArg` option in
+`IDxcIntelliSense`. That Windows-only distribution has no corresponding Linux
+asset, so the Linux runtime remains on Microsoft's checksum-pinned release.
 
 CMake downloads
 `linux_dxc_2026_07_29.x86_x64.tar.gz` and requires SHA-256

@@ -54,6 +54,13 @@ import {
   effectiveContextTooltip,
   variantLabel,
 } from "./effectiveContext";
+import {
+  healthDiagnosticsText,
+  healthHtml,
+  HlslHealthSnapshot,
+  redactDiagnosticMessage,
+  summarizeHealth,
+} from "./health";
 import { nodeScheduler, PanelController } from "./panelController";
 import {
   AnalysisFreshness,
@@ -184,6 +191,11 @@ interface HlslCommandContext {
 }
 
 let activeLifecycle: ClientLifecycle<ManagedClient> | undefined;
+let activeHealthFailureSink: ((message: string) => void) | undefined;
+
+function recordHealthFailure(action: string, error: unknown): void {
+  activeHealthFailureSink?.(`${action}: ${errorMessage(error)}`);
+}
 let macroExpansionGeneration = 0;
 let macroContextGeneration = 0;
 let macroContextDebounce: NodeJS.Timeout | undefined;
@@ -641,6 +653,7 @@ async function refreshMemoryLayout(
       client.memoryLayout(uri, position),
     );
   } catch (error) {
+    recordHealthFailure("Memory layout request failed", error);
     failureMessage =
       error instanceof Error ? error.message : "The request failed.";
   }
@@ -850,6 +863,7 @@ async function refreshCompilationInfo(
   try {
     info = await lifecycle.withClient((client) => client.compilationInfo(uri));
   } catch (error) {
+    recordHealthFailure("Shader compilation request failed", error);
     failureMessage =
       error instanceof Error ? error.message : "The request failed.";
   }
@@ -903,6 +917,7 @@ async function refreshResourceBindings(
   try {
     info = await lifecycle.withClient((client) => client.compilationInfo(uri));
   } catch (error) {
+    recordHealthFailure("Resource bindings request failed", error);
     failureMessage =
       error instanceof Error ? error.message : "The request failed.";
   }
@@ -953,6 +968,7 @@ async function refreshPreprocessorExplorer(
       client.preprocessorExplorer(uri),
     );
   } catch (error) {
+    recordHealthFailure("Preprocessor explorer request failed", error);
     failureMessage =
       error instanceof Error ? error.message : "The request failed.";
   }
@@ -1338,6 +1354,9 @@ function createEntryPointDataFlowController(
     nodeScheduler,
     500,
     freshness,
+    (error) => {
+      recordHealthFailure("Entry-point data-flow request failed", error);
+    },
   );
 }
 
@@ -1373,6 +1392,9 @@ function createComputeVisualizationController(
     nodeScheduler,
     500,
     freshness,
+    (error) => {
+      recordHealthFailure("Compute visualization request failed", error);
+    },
   );
 }
 
@@ -1837,9 +1859,43 @@ export async function activate(
   variantStatus.command = "hlsl.selectVariant";
   context.subscriptions.push(variantStatus);
 
-  async function openEffectiveConfigurationFile(): Promise<void> {
+  const healthStatus = vscode.window.createStatusBarItem(
+    vscode.StatusBarAlignment.Right,
+    101,
+  );
+  healthStatus.command = "hlsl.showStatus";
+  context.subscriptions.push(healthStatus);
+
+  let lastActionableFailure: string | undefined;
+  let healthPanel: vscode.WebviewPanel | undefined;
+  let healthDocumentUri =
+    vscode.window.activeTextEditor?.document.languageId === "hlsl"
+      ? vscode.window.activeTextEditor.document.uri
+      : undefined;
+  let healthRefreshGeneration = 0;
+  let refreshHealthSurface = (): Promise<void> => Promise.resolve();
+  activeHealthFailureSink = (message) => {
+    lastActionableFailure = message;
+    void refreshHealthSurface();
+  };
+  const reportClientError = async (
+    action: string,
+    error: unknown,
+  ): Promise<void> => {
+    recordHealthFailure(action, error);
+    await reportError(outputChannel, action, error);
+  };
+
+  async function openEffectiveConfigurationFile(
+    requestedUri?: vscode.Uri,
+  ): Promise<void> {
     const editor = vscode.window.activeTextEditor;
-    if (editor?.document.languageId !== "hlsl") {
+    const uri =
+      requestedUri ??
+      (editor?.document.languageId === "hlsl"
+        ? editor.document.uri
+        : undefined);
+    if (uri === undefined) {
       void vscode.window.showInformationMessage(
         "Open an HLSL document to reveal its effective configuration file.",
       );
@@ -1848,7 +1904,7 @@ export async function activate(
     let shaderContext: EffectiveShaderContext | null | undefined;
     try {
       shaderContext = await lifecycle.withClient((client) =>
-        client.effectiveContext(editor.document.uri),
+        client.effectiveContext(uri),
       );
     } catch (error) {
       void vscode.window.showErrorMessage(
@@ -1944,15 +2000,19 @@ export async function activate(
         },
         (transition) => {
           if (transition === "disconnected") {
+            lastActionableFailure = "The language server connection was lost.";
             cancelPendingAnalysisRefreshes();
             invalidateOpenAnalysisPanels("Disconnected server");
             invalidateMacroExpansion("Disconnected server");
             scheduleMacroExpansionContext();
+            void refreshHealthSurface();
             return;
           }
           if (lifecycle.state === "running") {
+            lastActionableFailure = undefined;
             void refreshAllOpenAnalysisPanels(lifecycle, "Disconnected server");
             scheduleMacroExpansionContext();
+            void refreshHealthSurface();
           }
         },
       );
@@ -1969,6 +2029,89 @@ export async function activate(
     watchedFileRefreshCause = "Unknown";
     void refreshAllOpenAnalysisPanels(lifecycle, cause);
   });
+
+  const healthRedactionPaths = (): readonly string[] => [
+    context.extensionPath,
+    ...(vscode.workspace.workspaceFolders ?? []).map(
+      (folder) => folder.uri.fsPath,
+    ),
+  ];
+  const collectHealthSnapshot = async (): Promise<HlslHealthSnapshot> => {
+    const activeUri = healthDocumentUri;
+    const currentClient = await lifecycle.withClient((client) =>
+      Promise.resolve(client),
+    );
+    let runtime: DxcRuntimeInfo | null | undefined;
+    let shaderContext: EffectiveShaderContext | null | undefined;
+    if (currentClient !== undefined) {
+      [runtime, shaderContext] = await Promise.all([
+        currentClient.dxcRuntime().catch((error: unknown) => ({
+          source: "unavailable",
+          directory: "",
+          libraryPath: "",
+          version: "",
+          requiresRestart: false,
+          error: errorMessage(error),
+        })),
+        activeUri === undefined
+          ? Promise.resolve(undefined)
+          : currentClient.effectiveContext(activeUri).catch(() => undefined),
+      ]);
+    }
+    return {
+      lifecycle: lifecycle.state,
+      ...(currentClient === undefined
+        ? {}
+        : { serverSource: currentClient.runtime.source }),
+      ...(runtime === null || runtime === undefined
+        ? {}
+        : {
+            runtime: {
+              source: runtime.source,
+              version: runtime.version,
+              requiresRestart: runtime.requiresRestart,
+              ...(runtime.error === undefined ? {} : { error: runtime.error }),
+            },
+          }),
+      ...(shaderContext === null || shaderContext === undefined
+        ? {}
+        : { context: shaderContext }),
+      ...(lastActionableFailure === undefined
+        ? {}
+        : {
+            lastFailure: redactDiagnosticMessage(
+              lastActionableFailure,
+              healthRedactionPaths(),
+            ),
+          }),
+    };
+  };
+  refreshHealthSurface = async (): Promise<void> => {
+    const generation = ++healthRefreshGeneration;
+    const snapshot = await collectHealthSnapshot();
+    if (generation !== healthRefreshGeneration) {
+      return;
+    }
+    const summary = summarizeHealth(snapshot);
+    const icon =
+      summary.level === "healthy"
+        ? "$(check)"
+        : summary.level === "busy"
+          ? "$(sync~spin)"
+          : summary.level === "warning"
+            ? "$(warning)"
+            : "$(error)";
+    healthStatus.text = `${icon} ${summary.label}`;
+    healthStatus.tooltip = `${summary.detail}\n\nClick for status and recovery actions.`;
+    healthStatus.backgroundColor =
+      summary.level === "unavailable"
+        ? new vscode.ThemeColor("statusBarItem.errorBackground")
+        : undefined;
+    healthStatus.show();
+    if (healthPanel !== undefined) {
+      healthPanel.webview.html = healthHtml(snapshot);
+    }
+  };
 
   let variantStatusGeneration = 0;
   let variantStatusDocument: string | undefined;
@@ -2084,6 +2227,7 @@ export async function activate(
     invalidateMacroExpansion("Disconnected server");
     try {
       await lifecycle.restart();
+      lastActionableFailure = undefined;
       outputChannel.appendLine("Language server restarted.");
       // A restart can change what the server compiles/analyzes (a
       // different DXC runtime/version, server path, include
@@ -2097,14 +2241,62 @@ export async function activate(
       // them needs its own duplicate post-restart refresh.
       await refreshAllOpenAnalysisPanels(lifecycle, "Disconnected server");
     } catch (error) {
-      await reportError(
-        outputChannel,
+      await reportClientError(
         "Unable to restart the HLSL language server",
         error,
       );
     }
     await updateVariantStatus();
     scheduleMacroExpansionContext();
+    await refreshHealthSurface();
+  };
+
+  const showHealth = async (): Promise<void> => {
+    const editor = vscode.window.activeTextEditor;
+    if (editor?.document.languageId === "hlsl") {
+      healthDocumentUri = editor.document.uri;
+    }
+    if (healthPanel === undefined) {
+      const panel = vscode.window.createWebviewPanel(
+        "hlslStatus",
+        "HLSL-LSP Status",
+        vscode.ViewColumn.Beside,
+        { enableScripts: true, retainContextWhenHidden: true },
+      );
+      healthPanel = panel;
+      panel.onDidDispose(() => {
+        if (healthPanel === panel) {
+          healthPanel = undefined;
+        }
+      });
+      panel.webview.onDidReceiveMessage(async (message: unknown) => {
+        const command =
+          typeof message === "object" &&
+          message !== null &&
+          "command" in message &&
+          typeof message.command === "string"
+            ? message.command
+            : "";
+        if (command === "restart") {
+          await restart();
+        } else if (command === "output") {
+          outputChannel.show(true);
+        } else if (command === "configuration") {
+          await openEffectiveConfigurationFile(healthDocumentUri);
+        } else if (command === "copy") {
+          const snapshot = await collectHealthSnapshot();
+          await vscode.env.clipboard.writeText(healthDiagnosticsText(snapshot));
+          void vscode.window.showInformationMessage(
+            "HLSL-LSP diagnostics copied.",
+          );
+        } else if (command === "refresh") {
+          await refreshHealthSurface();
+        }
+      });
+    } else {
+      healthPanel.reveal(vscode.ViewColumn.Beside);
+    }
+    await refreshHealthSurface();
   };
 
   // Persists the resulting active variant a hlsl-lsp.selectVariant command
@@ -2133,8 +2325,7 @@ export async function activate(
         await configuration().update("activeVariant", normalized, target);
         await updateVariantStatus();
       } catch (error) {
-        await reportError(
-          outputChannel,
+        await reportClientError(
           "Unable to persist the HLSL shader variant selection reported by the language server",
           error,
         );
@@ -2433,6 +2624,7 @@ export async function activate(
   }
 
   context.subscriptions.push(
+    vscode.commands.registerCommand("hlsl.showStatus", showHealth),
     vscode.commands.registerCommand("hlsl.restartServer", restart),
     vscode.commands.registerCommand("hlsl.stopServer", async () => {
       cancelPendingAnalysisRefreshes();
@@ -2440,6 +2632,7 @@ export async function activate(
       invalidateMacroExpansion("Disconnected server");
       await lifecycle.stop();
       outputChannel.appendLine("Language server stopped.");
+      await refreshHealthSurface();
     }),
     vscode.commands.registerCommand("hlsl.showOutput", () => {
       outputChannel.show(true);
@@ -2586,6 +2779,7 @@ export async function activate(
             client.macroExpansion(uri, position),
           );
         } catch (error) {
+          recordHealthFailure("Macro expansion request failed", error);
           if (
             generation !== macroExpansionGeneration ||
             panel !== macroExpansionPanel
@@ -3306,11 +3500,7 @@ export async function activate(
           client.variants(documentUri),
         );
       } catch (error) {
-        await reportError(
-          outputChannel,
-          "Unable to list HLSL shader variants",
-          error,
-        );
+        await reportClientError("Unable to list HLSL shader variants", error);
         return;
       }
       if (list === undefined || list === null) {
@@ -3374,15 +3564,20 @@ export async function activate(
           target,
         );
       } catch (error) {
-        await reportError(
-          outputChannel,
+        await reportClientError(
           "Unable to update the active HLSL shader variant",
           error,
         );
       }
     }),
     vscode.window.onDidChangeActiveTextEditor((editor) => {
+      if (editor?.document.languageId === "hlsl") {
+        healthDocumentUri = editor.document.uri;
+      } else if (healthPanel?.active !== true) {
+        healthDocumentUri = undefined;
+      }
       void updateVariantStatus();
+      void refreshHealthSurface();
       scheduleMacroExpansionContext();
       void followActiveShader(context, lifecycle, editor);
     }),
@@ -3416,13 +3611,13 @@ export async function activate(
           await client.configurationChanged();
         });
       } catch (error) {
-        await reportError(
-          outputChannel,
+        await reportClientError(
           "Unable to update HLSL language server settings",
           error,
         );
       }
       await updateVariantStatus();
+      await refreshHealthSurface();
       scheduleMacroExpansionContext();
       if (analysisChange?.action === "refresh") {
         await refreshAllOpenAnalysisPanels(lifecycle, analysisChange.cause);
@@ -3580,8 +3775,7 @@ export async function activate(
   try {
     await lifecycle.start();
   } catch (error) {
-    void reportError(
-      outputChannel,
+    void reportClientError(
       "Unable to activate the HLSL language server",
       error,
     ).catch((reportingError: unknown) => {
@@ -3591,6 +3785,7 @@ export async function activate(
     });
   }
   await updateVariantStatus();
+  await refreshHealthSurface();
   scheduleMacroExpansionContext();
 
   return {
@@ -3608,6 +3803,7 @@ export async function activate(
 export async function deactivate(): Promise<void> {
   const lifecycle = activeLifecycle;
   activeLifecycle = undefined;
+  activeHealthFailureSink = undefined;
   cancelPendingAnalysisRefreshes();
   ++memoryLayoutGeneration;
   ++macroExpansionGeneration;

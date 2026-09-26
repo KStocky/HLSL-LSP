@@ -54,6 +54,12 @@ Visual Studio also exposes its custom call-hierarchy window there; Visual
 Studio Code keeps its native **Show Call Hierarchy** command. The submenu
 remains hidden in non-HLSL editors.
 
+Both clients expose **HLSL > Status and Recovery**, backed by a compact status
+indicator. It distinguishes server, DXC runtime, configuration, and analysis
+failures; shows the active shader context; and keeps Restart, Open Output, Open
+Configuration, and Copy Diagnostics actions beside the detected state. See
+[status and recovery](docs/status-and-recovery.md).
+
 The Visual Studio variant picker additionally recognizes configured custom
 shader extensions. Both clients remove variants that do not apply to the
 active document.
@@ -186,8 +192,9 @@ array strides; a selected compilation variant can also be shown. Each category
 is independently configurable. See
 [`docs/inlay-hints.md`](docs/inlay-hints.md) for settings and guarantees.
 
-The pinned DXC `1.9.2607.13` API exposes no callable constructor overloads or
-parameter cursors. Scalar casts resolve to an unnamed initializer expression;
+The bundled Windows DXC `2609-kstocky.1` API exposes no callable constructor
+overloads or parameter cursors. Scalar casts resolve to an unnamed initializer
+expression;
 `float4` and `float2x2` resolve to typedefs; and generic `vector` and `matrix`
 resolve to class templates whose only callable children are subscript operators.
 Completion provides `vector::` and `matrix::` qualification entries, not
@@ -444,8 +451,9 @@ testing, path behavior, and current platform limitations.
 - CMake 3.28 or newer
 - Internet access for CMake's first configuration
 
-CMake downloads checksum-verified official Microsoft DXC packages. Windows
-uses `Microsoft.Direct3D.DXC` `1.9.2607.13`; Linux x64 uses the corresponding
+CMake downloads checksum-verified DXC packages. Windows uses KStocky's
+`2609-kstocky.1` DXC fork release, which fixes the uninitialized
+`ExpandTokPastingArg` option in `IDxcIntelliSense`; Linux x64 uses Microsoft's
 official DXC `v1.9.2607` release and pinned compatibility header. See
 [`docs/linux.md`](docs/linux.md) for artifact hashes, ABI requirements,
 licensing, installation, runtime loading, and the safe reparse limitation.

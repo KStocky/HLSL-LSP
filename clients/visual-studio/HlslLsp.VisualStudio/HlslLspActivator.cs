@@ -186,6 +186,7 @@ public sealed class HlslLspActivator :
         HlslBootstrapPackage host,
         CancellationToken cancellationToken)
     {
+        HlslStatusBridge.ReportLifecycle(HlslLifecycleState.Activating);
         var activator = new HlslLspActivator(host, cancellationToken);
         HlslBootstrapPackage.OptionsChanged += activator.OnOptionsChanged;
         await activator.InitializeAsync(cancellationToken);
@@ -284,6 +285,8 @@ public sealed class HlslLspActivator :
         HlslCommandContextBridge.Register(languageClient.GetCommandContextAsync);
         CompilationInfoBridge.Register(languageClient.GetCompilationInfoAsync);
         EffectiveShaderContextBridge.Register(languageClient.GetEffectiveContextAsync);
+        HlslStatusBridge.RegisterRuntimeRequest(languageClient.GetDxcRuntimeAsync);
+        HlslStatusBridge.RegisterRestart(RestartLanguageServerAsync);
         PreprocessorExplorerBridge.Register(languageClient.GetPreprocessorExplorerAsync);
         EntryPointDataFlowBridge.Register(languageClient.GetEntryPointDataFlowAsync);
         ComputeVisualizationBridge.Register(languageClient.GetComputeVisualizationAsync);
@@ -309,14 +312,36 @@ public sealed class HlslLspActivator :
     {
         if (!running)
         {
+            HlslStatusBridge.ReportLifecycle(HlslLifecycleState.Disconnected);
             HlslCommandContextBridge.Invalidate();
             host.InvalidateAnalysisViews(
                 AnalysisFreshnessCause.DisconnectedServer);
             return;
         }
+        HlslStatusBridge.ReportLifecycle(HlslLifecycleState.Connected);
+        host.ScheduleEffectiveContextIndicatorRefresh();
         RefreshVariantDependentWindows(
             CancellationToken.None,
             AnalysisFreshnessCause.DisconnectedServer);
+    }
+
+    private async Task RestartLanguageServerAsync(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var client = languageClient;
+        if (client == null)
+        {
+            throw new InvalidOperationException(
+                "The HLSL language client is not active.");
+        }
+        HlslStatusBridge.ReportLifecycle(HlslLifecycleState.Restarting);
+        await client.RestartWithRuntimeAsync(
+            lastOptions?.LanguageVersion ?? "2021",
+            lastRuntimeDirectory);
+        RefreshVariantDependentWindows(
+            cancellationToken,
+            AnalysisFreshnessCause.DisconnectedServer);
+        host.ScheduleEffectiveContextIndicatorRefresh();
     }
 
     private async Task ApplyOpenDocumentMappingsAsync(CancellationToken cancellationToken)

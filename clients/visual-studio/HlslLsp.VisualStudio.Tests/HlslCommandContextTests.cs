@@ -232,6 +232,20 @@ public sealed class HlslCommandContextTests : IDisposable
     }
 
     [Fact]
+    public void StatusCommand_IsAvailableWithoutSymbolContext()
+    {
+        var result = HlslCommandPresentation.Evaluate(
+            HlslCommandKind.Status,
+            hlslEditor: true,
+            contextKnown: false,
+            context: null);
+
+        Assert.True(result.Visible);
+        Assert.True(result.Enabled);
+        Assert.Equal("HLSL Status", result.Text);
+    }
+
+    [Fact]
     public void NonHlslEditor_HidesAllCommandsAndRestoresBaseLabel()
     {
         var result = HlslCommandPresentation.Evaluate(

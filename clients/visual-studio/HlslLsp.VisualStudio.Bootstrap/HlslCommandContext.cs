@@ -43,6 +43,7 @@ internal enum HlslCommandKind
     EntryPointDataFlow,
     CallHierarchy,
     ComputeVisualization,
+    Status,
 }
 
 internal static class HlslCommandIds
@@ -57,6 +58,7 @@ internal static class HlslCommandIds
     internal const int ComputeVisualization = 0x0107;
     internal const int OpenEffectiveConfiguration = 0x0108;
     internal const int MacroExpansion = 0x0109;
+    internal const int Status = 0x010a;
 
     internal static HlslCommandKind CommandKind(int commandId)
     {
@@ -82,6 +84,8 @@ internal static class HlslCommandIds
                 return HlslCommandKind.OpenEffectiveConfiguration;
             case MacroExpansion:
                 return HlslCommandKind.MacroExpansion;
+            case Status:
+                return HlslCommandKind.Status;
             default:
                 throw new ArgumentOutOfRangeException(
                     nameof(commandId),
@@ -143,7 +147,8 @@ internal sealed class HlslCommandPresentation
            kind == HlslCommandKind.OpenEffectiveConfiguration ||
            kind == HlslCommandKind.Compilation ||
            kind == HlslCommandKind.ResourceBindings ||
-           kind == HlslCommandKind.PreprocessorExplorer;
+           kind == HlslCommandKind.PreprocessorExplorer ||
+           kind == HlslCommandKind.Status;
 
     private static bool IsAvailable(
         HlslCommandKind kind,
@@ -214,6 +219,8 @@ internal sealed class HlslCommandPresentation
                 return "Call Hierarchy";
             case HlslCommandKind.ComputeVisualization:
                 return "Compute Visualization";
+            case HlslCommandKind.Status:
+                return "HLSL Status";
             default:
                 throw new ArgumentOutOfRangeException(nameof(kind));
         }

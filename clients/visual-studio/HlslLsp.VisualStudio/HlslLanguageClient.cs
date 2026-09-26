@@ -266,6 +266,7 @@ internal sealed class HlslLanguageClient :
         string languageVersion,
         string dxcRuntimeDirectory)
     {
+        HlslStatusBridge.ReportLifecycle(HlslLifecycleState.Restarting);
         Volatile.Write(ref this.languageVersion, languageVersion);
         Volatile.Write(
             ref this.dxcRuntimeDirectory,
@@ -481,6 +482,27 @@ internal sealed class HlslLanguageClient :
                         uri = documentUri.AbsoluteUri,
                     },
                 },
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    internal async Task<HlslDxcRuntimeModel> GetDxcRuntimeAsync(
+        CancellationToken cancellationToken)
+    {
+        var currentRpc = Volatile.Read(ref rpc);
+        if (currentRpc == null)
+        {
+            await rpcAttached.WaitAsync(cancellationToken).ConfigureAwait(false);
+            currentRpc = Volatile.Read(ref rpc);
+            if (currentRpc == null)
+            {
+                throw new InvalidOperationException(
+                    "The HLSL language server connection is unavailable.");
+            }
+        }
+        return await currentRpc.InvokeWithParameterObjectAsync<HlslDxcRuntimeModel>(
+                "hlsl/dxcRuntime",
+                new { },
                 cancellationToken)
             .ConfigureAwait(false);
     }
@@ -781,63 +803,84 @@ internal sealed class HlslLanguageClient :
     public Task<Connection> ActivateAsync(CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
+        HlslStatusBridge.ReportLifecycle(HlslLifecycleState.Starting);
 
-        var extensionDirectory = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
-        var serverDirectory = Path.GetFullPath(
-            Path.Combine(extensionDirectory, "..", "Server"));
-        var serverPath = Path.Combine(serverDirectory, "hlsl-lsp.exe");
-        if (!File.Exists(serverPath))
+        try
         {
-            throw new FileNotFoundException("The bundled HLSL-LSP server was not found.", serverPath);
-        }
-
-        var arguments = "--disable-semantic-tokens";
-        var runtimeDirectory = Volatile.Read(ref dxcRuntimeDirectory);
-        if (!string.IsNullOrWhiteSpace(runtimeDirectory))
-        {
-            var resolved = ResolveRuntimeDirectory(runtimeDirectory);
-            arguments += $" --dxc-runtime \"{resolved}\"";
-        }
-
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = serverPath,
-            Arguments = arguments,
-            WorkingDirectory = serverDirectory,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            RedirectStandardInput = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-        };
-
-        var process = new Process { StartInfo = startInfo };
-        process.EnableRaisingEvents = true;
-        process.Exited += (_, _) =>
-        {
-            var current = Volatile.Read(ref serverProcess);
-            if (IsCurrentServerProcess(current, process))
+            var extensionDirectory =
+                Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
+            var serverDirectory = Path.GetFullPath(
+                Path.Combine(extensionDirectory, "..", "Server"));
+            var serverPath = Path.Combine(serverDirectory, "hlsl-lsp.exe");
+            if (!File.Exists(serverPath))
             {
-                onConnectionStateChanged?.Invoke(false);
+                throw new FileNotFoundException(
+                    "The bundled HLSL-LSP server was not found.",
+                    serverPath);
             }
-        };
-        process.ErrorDataReceived += (_, eventArgs) =>
-        {
-            if (!string.IsNullOrEmpty(eventArgs.Data))
-            {
-                Debug.WriteLine($"HLSL-LSP: {eventArgs.Data}");
-            }
-        };
-        if (!process.Start())
-        {
-            process.Dispose();
-            throw new InvalidOperationException("Visual Studio could not start HLSL-LSP.");
-        }
 
-        Volatile.Write(ref serverProcess, process);
-        process.BeginErrorReadLine();
-        return Task.FromResult(
-            new Connection(process.StandardOutput.BaseStream, process.StandardInput.BaseStream));
+            var arguments = "--disable-semantic-tokens";
+            var runtimeDirectory = Volatile.Read(ref dxcRuntimeDirectory);
+            if (!string.IsNullOrWhiteSpace(runtimeDirectory))
+            {
+                var resolved = ResolveRuntimeDirectory(runtimeDirectory);
+                arguments += $" --dxc-runtime \"{resolved}\"";
+            }
+
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = serverPath,
+                Arguments = arguments,
+                WorkingDirectory = serverDirectory,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            };
+
+            var process = new Process { StartInfo = startInfo };
+            process.EnableRaisingEvents = true;
+            process.Exited += (_, _) =>
+            {
+                var current = Volatile.Read(ref serverProcess);
+                if (IsCurrentServerProcess(current, process))
+                {
+                    onConnectionStateChanged?.Invoke(false);
+                    var exitCode = process.ExitCode;
+                    HlslStatusBridge.ReportFailure(
+                        $"The HLSL language server exited unexpectedly " +
+                        $"(exit code {exitCode}).");
+                }
+            };
+            process.ErrorDataReceived += (_, eventArgs) =>
+            {
+                if (!string.IsNullOrEmpty(eventArgs.Data))
+                {
+                    Debug.WriteLine($"HLSL-LSP: {eventArgs.Data}");
+                    HlslStatusBridge.AppendOutput(eventArgs.Data);
+                }
+            };
+            if (!process.Start())
+            {
+                process.Dispose();
+                throw new InvalidOperationException(
+                    "Visual Studio could not start HLSL-LSP.");
+            }
+
+            Volatile.Write(ref serverProcess, process);
+            process.BeginErrorReadLine();
+            return Task.FromResult(
+                new Connection(
+                    process.StandardOutput.BaseStream,
+                    process.StandardInput.BaseStream));
+        }
+        catch (Exception error)
+        {
+            HlslStatusBridge.ReportFailure(
+                "The HLSL language server could not start: " + error.Message);
+            throw;
+        }
     }
 
     internal static bool IsCurrentServerProcess(
@@ -848,6 +891,7 @@ internal sealed class HlslLanguageClient :
     public Task OnServerInitializedAsync()
     {
         onConnectionStateChanged?.Invoke(true);
+        HlslStatusBridge.ReportLifecycle(HlslLifecycleState.Connected);
         return Task.CompletedTask;
     }
 
@@ -856,6 +900,10 @@ internal sealed class HlslLanguageClient :
     {
         onConnectionStateChanged?.Invoke(false);
         var details = initializationState.InitializationException?.Message;
+        HlslStatusBridge.ReportFailure(
+            string.IsNullOrEmpty(details)
+                ? "HLSL-LSP failed to initialize."
+                : "HLSL-LSP failed to initialize: " + details);
         var context = new InitializationFailureContext
         {
             FailureMessage = string.IsNullOrEmpty(details)

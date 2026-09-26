@@ -30,6 +30,7 @@ namespace HlslLsp.VisualStudio.Bootstrap;
 [ProvideToolWindow(typeof(EntryPointDataFlowToolWindow))]
 [ProvideToolWindow(typeof(ComputeVisualizationToolWindow))]
 [ProvideToolWindow(typeof(CallHierarchyExplorerToolWindow))]
+[ProvideToolWindow(typeof(HlslStatusToolWindow))]
 [ProvideOptionPage(
     typeof(HlslOptionsPage),
     "HLSL-LSP",
@@ -83,6 +84,10 @@ public sealed class HlslBootstrapPackage : AsyncPackage
     private IVsEditorAdaptersFactoryService callHierarchyEditorAdapters;
     private IVsRunningDocumentTable callHierarchyRunningDocuments;
     private IVsTextManager commandTextManager;
+    private IVsOutputWindowPane outputPane;
+    private readonly Guid outputPaneGuid =
+        new("8d86d93c-945f-463e-b6c1-c92666261d25");
+    private long statusRequestGeneration;
     public const string PackageGuidString = "5ac7fbe7-1b9f-45eb-bca6-ffb9ae1ab67f";
 
     private static readonly object Gate = new();
@@ -160,6 +165,7 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         {
             instance = this;
         }
+        HlslStatusBridge.OutputAppended += OnStatusOutputAppended;
         MemoryLayoutBridge.RegisterPresenter(
             (uri, line, character) =>
                 JoinableTaskFactory.RunAsync(
@@ -281,10 +287,22 @@ public sealed class HlslBootstrapPackage : AsyncPackage
                 new CommandID(commandSet, HlslCommandIds.ComputeVisualization));
         computeVisualization.BeforeQueryStatus += OnHlslContextCommandBeforeQueryStatus;
         commands.AddCommand(computeVisualization);
+        var status = new OleMenuCommand(
+                (_, _) => JoinableTaskFactory.RunAsync(
+                        () => ShowStatusAsync(DisposalToken))
+                    .FileAndForget("HlslLsp/ShowStatus"),
+                new CommandID(commandSet, HlslCommandIds.Status));
+        status.BeforeQueryStatus += OnHlslContextCommandBeforeQueryStatus;
+        commands.AddCommand(status);
     }
 
     public void ScheduleEffectiveContextIndicatorRefresh()
-        => HlslEffectiveContextIndicator.InvalidateAll();
+    {
+        HlslEffectiveContextIndicator.InvalidateAll();
+        JoinableTaskFactory.RunAsync(
+                () => RefreshStatusIfOpenAsync(DisposalToken))
+            .FileAndForget("HlslLsp/RefreshStatus");
+    }
 
     public void ScheduleFollowingAnalysisRefresh()
         => JoinableTaskFactory.RunAsync(
@@ -1197,6 +1215,7 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         }
         if (failureMessage != null)
         {
+            ReportAnalysisFailure(failureMessage);
             window?.SetStatus(failureMessage);
         }
         else if (expansion == null)
@@ -1298,6 +1317,7 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         {
             if (failureMessage != null)
             {
+                ReportAnalysisFailure(failureMessage);
                 window?.SetError(
                     uri,
                     line,
@@ -1534,14 +1554,18 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         }
         if (failureMessage != null)
         {
+            ReportAnalysisFailure(failureMessage);
             window?.SetError(uri, failureMessage, existingWindow != null);
             return;
         }
         if (info == null)
         {
+            const string message =
+                "The HLSL language server is not ready to provide shader compilation information.";
+            ReportAnalysisFailure(message);
             window?.SetError(
                 uri,
-                "The HLSL language server is not ready to provide shader compilation information.",
+                message,
                 existingWindow != null);
             return;
         }
@@ -1692,14 +1716,18 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         }
         if (failureMessage != null)
         {
+            ReportAnalysisFailure(failureMessage);
             window?.SetError(uri, failureMessage, existingWindow != null);
             return;
         }
         if (info == null)
         {
+            const string message =
+                "The HLSL language server is not ready to provide resource binding information.";
+            ReportAnalysisFailure(message);
             window?.SetError(
                 uri,
-                "The HLSL language server is not ready to provide resource binding information.",
+                message,
                 existingWindow != null);
             return;
         }
@@ -1851,14 +1879,18 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         }
         if (failureMessage != null)
         {
+            ReportAnalysisFailure(failureMessage);
             window?.SetError(uri, failureMessage, existingWindow != null);
             return;
         }
         if (report == null)
         {
+            const string message =
+                "The HLSL language server is not ready to provide preprocessor explorer information.";
+            ReportAnalysisFailure(message);
             window?.SetError(
                 uri,
-                "The HLSL language server is not ready to provide preprocessor explorer information.",
+                message,
                 existingWindow != null);
             return;
         }
@@ -2035,6 +2067,7 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         }
         if (failureMessage != null)
         {
+            ReportAnalysisFailure(failureMessage);
             window?.SetError(uri, options, failureMessage, preserveContent);
             if (existingWindow == null)
             {
@@ -2045,6 +2078,7 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         {
             const string message =
                 "The HLSL language server is not ready to provide compute visualization.";
+            ReportAnalysisFailure(message);
             window?.SetError(uri, options, message, preserveContent);
             if (existingWindow == null)
             {
@@ -2240,14 +2274,18 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         }
         if (failureMessage != null)
         {
+            ReportAnalysisFailure(failureMessage);
             window?.SetError(uri, failureMessage, hadMatchingDocument);
             return;
         }
         if (report == null)
         {
+            const string message =
+                "The HLSL language server is not ready to provide entry-point data flow information.";
+            ReportAnalysisFailure(message);
             window?.SetError(
                 uri,
-                "The HLSL language server is not ready to provide entry-point data flow information.",
+                message,
                 hadMatchingDocument);
             return;
         }
@@ -2615,6 +2653,7 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         }
         if (failureMessage != null)
         {
+            ReportAnalysisFailure(failureMessage);
             if (window?.CurrentItem != null)
             {
                 if (existingWindow != null)
@@ -2712,6 +2751,7 @@ public sealed class HlslBootstrapPackage : AsyncPackage
             }
             if (failureMessage != null)
             {
+                ReportAnalysisFailure(failureMessage);
                 VsShellUtilities.ShowMessageBox(
                     this,
                     failureMessage,
@@ -3069,6 +3109,7 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         }
         if (failureMessage != null)
         {
+            ReportAnalysisFailure(failureMessage);
             // Preserve the last successful content on a transient
             // failure/stale response -- only overlay a banner, matching the
             // "preserve last successful content on transient errors"
@@ -3159,6 +3200,13 @@ public sealed class HlslBootstrapPackage : AsyncPackage
                 cancellationToken);
             return;
         }
+        await OpenEffectiveConfigurationAsync(uri, cancellationToken);
+    }
+
+    private async Task OpenEffectiveConfigurationAsync(
+        Uri uri,
+        CancellationToken cancellationToken)
+    {
         EffectiveShaderContextModel context;
         try
         {
@@ -3199,6 +3247,182 @@ public sealed class HlslBootstrapPackage : AsyncPackage
             out _,
             out _,
             out _);
+    }
+
+    private static void ReportAnalysisFailure(string message)
+    {
+        if (!string.IsNullOrWhiteSpace(message) &&
+            message.IndexOf("cancelled", StringComparison.OrdinalIgnoreCase) < 0)
+        {
+            HlslStatusBridge.ReportFailure(message);
+        }
+    }
+
+    private async Task ShowStatusAsync(CancellationToken cancellationToken)
+    {
+        await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+        var uri = TryGetActiveHlslEditorContext(out var activeUri, out _, out _, out _)
+            ? activeUri
+            : null;
+        var window = await ShowToolWindowAsync(
+            typeof(HlslStatusToolWindow),
+            0,
+            true,
+            cancellationToken) as HlslStatusToolWindow;
+        if (window == null)
+        {
+            throw new InvalidOperationException("The HLSL-LSP Status window is unavailable.");
+        }
+        window.ConfigureActions(
+            () => RestartLanguageServerAsync(cancellationToken),
+            () => OpenOutputAsync(cancellationToken),
+            () => OpenEffectiveConfigurationAsync(
+                window.DocumentUri,
+                cancellationToken));
+        await RefreshStatusAsync(window, uri, cancellationToken);
+    }
+
+    private async Task RefreshStatusIfOpenAsync(CancellationToken cancellationToken)
+    {
+        await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+        var window = await FindToolWindowAsync(
+            typeof(HlslStatusToolWindow),
+            0,
+            false,
+            cancellationToken) as HlslStatusToolWindow;
+        if (window == null)
+        {
+            return;
+        }
+        var uri = TryGetActiveHlslEditorContext(out var activeUri, out _, out _, out _)
+            ? activeUri
+            : null;
+        await RefreshStatusAsync(window, uri, cancellationToken);
+    }
+
+    private async Task RefreshStatusAsync(
+        HlslStatusToolWindow window,
+        Uri uri,
+        CancellationToken cancellationToken)
+    {
+        var generation = Interlocked.Increment(ref statusRequestGeneration);
+        window.BeginRefresh(uri);
+        var current = HlslStatusBridge.Snapshot;
+        var runtime = current.Runtime;
+        var context =
+            uri != null &&
+            string.Equals(
+                current.Context?.DocumentUri,
+                uri.AbsoluteUri,
+                StringComparison.OrdinalIgnoreCase)
+                ? current.Context
+                : null;
+        if (HlslStatusBridge.Snapshot.Lifecycle == HlslLifecycleState.Connected)
+        {
+            try
+            {
+                runtime = await HlslStatusBridge.RequestRuntimeAsync(cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception error)
+            {
+                HlslStatusBridge.ReportFailure(
+                    "Could not refresh DXC runtime status: " + error.Message);
+            }
+            if (uri != null)
+            {
+                try
+                {
+                    context = await EffectiveShaderContextBridge.RequestAsync(
+                        uri,
+                        cancellationToken);
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception error)
+                {
+                    context = null;
+                    HlslStatusBridge.ReportFailure(
+                        "Could not refresh the active shader context: " + error.Message);
+                }
+            }
+        }
+        if (generation != Interlocked.Read(ref statusRequestGeneration))
+        {
+            return;
+        }
+        HlslStatusBridge.UpdateDetails(runtime, context);
+        await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+        window.SetSnapshot(uri, HlslStatusBridge.Snapshot);
+    }
+
+    private async Task RestartLanguageServerAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await HlslStatusBridge.RestartAsync(cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception error)
+        {
+            HlslStatusBridge.ReportFailure(
+                "Could not restart the HLSL language server: " + error.Message);
+        }
+    }
+
+    private async Task OpenOutputAsync(CancellationToken cancellationToken)
+    {
+        await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+        var pane = await EnsureOutputPaneAsync(cancellationToken);
+        pane.Activate();
+    }
+
+    private async Task<IVsOutputWindowPane> EnsureOutputPaneAsync(
+        CancellationToken cancellationToken)
+    {
+        await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+        if (outputPane != null)
+        {
+            return outputPane;
+        }
+        var output = await GetServiceAsync(typeof(SVsOutputWindow)) as IVsOutputWindow;
+        if (output == null)
+        {
+            throw new InvalidOperationException(
+                "Visual Studio's Output window service is unavailable.");
+        }
+        var paneGuid = outputPaneGuid;
+        ErrorHandler.ThrowOnFailure(
+            output.CreatePane(ref paneGuid, "HLSL-LSP", 1, 0));
+        ErrorHandler.ThrowOnFailure(output.GetPane(ref paneGuid, out outputPane));
+        var buffered = HlslStatusBridge.OutputSnapshot();
+        if (!string.IsNullOrEmpty(buffered))
+        {
+            outputPane.OutputStringThreadSafe(buffered + Environment.NewLine);
+        }
+        return outputPane;
+    }
+
+    private void OnStatusOutputAppended(string line)
+    {
+        JoinableTaskFactory.RunAsync(
+                async () =>
+                {
+                    await JoinableTaskFactory.SwitchToMainThreadAsync(DisposalToken);
+                    if (outputPane != null)
+                    {
+                        outputPane.OutputStringThreadSafe(line + Environment.NewLine);
+                    }
+                })
+            .FileAndForget("HlslLsp/StatusOutput");
     }
 
     private async Task SelectVariantAsync(CancellationToken cancellationToken)
@@ -3380,6 +3604,7 @@ public sealed class HlslBootstrapPackage : AsyncPackage
             }
             activationStarted = true;
         }
+        HlslStatusBridge.ReportLifecycle(HlslLifecycleState.Activating);
 
         try
         {
@@ -3395,6 +3620,8 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         catch (Exception error)
         {
             ActivityLog.LogError(nameof(HlslBootstrapPackage), error.ToString());
+            HlslStatusBridge.ReportFailure(
+                "Visual Studio could not activate HLSL-LSP: " + error.Message);
             lock (Gate)
             {
                 activationStarted = false;
