@@ -40,7 +40,9 @@ heap types.
 > **HLSL Tools compatibility:** HLSL Tools and HLSL-LSP integrate with the
 > same Visual Studio HLSL file extensions and content-type pipeline. Enabling
 > both extensions can prevent language features from activating reliably.
-> Disable or uninstall HLSL Tools before installing HLSL-LSP.
+> Disable or uninstall HLSL Tools before installing HLSL-LSP. Both editor
+> clients report the known conflict when they can detect an active HLSL Tools
+> installation.
 
 ## Features
 

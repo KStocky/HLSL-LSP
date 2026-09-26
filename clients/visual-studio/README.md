@@ -10,7 +10,8 @@ Studio SDK and language-server client.
 
 Visual Studio's HLSL Tools extension claims the same file extensions and is not
 currently compatible with HLSL-LSP. Disable or uninstall HLSL Tools before
-installing this VSIX.
+installing this VSIX. When both language services are active, HLSL-LSP shows a
+one-time warning with specific remediation and setup diagnostics.
 Go-to-definition for symbols and `#include` paths is provided by the server
 through LSP. Workspace symbols also integrate with Visual Studio's All-In-One
 Search (`Ctrl+T`). LSP semantic tokens are disabled in Visual Studio because

@@ -6,6 +6,7 @@ import "./configuration.test";
 import "./debouncer.test";
 import "./effectiveContext.test";
 import "./entryPointDataFlow.test";
+import "./firstRunGuidance.test";
 import "./health.test";
 import "./lifecycle.test";
 import "./memoryLayout.test";

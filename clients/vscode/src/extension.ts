@@ -55,6 +55,13 @@ import {
   variantLabel,
 } from "./effectiveContext";
 import {
+  firstRunGuidanceStateKey,
+  hlslToolsConflictStateKey,
+  hlslToolsExtensionId,
+  shouldShowFirstRunGuidance,
+  shouldShowHlslToolsConflict,
+} from "./firstRunGuidance";
+import {
   healthDiagnosticsText,
   healthHtml,
   HlslHealthSnapshot,
@@ -1886,6 +1893,88 @@ export async function activate(
     await reportError(outputChannel, action, error);
   };
 
+  let firstRunGuidanceInProgress = false;
+  const showFirstRunGuidance = async (
+    editor: vscode.TextEditor | undefined,
+  ): Promise<void> => {
+    if (firstRunGuidanceInProgress) {
+      return;
+    }
+    const languageId = editor?.document.languageId;
+    const showGuidance = shouldShowFirstRunGuidance(
+      languageId,
+      context.globalState.get<boolean>(firstRunGuidanceStateKey) === true,
+    );
+    const showConflict = shouldShowHlslToolsConflict(
+      languageId,
+      context.globalState.get<boolean>(hlslToolsConflictStateKey) === true,
+      vscode.extensions.getExtension(hlslToolsExtensionId) !== undefined,
+    );
+    if (!showGuidance && !showConflict) {
+      return;
+    }
+
+    firstRunGuidanceInProgress = true;
+    if (showGuidance) {
+      try {
+        await context.globalState.update(firstRunGuidanceStateKey, true);
+        const selection = await vscode.window.showInformationMessage(
+          "HLSL-LSP is active. Right-click the editor for the HLSL menu, or use the actions below to configure and inspect this shader.",
+          "Configuration Guide",
+          "Select Variant",
+          "Setup Diagnostics",
+        );
+        if (selection === "Configuration Guide") {
+          await vscode.env.openExternal(
+            vscode.Uri.parse(
+              "https://github.com/KStocky/HLSL-LSP/blob/main/docs/shadertoolsconfig.md",
+            ),
+          );
+        } else if (selection === "Select Variant") {
+          await vscode.commands.executeCommand("hlsl.selectVariant");
+        } else if (selection === "Setup Diagnostics") {
+          await vscode.commands.executeCommand("hlsl.showStatus");
+        }
+      } catch (error) {
+        outputChannel.appendLine(
+          `[warning] Unable to show first-run guidance: ${errorMessage(error)}`,
+        );
+      }
+    }
+
+    try {
+      if (
+        !shouldShowHlslToolsConflict(
+          vscode.window.activeTextEditor?.document.languageId,
+          context.globalState.get<boolean>(hlslToolsConflictStateKey) === true,
+          vscode.extensions.getExtension(hlslToolsExtensionId) !== undefined,
+        )
+      ) {
+        return;
+      }
+      await context.globalState.update(hlslToolsConflictStateKey, true);
+      const selection = await vscode.window.showWarningMessage(
+        "HLSL Tools is also enabled and can start a competing HLSL language service. Disable HLSL Tools for this workspace, then reload the window.",
+        "Manage HLSL Tools",
+        "Setup Diagnostics",
+      );
+      if (selection === "Manage HLSL Tools") {
+        await vscode.commands.executeCommand(
+          "workbench.extensions.search",
+          `@id:${hlslToolsExtensionId}`,
+        );
+      } else if (selection === "Setup Diagnostics") {
+        await vscode.commands.executeCommand("hlsl.showStatus");
+      }
+    } catch (error) {
+      outputChannel.appendLine(
+        `[warning] Unable to show HLSL Tools conflict guidance: ${errorMessage(error)}`,
+      );
+    } finally {
+      firstRunGuidanceInProgress = false;
+    }
+  };
+
   async function openEffectiveConfigurationFile(
     requestedUri?: vscode.Uri,
   ): Promise<void> {
@@ -3567,6 +3656,7 @@ export async function activate(
       }
     }),
     vscode.window.onDidChangeActiveTextEditor((editor) => {
+      void showFirstRunGuidance(editor);
       if (editor?.document.languageId === "hlsl") {
         healthDocumentUri = editor.document.uri;
       } else if (healthPanel?.active !== true) {
@@ -3783,6 +3873,7 @@ export async function activate(
   await updateVariantStatus();
   await refreshHealthSurface();
   scheduleMacroExpansionContext();
+  void showFirstRunGuidance(vscode.window.activeTextEditor);
 
   return {
     get state(): LifecycleState {

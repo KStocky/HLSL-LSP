@@ -200,7 +200,99 @@ public sealed class HlslBootstrapPackage : AsyncPackage
                             DisposalToken))
                     .FileAndForget("HlslLsp/ChangeAnalysisTrackingMode"));
         await RegisterCommandsAsync(cancellationToken);
+        await ShowFirstRunGuidanceAsync(cancellationToken);
         await TryActivateLanguageClientAsync(cancellationToken);
+    }
+
+    private async Task ShowFirstRunGuidanceAsync(CancellationToken cancellationToken)
+    {
+        var markers = FirstRunMarkerStore.CreateDefault();
+        var showGuidance = markers.TryClaim(
+            FirstRunGuidancePolicy.GuidanceMarker,
+            out var guidanceMarkerError);
+        var hlslToolsLoaded = FirstRunGuidancePolicy.HasHlslToolsConflict(
+            AppDomain.CurrentDomain.GetAssemblies()
+                .Select(assembly => assembly.GetName().Name));
+        string conflictMarkerError = null;
+        var showConflict =
+            hlslToolsLoaded &&
+            markers.TryClaim(
+                FirstRunGuidancePolicy.ConflictMarker,
+                out conflictMarkerError);
+        if (!string.IsNullOrEmpty(guidanceMarkerError))
+        {
+            ActivityLog.LogWarning(
+                nameof(HlslBootstrapPackage),
+                $"Unable to persist first-run guidance state: {guidanceMarkerError}");
+        }
+        if (hlslToolsLoaded && !string.IsNullOrEmpty(conflictMarkerError))
+        {
+            ActivityLog.LogWarning(
+                nameof(HlslBootstrapPackage),
+                $"Unable to persist HLSL Tools conflict state: {conflictMarkerError}");
+        }
+        if (!showGuidance && !showConflict)
+        {
+            return;
+        }
+
+        await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+        var shell = await GetServiceAsync(typeof(SVsShell)) as IVsShell;
+        var factory =
+            await GetServiceAsync(typeof(SVsInfoBarUIFactory)) as IVsInfoBarUIFactory;
+        if (shell == null || factory == null)
+        {
+            ActivityLog.LogWarning(
+                nameof(HlslBootstrapPackage),
+                "Visual Studio's InfoBar services are unavailable.");
+            return;
+        }
+        ErrorHandler.ThrowOnFailure(
+            shell.GetProperty(
+                (int)__VSSPROPID7.VSSPROPID_MainWindowInfoBarHost,
+                out var hostValue));
+        if (hostValue is not IVsInfoBarHost host)
+        {
+            ActivityLog.LogWarning(
+                nameof(HlslBootstrapPackage),
+                "Visual Studio's main-window InfoBar host is unavailable.");
+            return;
+        }
+
+        void HandleAction(string action)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            switch (action)
+            {
+                case FirstRunInfoBar.ConfigurationAction:
+                    VsShellUtilities.OpenBrowser(
+                        "https://github.com/KStocky/HLSL-LSP/blob/main/docs/shadertoolsconfig.md");
+                    break;
+                case FirstRunInfoBar.VariantAction:
+                    JoinableTaskFactory.RunAsync(
+                            () => SelectVariantAsync(DisposalToken))
+                        .FileAndForget("HlslLsp/FirstRunSelectVariant");
+                    break;
+                case FirstRunInfoBar.DiagnosticsAction:
+                    JoinableTaskFactory.RunAsync(
+                            () => ShowStatusAsync(DisposalToken))
+                        .FileAndForget("HlslLsp/FirstRunShowStatus");
+                    break;
+                case FirstRunInfoBar.ConflictDetailsAction:
+                    VsShellUtilities.OpenBrowser(
+                        "https://marketplace.visualstudio.com/items?itemName=TimGJones.HLSLToolsforVisualStudio");
+                    break;
+            }
+        }
+
+        if (showGuidance)
+        {
+            host.AddInfoBar(FirstRunInfoBar.CreateGuidance(factory, HandleAction));
+        }
+        if (showConflict)
+        {
+            host.AddInfoBar(FirstRunInfoBar.CreateConflictWarning(factory, HandleAction));
+        }
     }
 
     private async Task RegisterCommandsAsync(CancellationToken cancellationToken)
