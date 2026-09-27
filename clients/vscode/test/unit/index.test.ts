@@ -18,6 +18,7 @@ import "./preprocessorExplorer.test";
 import "./resourceBindings.test";
 import "./schema.test";
 import "./runtime.test";
+import "./runtimeCapture.test";
 import "./settingsSynchronizer.test";
 import "./variants.test";
 import "./watchers.test";

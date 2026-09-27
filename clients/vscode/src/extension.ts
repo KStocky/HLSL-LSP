@@ -92,6 +92,14 @@ import {
   TraceSetting,
 } from "./configuration";
 import { ConfigurationAuthoringController } from "./configurationAuthoring";
+import { RuntimeCaptureController } from "./runtimeCapture";
+import { RuntimeCaptureAuthoring } from "./runtimeCaptureAuthoring";
+import type {
+  CapturePreview,
+  CaptureSnapshot,
+  CaptureStart,
+  CaptureStatus,
+} from "./runtimeCaptureCore";
 import {
   ConfigurationAuthoringParams,
   ConfigurationAuthoringResult,
@@ -161,6 +169,12 @@ interface ManagedClient extends LifecycleClient {
   configurationAuthoring(
     params: ConfigurationAuthoringParams,
   ): Promise<ConfigurationAuthoringResult | null>;
+  captureRequest(
+    method: "start" | "stop" | "status" | "snapshot" | "preview",
+    params: Record<string, unknown>,
+  ): Promise<
+    CaptureStart | CaptureStatus | CaptureSnapshot | CapturePreview | null
+  >;
 }
 
 export interface HlslExtensionApi {
@@ -1493,6 +1507,8 @@ class VscodeLanguageClient implements ManagedClient {
   private readonly watcherSubscriptions: vscode.Disposable[];
   private readonly recoveryTracker = new ConnectionRecoveryTracker();
   private disposed = false;
+  private captureTraceMuted = false;
+  private traceOperation: Promise<void> = Promise.resolve();
 
   public constructor(
     public readonly runtime: ServerRuntime,
@@ -1770,6 +1786,58 @@ class VscodeLanguageClient implements ManagedClient {
     );
   }
 
+  public async captureRequest(
+    method: "start" | "stop" | "status" | "snapshot" | "preview",
+    params: Record<string, unknown>,
+  ): Promise<
+    CaptureStart | CaptureStatus | CaptureSnapshot | CapturePreview | null
+  > {
+    return this.withTraceLock(async () => {
+      // The LSP client can trace full requests and responses, including
+      // credentials and captured metadata. Serialize trace setting changes
+      // through the request so synchronization cannot re-enable it mid-flight.
+      this.captureTraceMuted = true;
+      await this.client.setTrace(Trace.Off);
+      try {
+        const result = await this.client.sendRequest<
+          CaptureStart | CaptureStatus | CaptureSnapshot | CapturePreview | null
+        >(`hlsl/capture/${method}`, params);
+        if (
+          method === "stop" ||
+          (method === "status" &&
+            result !== null &&
+            "active" in result &&
+            !result.active)
+        ) {
+          this.captureTraceMuted = false;
+        }
+        return result;
+      } finally {
+        if (!this.captureTraceMuted) {
+          await this.client.setTrace(
+            traceValue(readTraceSetting(configuration())),
+          );
+        }
+      }
+    });
+  }
+
+  private async withTraceLock<TResult>(
+    action: () => Promise<TResult>,
+  ): Promise<TResult> {
+    const previous = this.traceOperation;
+    let release: () => void = () => undefined;
+    this.traceOperation = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await action();
+    } finally {
+      release();
+    }
+  }
+
   private async applySettings(
     settings: ClientSettings,
     isCurrentConnection: () => boolean,
@@ -1777,7 +1845,11 @@ class VscodeLanguageClient implements ManagedClient {
     if (!isCurrentConnection() || !this.clientIsRunning()) {
       return false;
     }
-    await this.client.setTrace(traceValue(settings.trace));
+    await this.withTraceLock(() =>
+      this.client.setTrace(
+        this.captureTraceMuted ? Trace.Off : traceValue(settings.trace),
+      ),
+    );
     if (!isCurrentConnection() || !this.clientIsRunning()) {
       return false;
     }
@@ -2102,6 +2174,7 @@ export async function activate(
         },
         (transition) => {
           if (transition === "disconnected") {
+            captureController.invalidate();
             lastActionableFailure = "The language server connection was lost.";
             cancelPendingAnalysisRefreshes();
             invalidateOpenAnalysisPanels("Disconnected server");
@@ -2125,6 +2198,29 @@ export async function activate(
       throw error;
     }
   });
+  const captureController = new RuntimeCaptureController(
+    (method, params) =>
+      lifecycle.withClient((client) => client.captureRequest(method, params)),
+    new RuntimeCaptureAuthoring(
+      (params) =>
+        lifecycle.withClient(
+          async (client) =>
+            (await client.captureRequest(
+              "preview",
+              params,
+            )) as CapturePreview | null,
+        ),
+      (params) =>
+        lifecycle.withClient((client) => client.configurationAuthoring(params)),
+      () =>
+        lifecycle.withClient(
+          async (client) =>
+            (await client.captureRequest("status", {
+              protocolVersion: 1,
+            })) as CaptureStatus | null,
+        ),
+    ),
+  );
   activeLifecycle = lifecycle;
   watchedFileRefreshDebouncer = new Debouncer(() => {
     const cause = watchedFileRefreshCause;
@@ -2324,6 +2420,7 @@ export async function activate(
   };
 
   const restart = async (): Promise<void> => {
+    captureController.invalidate();
     cancelPendingAnalysisRefreshes();
     invalidateOpenAnalysisPanels("Disconnected server", true);
     invalidateMacroExpansion("Disconnected server");
@@ -2726,6 +2823,7 @@ export async function activate(
   }
 
   context.subscriptions.push(
+    captureController,
     new ConfigurationAuthoringController(
       (params) =>
         lifecycle.withClient((client) => client.configurationAuthoring(params)),
@@ -2734,6 +2832,7 @@ export async function activate(
     vscode.commands.registerCommand("hlsl.showStatus", showHealth),
     vscode.commands.registerCommand("hlsl.restartServer", restart),
     vscode.commands.registerCommand("hlsl.stopServer", async () => {
+      captureController.invalidate();
       cancelPendingAnalysisRefreshes();
       invalidateOpenAnalysisPanels("Disconnected server");
       invalidateMacroExpansion("Disconnected server");

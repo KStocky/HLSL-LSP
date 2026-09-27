@@ -107,6 +107,49 @@ logs. Shutdown is performed through the language client and is scoped to the
 child process launched by this extension. See
 [status and recovery](../../docs/status-and-recovery.md).
 
+## Opt-in runtime capture (read-only review)
+
+Run **HLSL: Start Runtime Capture** to explicitly begin a local in-memory
+session. Choose **Show Connection Details** only when you are ready to supply
+the endpoint and token privately to your own engine's opt-in C++ compile
+wrapper (see [SDK integration](../../docs/runtime-capture.md)). Do not put
+credentials, sensitive defines, arguments, or shader contents in source
+control, logs, screenshots, or shared terminals. The extension does not
+instrument your engine or begin compilation: connect the SDK in your wrapper,
+then run your project. LSP tracing is disabled during capture because it could
+otherwise reveal credentials or captured metadata.
+
+Use **HLSL: Show Runtime Capture Status** for accepted/rejected/overflow counts.
+**HLSL: Review Runtime Capture** works while the session is active. Review
+and apply settings before stopping: **HLSL: Stop Runtime Capture** takes a final
+snapshot for a selected workspace and then revokes the connection. Capture retains at most 256 distinct
+invocations with deduplicated counts and is a sample, not a complete log.
+Review filters out ineligible or likely transient/generated values by default.
+You can opt into inspecting all entries, select multiple entries, and see raw
+invocations, warning codes, and proposed settings in an unsaved JSON review
+document. Close it when finished; it may contain sensitive paths, defines, or
+arguments. A server restart, disconnect, new capture, or window closure
+discards the retained snapshot.
+
+While the session is **active**, explicitly select 1–64 eligible entries and
+choose **Preview Selected Entries**. If multiple invocations target the same
+file, assign a distinct variant name to _each_. Pipelines are never inferred:
+choose none, explicitly select complete host-correlated groups, or explicitly
+name a vertex/pixel pairing yourself. The server's `hlsl/capture/preview`
+performs the read-only merge; the client does not manipulate configuration
+JSON. Inspect the entire JSON diff and captured warning details. If validation
+fails after a merge or you need corrections, edit the unsaved draft and run **Validate Capture
+Draft**; the existing `hlsl/configurationAuthoring` validator checks its
+`draftContent`. Only **Apply Configuration** after production validation and
+explicit confirmation can create/replace the workspace root config through a
+VS Code `WorkspaceEdit`. The client checks the editor buffer version and hash,
+and confirms the capture session has not changed before applying. If the
+existing configuration was malformed or conflicts with captured settings, fix it
+using **HLSL: Edit Shader Configuration** and rerun capture review while the
+session is active; the merge never silently replaces invalid JSON or applies
+the unmerged original. A stopped snapshot remains reviewable but cannot be
+previewed/applied because the server has erased that session.
+
 ## Shader variants
 
 When a `shadertoolsconfig.json` declares named compilation variants under

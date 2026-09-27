@@ -67,6 +67,16 @@ export async function run(): Promise<void> {
   assert(registeredCommands.includes("hlsl.editConfiguration"));
   assert(registeredCommands.includes("hlsl.validateConfigurationDraft"));
   assert(registeredCommands.includes("hlsl.cancelConfigurationDraft"));
+  for (const command of [
+    "hlsl.startCapture",
+    "hlsl.stopCapture",
+    "hlsl.captureStatus",
+    "hlsl.reviewCapture",
+    "hlsl.validateCaptureDraft",
+    "hlsl.cancelCaptureDraft",
+  ]) {
+    assert(registeredCommands.includes(command));
+  }
 
   const valid = await openFixture("valid.hlsl");
   await waitFor("server initialization", () =>
