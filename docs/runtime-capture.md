@@ -29,6 +29,12 @@ engine, populate invocation metadata from the actual compile request and keep
 the endpoint and token in a private control channel, never in command-line
 arguments, logs, or source control.
 
+For the two-permutation [runtime capture tutorial](tutorials/runtime-capture.md),
+run `hlsl-capture-example <shader-source-path> both`. This reports illustrative
+`MainPS`/`ps_6_6` requests for `WARM_GRADE=0` and `WARM_GRADE=1` against
+the same checked-in shader; `natural` or `warm` reports just one. The original
+single-argument invocation remains unchanged.
+
 ```cpp
 namespace shader_capture = hlsl_intellisense::capture;
 shader_capture::Client client; // disconnected: report() returns false immediately
