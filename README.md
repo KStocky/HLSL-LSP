@@ -245,6 +245,7 @@ In Visual Studio, right-click the shader and choose
 
 Start with these task-oriented walkthroughs:
 
+- [Create a shader configuration with guided authoring](docs/tutorials/configuration-authoring.md)
 - [Switch shader compilation variants](docs/tutorials/shader-variants.md)
 - [Inspect shader resource bindings](docs/tutorials/resource-bindings.md)
 - [Inspect shader compilation and disassembly](docs/tutorials/shader-compilation.md)
