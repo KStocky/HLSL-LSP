@@ -48,6 +48,30 @@ struct ConfigurationPreview {
     std::vector<ConfigurationValidationError> errors;
 };
 
+struct CapturedConfigurationEntry {
+    std::filesystem::path file;
+    std::string entry_point;
+    std::string target_profile;
+    std::string settings_json;
+    std::optional<std::string> variant_name;
+};
+
+struct CapturedPipelineStage {
+    std::string stage;
+    std::size_t entry_index{};
+};
+
+struct CapturedPipeline {
+    std::string name;
+    std::vector<CapturedPipelineStage> stages;
+};
+
+[[nodiscard]] ConfigurationPreview
+generate_capture_configuration_preview(const std::filesystem::path& workspace,
+                                       const std::optional<std::string>& existing_content,
+                                       const std::vector<CapturedConfigurationEntry>& entries,
+                                       const std::vector<CapturedPipeline>& pipelines);
+
 [[nodiscard]] ConfigurationDiscovery
 discover_shader_files(const std::filesystem::path& workspace,
                       const ConfigurationDiscoveryLimits& limits = {},

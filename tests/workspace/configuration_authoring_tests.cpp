@@ -129,6 +129,82 @@ TEST_CASE("Configuration previews do not overwrite malformed existing content",
     CHECK(preview.errors[0].field == "$");
 }
 
+TEST_CASE("Captured preview merges named variants and correlated pipeline without losing unknowns",
+          "[workspace][capture-preview]") {
+    TestTree tree;
+    tree.file("Shaders/vs.hlsl");
+    tree.file("Shaders/ps.hlsl");
+    const std::vector entries{
+        workspace::CapturedConfigurationEntry{
+            .file = tree.path("Shaders/vs.hlsl"),
+            .entry_point = "VSMain",
+            .target_profile = "vs_6_6",
+            .settings_json = R"({"hlsl.entryPoint":"VSMain","hlsl.targetProfile":"vs_6_6"})",
+            .variant_name = std::nullopt},
+        workspace::CapturedConfigurationEntry{
+            .file = tree.path("Shaders/ps.hlsl"),
+            .entry_point = "PSMain",
+            .target_profile = "ps_6_6",
+            .settings_json =
+                R"({"hlsl.entryPoint":"PSMain","hlsl.targetProfile":"ps_6_6","hlsl.preprocessorDefinitions":{"MODE":"HIGH"}})",
+            .variant_name = "Pixel High"}};
+    const std::vector pipelines{workspace::CapturedPipeline{
+        .name = "Forward",
+        .stages = {{.stage = "vertex", .entry_index = 0}, {.stage = "pixel", .entry_index = 1}}}};
+    const std::string existing = R"({"custom.setting":{"keep":true}})";
+    const auto first = workspace::generate_capture_configuration_preview(tree.path(), existing,
+                                                                         entries, pipelines);
+    REQUIRE(first.valid);
+    const auto json = nlohmann::json::parse(first.content);
+    CHECK(json["custom.setting"]["keep"] == true);
+    CHECK(json["hlsl.fileGroups"][0]["files"] == nlohmann::json::array({"Shaders/vs.hlsl"}));
+    CHECK(json["hlsl.variantsVersion"] == 1);
+    CHECK(json["hlsl.variants"][0]["name"] == "Pixel High");
+    CHECK(json["hlsl.variants"][0]["hlsl.preprocessorDefinitions"]["MODE"] == "HIGH");
+    CHECK(json["hlsl.pipelinesVersion"] == 1);
+    CHECK(json["hlsl.pipelines"][0]["stages"]["pixel"]["variant"] == "Pixel High");
+    const auto second = workspace::generate_capture_configuration_preview(
+        tree.path(), first.content, entries, pipelines);
+    REQUIRE(second.valid);
+    CHECK_FALSE(second.changed);
+    CHECK(second.content == first.content);
+}
+
+TEST_CASE("Captured preview refuses conflicting groups and reports production validation fields",
+          "[workspace][capture-preview]") {
+    TestTree tree;
+    tree.file("Shaders/main.hlsl");
+    const std::vector entries{workspace::CapturedConfigurationEntry{
+        .file = tree.path("Shaders/main.hlsl"),
+        .entry_point = "Main",
+        .target_profile = "ps_6_6",
+        .settings_json = R"({"hlsl.entryPoint":"Main","hlsl.targetProfile":"ps_6_6"})",
+        .variant_name = std::nullopt}};
+    const auto first =
+        workspace::generate_capture_configuration_preview(tree.path(), std::nullopt, entries, {});
+    REQUIRE(first.valid);
+    const auto duplicate =
+        workspace::generate_capture_configuration_preview(tree.path(), first.content, entries, {});
+    REQUIRE(duplicate.valid);
+    CHECK_FALSE(duplicate.changed);
+    auto changed = entries;
+    changed[0].settings_json = R"({"hlsl.entryPoint":"Main","hlsl.targetProfile":"ps_6_7"})";
+    const auto conflict =
+        workspace::generate_capture_configuration_preview(tree.path(), first.content, changed, {});
+    REQUIRE_FALSE(conflict.valid);
+    REQUIRE(conflict.errors.size() == 1);
+    CHECK(conflict.errors.front().field == "hlsl.fileGroups");
+    CHECK(conflict.content == first.content);
+
+    changed[0].settings_json =
+        R"({"hlsl.entryPoint":"Main","hlsl.targetProfile":"ps_6_6","hlsl.virtualDirectoryMappings":{"/Missing":"NotThere"}})";
+    const auto invalid =
+        workspace::generate_capture_configuration_preview(tree.path(), std::nullopt, changed, {});
+    CHECK_FALSE(invalid.valid);
+    REQUIRE_FALSE(invalid.errors.empty());
+    CHECK(invalid.errors.front().field == "hlsl.fileGroups[0].hlsl.virtualDirectoryMappings");
+}
+
 TEST_CASE("Configuration preview validation reports production parser fields",
           "[workspace][configuration-authoring]") {
     TestTree tree;

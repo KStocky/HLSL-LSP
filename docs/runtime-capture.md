@@ -54,15 +54,21 @@ All methods require an initialized server and `{"protocolVersion":1}`.
 
 | Method | Additional request | Result |
 | --- | --- | --- |
-| `hlsl/capture/start` | none | `{protocolVersion, endpoint, token}` |
-| `hlsl/capture/status` | none | `{protocolVersion, active, accepted, rejected, overflow}` |
-| `hlsl/capture/snapshot` | optional `workspaceFolder: {uri}` (initialized folder) | status plus `entries: [{invocation, count, review}]` |
+| `hlsl/capture/start` | none | `{protocolVersion, sessionId, endpoint, token}` |
+| `hlsl/capture/status` | none | `{protocolVersion, sessionId, active, accepted, rejected, overflow}` |
+| `hlsl/capture/snapshot` | optional `workspaceFolder: {uri}` (initialized folder) | status plus `entries: [{id, invocation, count, review}]` |
 | `hlsl/capture/stop` | `token` returned by start | `{protocolVersion:1, active:false}` |
+| `hlsl/capture/preview` | see below | `{protocolVersion, sessionId, selectedEntryIds, configuration, preview}` |
 
 Starting again revokes the previous token and clears the snapshot. Stop,
 shutdown, and server destruction close the endpoint and erase the in-memory
 snapshot. A stale stop token is rejected. Do not persist or log the endpoint
 token; it is redacted in protocol traces even when source tracing is enabled.
+`sessionId` is a non-secret 71-character `sha256:` identifier for the active
+session (null when inactive). Entry `id` values have the same format and are
+deterministic for the same invocation **within that session**. Starting a new
+session changes both identifiers; old IDs cannot be previewed. An ID is not
+an IPC credential: only `token` authorizes the engine connection.
 Snapshot results may themselves contain sensitive paths, defines, or arguments:
 do not forward them to telemetry or untrusted extensions. The editor should
 filter transient/generated values and require explicit user selection, naming,
@@ -124,16 +130,96 @@ the same order. Possible codes are `includeDirectories`, `arguments`,
 `logicalIdentity`, `networkPath`, `outsideWorkspace`, `missingFile`,
 `resolvedOutsideWorkspace`, `nestedConfiguration`, and `entryPointOrSettings`.
 
-`eligible` does **not** mean the settings were validated for a particular
-workspace. A client should fetch `hlsl/configurationAuthoring`'s preview,
-show/filter/select the captured `fileGroup` fragments, merge selected fragments
-into the preview JSON while retaining existing/unknown properties, and pass
-the edited JSON as `draftContent` to `hlsl/configurationAuthoring` for production
-validation. The response's `preview.valid`, `configuration.expectedContentHash`,
-and editor document version must be checked before explicitly applying the
-preview. A `review.selection` is advisory: do not put it in discovery
-`selections` unless DXC discovery also returned that exact candidate.
-**No automatic captured-selection merge or configuration write occurs.**
+`eligible` does **not** mean settings have passed production validation. A
+`review.selection` is advisory: do not put it in discovery `selections` unless
+DXC discovery also returned that exact candidate.
+
+## Explicit capture merge preview
+
+`hlsl/capture/preview` performs a **read-only**, versioned merge of explicitly
+selected captured IDs into the root workspace configuration. Example request:
+
+```json
+{
+  "protocolVersion": 1,
+  "workspaceFolder": {"uri": "file:///C:/work/project"},
+  "sessionId": "sha256:<64 hex digits from start/snapshot>",
+  "selectedEntryIds": ["sha256:<captured entry ID>"],
+  "existingConfiguration": {
+    "content": "{\"root\":true}",
+    "version": 12,
+    "contentHash": "sha256:<hash of content>"
+  },
+  "variants": [{"entryId": "sha256:<captured entry ID>", "name": "High Quality"}],
+  "pipelines": [{
+    "name": "Forward",
+    "source": "host",
+    "stages": {
+      "vertex": "sha256:<selected vertex ID>",
+      "pixel": "sha256:<selected pixel ID>"
+    }
+  }]
+}
+```
+
+`existingConfiguration`, `variants`, and `pipelines` are optional.
+`existingConfiguration.content`, `version`, and `contentHash` are independently
+optional as in `hlsl/configurationAuthoring`. Omitted content reads the root
+configuration from disk; a supplied hash must match the supplied or disk
+content. The request must identify an initialized workspace and active
+session. Select 1–64 *unique*, eligible entry IDs. Unscoped/logical/outside
+workspace captures cannot be merged. Multiple distinct captured invocations
+for one file require **each** to have an explicitly named variant, avoiding
+last-file-group-wins ambiguity. Variant names must be unique, nonempty, and at
+most 128 characters; at most 64 variants are accepted. Equivalent invocations
+have one ID and one merged fragment regardless of occurrence count.
+
+At most 16 named pipelines may be supplied. Each requires `source:"host"` or
+`"user"`, a `stages` object mapping stage names to selected entry IDs, and
+both `vertex` and `pixel`. Optional stages are `geometry`, `hull`, and
+`domain` (the latter two together). The captured target-profile prefix must
+match each stage (`vs_`, `ps_`, `gs_`, `hs_`, `ds_`). `source:"host"` additionally
+requires every stage's captured `pipeline` and `stage` correlation to match the
+requested name and stage. `source:"user"` records the user's *explicit*
+grouping; the server never infers missing relationships. Pipeline stages
+include the corresponding named variant if one was selected.
+
+The result has the existing authoring envelope:
+
+```json
+{
+  "protocolVersion": 1,
+  "sessionId": "sha256:<active session ID>",
+  "selectedEntryIds": ["sha256:<selected entry ID>"],
+  "configuration": {
+    "uri": "file:///C:/work/project/shadertoolsconfig.json",
+    "exists": true,
+    "expectedContentVersion": 12,
+    "expectedContentHash": "sha256:<original content hash>"
+  },
+  "preview": {
+    "content": "{\n  ...\n}\n",
+    "contentHash": "sha256:<preview content hash>",
+    "valid": true,
+    "changed": true,
+    "errors": []
+  }
+}
+```
+
+Malformed, duplicate selected IDs or request-side names, unauthorized-workspace,
+stale-session/entry, invalid stage/correlation, and oversize inputs fail with
+`InvalidParams` (-32602).
+Existing content and final preview are each limited to 2 MiB. A valid request
+whose existing JSON is malformed, whose existing explicit group/name conflicts
+with the capture, or whose merged content fails the production parser returns
+`preview.valid:false` with field-addressed `{code,field,message}` errors and
+does not overwrite existing content. Unknown properties are retained.
+Applying the preview remains an **editor decision**: compare expected version
+and hash with the current buffer, show the entire diff and warnings, obtain
+confirmation, then apply an editor workspace edit. For repairs or further
+editing, send edited preview text as `draftContent` to
+`hlsl/configurationAuthoring`. No server method writes configuration.
 
 ## Local wire protocol and limits
 

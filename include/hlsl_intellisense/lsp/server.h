@@ -199,6 +199,8 @@ class Server final {
     void register_handlers();
     [[nodiscard]] json_rpc::Json capture_session(std::string_view action,
                                                  const std::optional<json_rpc::Json>& params);
+    [[nodiscard]] json_rpc::Json capture_preview(const std::optional<json_rpc::Json>& params,
+                                                 const json_rpc::RequestContext& context);
     [[nodiscard]] json_rpc::Json initialize(const std::optional<json_rpc::Json>& params);
     [[nodiscard]] json_rpc::Json shutdown(const std::optional<json_rpc::Json>& params);
     [[nodiscard]] json_rpc::Json completion(const std::optional<json_rpc::Json>& params,

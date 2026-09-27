@@ -356,6 +356,107 @@ generate_configuration_preview(const std::filesystem::path& workspace,
     return result;
 }
 
+ConfigurationPreview
+generate_capture_configuration_preview(const std::filesystem::path& workspace,
+                                       const std::optional<std::string>& existing_content,
+                                       const std::vector<CapturedConfigurationEntry>& entries,
+                                       const std::vector<CapturedPipeline>& pipelines) {
+    auto base = generate_configuration_preview(workspace, existing_content, {});
+    if (!base.valid) {
+        return base;
+    }
+    auto document = Json::parse(base.content);
+    const auto conflict = [&](std::string field, std::string message) {
+        ConfigurationPreview result;
+        result.content = existing_content.value_or(base.content);
+        result.errors.push_back(
+            {.code = "capture-conflict", .field = std::move(field), .message = std::move(message)});
+        return result;
+    };
+    for (std::size_t index = 0; index < entries.size(); ++index) {
+        const auto& entry = entries[index];
+        const auto path = generic_relative(entry.file, workspace);
+        Json settings = Json::parse(entry.settings_json, nullptr, false);
+        if (!settings.is_object()) {
+            return conflict("selectedEntryIds", "Captured settings are not an object");
+        }
+        settings["files"] = Json::array({path});
+        if (entry.variant_name) {
+            settings["name"] = *entry.variant_name;
+            if (!document.contains("hlsl.variants")) {
+                document["hlsl.variants"] = Json::array();
+                document["hlsl.variantsVersion"] = 1;
+            }
+            auto& variants = document["hlsl.variants"];
+            const auto matching = std::ranges::find_if(variants, [&](const Json& value) {
+                return value.is_object() && value.value("name", "") == *entry.variant_name;
+            });
+            if (matching == variants.end()) {
+                variants.push_back(std::move(settings));
+            } else if (*matching != settings) {
+                return conflict("hlsl.variants",
+                                "Captured variant name already has different settings");
+            }
+        } else {
+            if (!document.contains("hlsl.fileGroups")) {
+                document["hlsl.fileGroups"] = Json::array();
+            }
+            auto& groups = document["hlsl.fileGroups"];
+            bool duplicate = false;
+            for (const Json& existing : groups) {
+                if (!existing.is_object() || !existing.contains("files") ||
+                    !existing["files"].is_array() ||
+                    std::ranges::find(existing["files"], Json(path)) == existing["files"].end()) {
+                    continue;
+                }
+                auto comparable = existing;
+                comparable.erase("name");
+                if (comparable != settings) {
+                    return conflict("hlsl.fileGroups",
+                                    "Captured file overlaps an existing file group");
+                }
+                duplicate = true;
+            }
+            if (!duplicate) {
+                groups.push_back(std::move(settings));
+            }
+        }
+    }
+    for (const auto& pipeline : pipelines) {
+        Json stages = Json::object();
+        for (const auto& stage : pipeline.stages) {
+            const auto& entry = entries.at(stage.entry_index);
+            Json value = {{"file", generic_relative(entry.file, workspace)},
+                          {"entryPoint", entry.entry_point},
+                          {"targetProfile", entry.target_profile}};
+            if (entry.variant_name) {
+                value["variant"] = *entry.variant_name;
+            }
+            stages[stage.stage] = std::move(value);
+        }
+        Json declaration = {{"name", pipeline.name}, {"stages", std::move(stages)}};
+        if (!document.contains("hlsl.pipelines")) {
+            document["hlsl.pipelines"] = Json::array();
+            document["hlsl.pipelinesVersion"] = 1;
+        }
+        auto& existing = document["hlsl.pipelines"];
+        const auto matching = std::ranges::find_if(existing, [&](const Json& value) {
+            return value.is_object() && value.value("name", "") == pipeline.name;
+        });
+        if (matching == existing.end()) {
+            existing.push_back(std::move(declaration));
+        } else if (*matching != declaration) {
+            return conflict("hlsl.pipelines",
+                            "Captured pipeline name already has different stages");
+        }
+    }
+    const auto content = document.dump(2) + '\n';
+    if (content.size() > 2U * 1024U * 1024U) {
+        return conflict("$", "Captured preview exceeds the 2 MiB configuration limit");
+    }
+    return generate_configuration_preview(workspace, existing_content, {}, content);
+}
+
 std::string configuration_content_hash(std::string_view content) {
     std::ostringstream stream;
     stream << "sha256:";

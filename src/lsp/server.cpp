@@ -2416,6 +2416,10 @@ void Server::register_handlers() {
             "hlsl/capture/" + std::string(action),
             [this, action](const auto& params) { return capture_session(action, params); });
     }
+    dispatcher_.register_request_handler("hlsl/capture/preview",
+                                         [this](const auto& params, const auto& context) {
+                                             return capture_preview(params, context);
+                                         });
     dispatcher_.register_request_handler("hlsl/variants",
                                          [this](const auto& params) { return variants(params); });
     dispatcher_.register_request_handler(
@@ -2652,6 +2656,11 @@ Json Server::shutdown(const std::optional<Json>& params) {
 }
 
 namespace {
+std::string capture_entry_id(std::string_view session_id, const capture::Invocation& invocation) {
+    return workspace::configuration_content_hash(std::string{session_id} + "\n" +
+                                                 capture::detail::encode(invocation).dump());
+}
+
 Json capture_review(const capture::Invocation& invocation,
                     const std::optional<std::filesystem::path>& workspace_path) {
     Json review = {{"eligible", false},
@@ -2797,7 +2806,11 @@ Json Server::capture_session(std::string_view action, const std::optional<Json>&
                                "Private capture endpoint unavailable"};
         }
         const auto state = capture_.snapshot();
-        return {{"protocolVersion", 1}, {"endpoint", state.endpoint}, {"token", capture_.token()}};
+        const auto token = capture_.token();
+        return {{"protocolVersion", 1},
+                {"sessionId", workspace::configuration_content_hash(token)},
+                {"endpoint", state.endpoint},
+                {"token", token}};
     }
     if (action == "stop") {
         if (request.size() != 2 || !request.contains("token") || !request["token"].is_string() ||
@@ -2829,21 +2842,253 @@ Json Server::capture_session(std::string_view action, const std::optional<Json>&
         invalid_params("Capture status/snapshot accepts only protocolVersion and workspaceFolder");
     }
     const auto state = capture_.snapshot();
-    Json result = {{"protocolVersion", 1},
-                   {"active", state.active},
-                   {"accepted", state.accepted},
-                   {"rejected", state.rejected},
-                   {"overflow", state.overflow}};
+    const auto session_id = state.active
+                                ? Json(workspace::configuration_content_hash(capture_.token()))
+                                : Json(nullptr);
+    Json result = {{"protocolVersion", 1},       {"sessionId", session_id},
+                   {"active", state.active},     {"accepted", state.accepted},
+                   {"rejected", state.rejected}, {"overflow", state.overflow}};
     if (action == "snapshot") {
         result["entries"] = Json::array();
         for (const auto& entry : state.entries) {
             result["entries"].push_back(
-                {{"invocation", capture::detail::encode(entry.invocation)},
+                {{"id", capture_entry_id(session_id.get<std::string>(), entry.invocation)},
+                 {"invocation", capture::detail::encode(entry.invocation)},
                  {"count", entry.count},
                  {"review", capture_review(entry.invocation, review_workspace)}});
         }
     }
     return result;
+}
+
+Json Server::capture_preview(const std::optional<Json>& params,
+                             const json_rpc::RequestContext& context) {
+    std::scoped_lock capture_lock{capture_mutex_};
+    require_running();
+    const auto& request = object_params(params);
+    if (request.size() < 4 || request.size() > 7 ||
+        integer_member(request, "protocolVersion") != capture::protocol_version) {
+        invalid_params("Unsupported capture preview request");
+    }
+    for (const auto& [key, ignored] : request.items()) {
+        (void)ignored;
+        if (key != "protocolVersion" && key != "sessionId" && key != "workspaceFolder" &&
+            key != "selectedEntryIds" && key != "variants" && key != "pipelines" &&
+            key != "existingConfiguration") {
+            invalid_params("Unknown capture preview parameter");
+        }
+    }
+    const auto session_id = string_member(request, "sessionId");
+    const auto snapshot = capture_.snapshot();
+    if (!snapshot.active || session_id.size() != 71 ||
+        session_id != workspace::configuration_content_hash(capture_.token())) {
+        invalid_params("Stale capture session");
+    }
+    workspace::DocumentUri folder_uri = [&] {
+        try {
+            return workspace::DocumentUri::from_uri(
+                string_member(object_member(request, "workspaceFolder"), "uri"));
+        } catch (const workspace::DocumentError& error) {
+            invalid_params(error.what());
+        }
+    }();
+    std::filesystem::path workspace_path;
+    {
+        std::scoped_lock state_lock{state_mutex_};
+        const auto found = workspace_folders_.find(folder_uri.identity());
+        if (found == workspace_folders_.end()) {
+            invalid_params("workspaceFolder.uri is not an initialized workspace folder");
+        }
+        workspace_path = found->second.lexically_normal();
+    }
+    const auto& ids = member(request, "selectedEntryIds");
+    if (!ids.is_array() || ids.empty() || ids.size() > 64) {
+        invalid_params("selectedEntryIds must contain 1..64 entry IDs");
+    }
+    std::map<std::string, const capture::Entry*, std::less<>> available;
+    for (const auto& entry : snapshot.entries) {
+        available.emplace(capture_entry_id(session_id, entry.invocation), &entry);
+    }
+    std::vector<workspace::CapturedConfigurationEntry> entries;
+    std::vector<const capture::Entry*> selected;
+    std::map<std::string, std::size_t, std::less<>> selected_by_id;
+    entries.reserve(ids.size());
+    selected.reserve(ids.size());
+    for (const auto& id_value : ids) {
+        context.cancellation.throw_if_cancellation_requested();
+        if (!id_value.is_string()) {
+            invalid_params("selectedEntryIds must contain strings");
+        }
+        const auto id = id_value.get<std::string>();
+        if (id.size() != 71 || !id.starts_with("sha256:")) {
+            invalid_params("Invalid captured entry ID");
+        }
+        const auto found = available.find(id);
+        if (found == available.end() || !selected_by_id.emplace(id, entries.size()).second) {
+            invalid_params("Unknown, duplicate, or stale captured entry ID");
+        }
+        const auto review = capture_review(found->second->invocation, workspace_path);
+        if (!review["eligible"].get<bool>()) {
+            invalid_params("Selected captured entry is not eligible for this workspace");
+        }
+        const auto& invocation = found->second->invocation;
+        entries.push_back(
+            {.file = workspace_path / review["selection"]["relativePath"].get<std::string>(),
+             .entry_point = invocation.entry_point,
+             .target_profile = invocation.target_profile,
+             .settings_json = review["settings"].dump(),
+             .variant_name = std::nullopt});
+        selected.push_back(found->second);
+    }
+
+    if (const auto variants = request.find("variants"); variants != request.end()) {
+        if (!variants->is_array() || variants->size() > 64) {
+            invalid_params("variants must be an array of at most 64 names");
+        }
+        std::set<std::string> names;
+        for (const auto& variant : *variants) {
+            if (!variant.is_object() || variant.size() != 2) {
+                invalid_params("Each variant requires entryId and name");
+            }
+            const auto id = string_member(variant, "entryId");
+            const auto name = string_member(variant, "name");
+            const auto found = selected_by_id.find(id);
+            if (found == selected_by_id.end() || name.empty() || name.size() > 128 ||
+                !names.insert(name).second || entries[found->second].variant_name) {
+                invalid_params("Variant name or selected entry ID is invalid or duplicated");
+            }
+            entries[found->second].variant_name = name;
+        }
+    }
+    std::map<std::string, std::size_t> file_counts;
+    for (const auto& entry : entries) {
+        ++file_counts[entry.file.generic_string()];
+    }
+    for (const auto& entry : entries) {
+        if (file_counts[entry.file.generic_string()] > 1 && !entry.variant_name) {
+            invalid_params("Every captured permutation of one file requires a variant name");
+        }
+    }
+
+    std::vector<workspace::CapturedPipeline> pipelines;
+    if (const auto value = request.find("pipelines"); value != request.end()) {
+        if (!value->is_array() || value->size() > 16) {
+            invalid_params("pipelines must be an array of at most 16 pipelines");
+        }
+        const std::map<std::string, std::string> profiles{{"vertex", "vs_"},
+                                                          {"pixel", "ps_"},
+                                                          {"hull", "hs_"},
+                                                          {"domain", "ds_"},
+                                                          {"geometry", "gs_"}};
+        std::set<std::string> names;
+        for (const auto& candidate : *value) {
+            if (!candidate.is_object() || candidate.size() != 3) {
+                invalid_params("Each pipeline requires name, source, and stages");
+            }
+            const auto name = string_member(candidate, "name");
+            const auto source = string_member(candidate, "source");
+            const auto& stages = object_member(candidate, "stages");
+            if (name.empty() || name.size() > 128 || !names.insert(name).second ||
+                (source != "host" && source != "user") || !stages.is_object() ||
+                stages.size() < 2 || stages.size() > 5 || !stages.contains("vertex") ||
+                !stages.contains("pixel") || stages.contains("hull") != stages.contains("domain")) {
+                invalid_params("Invalid pipeline name, source, or stage set");
+            }
+            workspace::CapturedPipeline pipeline{.name = name, .stages = {}};
+            for (const auto& [stage, id_value] : stages.items()) {
+                const auto expected = profiles.find(stage);
+                if (expected == profiles.end() || !id_value.is_string()) {
+                    invalid_params("Unknown pipeline stage or entry ID");
+                }
+                const auto found = selected_by_id.find(id_value.get<std::string>());
+                if (found == selected_by_id.end() ||
+                    !selected[found->second]->invocation.target_profile.starts_with(
+                        expected->second) ||
+                    (source == "host" && (selected[found->second]->invocation.pipeline != name ||
+                                          selected[found->second]->invocation.stage != stage))) {
+                    invalid_params("Pipeline stage has no matching selected entry or correlation");
+                }
+                pipeline.stages.push_back({.stage = stage, .entry_index = found->second});
+            }
+            pipelines.push_back(std::move(pipeline));
+        }
+    }
+
+    std::optional<std::string> content;
+    std::optional<std::int64_t> version;
+    std::optional<std::string> supplied_hash;
+    if (const auto existing = request.find("existingConfiguration");
+        existing != request.end() && !existing->is_null()) {
+        if (!existing->is_object() || existing->size() > 3) {
+            invalid_params("existingConfiguration must be an object");
+        }
+        for (const auto& [key, ignored] : existing->items()) {
+            (void)ignored;
+            if (key != "content" && key != "contentHash" && key != "version") {
+                invalid_params("Unknown existingConfiguration property");
+            }
+        }
+        content = optional_string_member(*existing, "content");
+        supplied_hash = optional_string_member(*existing, "contentHash");
+        if (const auto number = existing->find("version");
+            number != existing->end() && !number->is_null()) {
+            if (!number->is_number_integer()) {
+                invalid_params("existingConfiguration.version must be an integer");
+            }
+            version = number->get<std::int64_t>();
+        }
+    }
+    constexpr std::uintmax_t max_content = 2U * 1024U * 1024U;
+    if (content && content->size() > max_content) {
+        invalid_params("Existing configuration exceeds 2 MiB");
+    }
+    const auto configuration_path = workspace_path / workspace::configuration_file_name;
+    std::error_code error;
+    const bool exists = std::filesystem::is_regular_file(configuration_path, error);
+    if (error && error != std::errc::no_such_file_or_directory) {
+        throw HandlerError{json_rpc::internal_error_code, "Unable to inspect configuration"};
+    }
+    if (!content && exists) {
+        if (std::filesystem::file_size(configuration_path, error) > max_content || error) {
+            invalid_params("Existing configuration exceeds 2 MiB or cannot be read");
+        }
+        std::ifstream stream{configuration_path, std::ios::binary};
+        if (!stream) {
+            throw HandlerError{json_rpc::internal_error_code, "Unable to read configuration"};
+        }
+        content =
+            std::string{std::istreambuf_iterator<char>{stream}, std::istreambuf_iterator<char>{}};
+        if (content->size() > max_content) {
+            invalid_params("Existing configuration exceeds 2 MiB");
+        }
+    }
+    if (supplied_hash &&
+        (!content || *supplied_hash != workspace::configuration_content_hash(*content))) {
+        invalid_params("existingConfiguration.contentHash does not match current content");
+    }
+    context.cancellation.throw_if_cancellation_requested();
+    const auto preview = workspace::generate_capture_configuration_preview(workspace_path, content,
+                                                                           entries, pipelines);
+    Json errors = Json::array();
+    for (const auto& issue : preview.errors) {
+        errors.push_back(
+            {{"code", issue.code}, {"field", issue.field}, {"message", issue.message}});
+    }
+    return {{"protocolVersion", 1},
+            {"sessionId", session_id},
+            {"selectedEntryIds", ids},
+            {"configuration",
+             {{"uri", workspace::DocumentUri::from_path(configuration_path.string()).uri()},
+              {"exists", exists},
+              {"expectedContentVersion", version ? Json(*version) : Json(nullptr)},
+              {"expectedContentHash",
+               content ? Json(workspace::configuration_content_hash(*content)) : Json(nullptr)}}},
+            {"preview",
+             {{"content", preview.content},
+              {"contentHash", workspace::configuration_content_hash(preview.content)},
+              {"valid", preview.valid},
+              {"changed", preview.changed},
+              {"errors", std::move(errors)}}}};
 }
 
 Json Server::completion(const std::optional<Json>& params,
