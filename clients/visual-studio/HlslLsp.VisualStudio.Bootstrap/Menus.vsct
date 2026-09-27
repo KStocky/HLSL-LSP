@@ -71,6 +71,24 @@
           <ButtonText>Create/Edit HLSL Project Configuration</ButtonText>
         </Strings>
       </Button>
+      <Button guid="guidHlslLspCommands" id="StartRuntimeCapture" priority="0x0104" type="Button">
+        <Parent guid="guidHlslLspCommands" id="HlslToolsGroup"/>
+        <Strings>
+          <ButtonText>Start HLSL Compilation Capture</ButtonText>
+        </Strings>
+      </Button>
+      <Button guid="guidHlslLspCommands" id="ReviewRuntimeCapture" priority="0x0105" type="Button">
+        <Parent guid="guidHlslLspCommands" id="HlslToolsGroup"/>
+        <Strings>
+          <ButtonText>Review HLSL Compilation Capture</ButtonText>
+        </Strings>
+      </Button>
+      <Button guid="guidHlslLspCommands" id="StopRuntimeCapture" priority="0x0106" type="Button">
+        <Parent guid="guidHlslLspCommands" id="HlslToolsGroup"/>
+        <Strings>
+          <ButtonText>Stop HLSL Compilation Capture</ButtonText>
+        </Strings>
+      </Button>
       <Button guid="guidHlslLspCommands" id="ShowCompilationInfo" priority="0x0101" type="Button">
         <Parent guid="guidHlslLspCommands" id="HlslContextGroup"/>
         <CommandFlag>DynamicVisibility</CommandFlag>
@@ -119,6 +137,15 @@
     <CommandPlacement guid="guidHlslLspCommands" id="AuthorConfiguration" priority="0x0103">
       <Parent guid="guidHlslLspCommands" id="HlslContextGroup"/>
     </CommandPlacement>
+    <CommandPlacement guid="guidHlslLspCommands" id="StartRuntimeCapture" priority="0x0104">
+      <Parent guid="guidHlslLspCommands" id="HlslContextGroup"/>
+    </CommandPlacement>
+    <CommandPlacement guid="guidHlslLspCommands" id="ReviewRuntimeCapture" priority="0x0105">
+      <Parent guid="guidHlslLspCommands" id="HlslContextGroup"/>
+    </CommandPlacement>
+    <CommandPlacement guid="guidHlslLspCommands" id="StopRuntimeCapture" priority="0x0106">
+      <Parent guid="guidHlslLspCommands" id="HlslContextGroup"/>
+    </CommandPlacement>
   </CommandPlacements>
   <Symbols>
     <GuidSymbol name="guidHlslLspPackage" value="{5ac7fbe7-1b9f-45eb-bca6-ffb9ae1ab67f}"/>
@@ -140,6 +167,9 @@
       <IDSymbol name="ExpandMacro" value="0x0109"/>
       <IDSymbol name="ShowStatus" value="0x010a"/>
       <IDSymbol name="AuthorConfiguration" value="0x010b"/>
+      <IDSymbol name="StartRuntimeCapture" value="0x010c"/>
+      <IDSymbol name="ReviewRuntimeCapture" value="0x010d"/>
+      <IDSymbol name="StopRuntimeCapture" value="0x010e"/>
       <IDSymbol name="HlslToolsGroup" value="0x1026"/>
     </GuidSymbol>
   </Symbols>

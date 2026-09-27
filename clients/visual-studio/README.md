@@ -69,6 +69,29 @@ compiler-preprocessed token sequence using the current unsaved document,
 includes, active variant, and effective compiler configuration. See
 [macro expansion](../../docs/macro-expansion.md) for details.
 
+Use **Tools > Create/Edit HLSL Project Configuration** or the shader editor's
+**HLSL** menu to generate `shadertoolsconfig.json` beside an open solution.
+Select DXC-validated shader entries and profiles, then edit the proposed JSON
+for include paths, mappings, defines, variants, pipelines, or runtime settings.
+**Validate Draft** reports field-specific production-loader errors; the final
+preview requires confirmation before the configuration appears as a normal
+Visual Studio document. Existing unsaved changes are included, and a changed
+document version or content hash prevents a stale preview from applying. See
+[configuration authoring](../../docs/configuration-authoring.md) for limits
+and comment/formatting preservation.
+
+To discover the compilations your application actually requests, choose
+**Tools > Start HLSL Compilation Capture**, pass its local endpoint and private
+session token to the opt-in [C++ capture SDK](../../docs/runtime-capture.md),
+and run your project. Choose **Review HLSL Compilation Capture** to filter
+deduplicated requests and select verified disk-backed shaders. Name distinct
+variants or explicitly group graphics stages into a pipeline, then inspect
+the editable draft, validation errors, and final JSON preview before confirming
+the normal editor edit. A changed configuration buffer or capture session
+invalidates the preview. **Stop HLSL Compilation Capture** revokes the token
+and discards the in-memory snapshot; no captured settings are written
+automatically. Never share the token or capture secret compiler arguments.
+
 When a `shadertoolsconfig.json` declares named compilation variants under
 `hlsl.variants`, right-click the shader and choose
 **HLSL > Select Shader Variant**. The picker contains only variants applicable

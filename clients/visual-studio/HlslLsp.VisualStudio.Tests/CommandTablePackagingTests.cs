@@ -115,6 +115,17 @@ public sealed class CommandTablePackagingTests
             element => (string)element.Attribute("id") == "AuthorConfiguration" &&
                        (string)element.Element(ns + "Parent")?.Attribute("id") ==
                            "HlslContextGroup");
+        foreach (var id in new[]
+                 {
+                     "StartRuntimeCapture", "ReviewRuntimeCapture", "StopRuntimeCapture",
+                 })
+        {
+            Assert.Contains(
+                commandTable.Descendants(ns + "Button"),
+                element => (string)element.Attribute("id") == id &&
+                    (string)element.Element(ns + "Parent")?.Attribute("id") ==
+                        "HlslToolsGroup");
+        }
     }
 
 
