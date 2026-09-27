@@ -71,6 +71,8 @@ includes, active variant, and effective compiler configuration. See
 
 Use **Tools > Create/Edit HLSL Project Configuration** or the shader editor's
 **HLSL** menu to generate `shadertoolsconfig.json` beside an open solution.
+Follow the [configuration authoring tutorial](../../docs/tutorials/configuration-authoring.md)
+for a checked-in shader example and screenshots of the shared authoring flow.
 Select DXC-validated shader entries and profiles, then edit the proposed JSON
 for include paths, mappings, defines, variants, pipelines, or runtime settings.
 **Validate Draft** reports field-specific production-loader errors; the final
