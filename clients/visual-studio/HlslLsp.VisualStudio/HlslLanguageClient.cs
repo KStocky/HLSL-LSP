@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
@@ -253,6 +254,93 @@ internal sealed class HlslLanguageClient :
         return await currentRpc.InvokeWithParameterObjectAsync<VariantListModel>(
                 "hlsl/variants",
                 parameters,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    internal async Task<ConfigurationAuthoringResultModel> GetConfigurationAuthoringAsync(
+        ConfigurationAuthoringRequestModel request,
+        CancellationToken cancellationToken)
+    {
+        if (request?.ProtocolVersion != 1 ||
+            string.IsNullOrWhiteSpace(request.WorkspaceFolder?.Uri))
+        {
+            throw new ArgumentException(
+                "Configuration authoring requires protocol version 1 and a workspace URI.",
+                nameof(request));
+        }
+        var currentRpc = Volatile.Read(ref rpc);
+        if (currentRpc == null)
+        {
+            await rpcAttached.WaitAsync(cancellationToken).ConfigureAwait(false);
+            currentRpc = Volatile.Read(ref rpc);
+            if (currentRpc == null)
+            {
+                throw new InvalidOperationException(
+                    "The HLSL language server connection is unavailable.");
+            }
+        }
+        var parameters = new Dictionary<string, object>
+        {
+            ["protocolVersion"] = request.ProtocolVersion,
+            ["workspaceFolder"] = new { uri = request.WorkspaceFolder.Uri },
+        };
+        if (request.ExistingConfiguration != null)
+        {
+            parameters["existingConfiguration"] = new
+            {
+                content = request.ExistingConfiguration.Content,
+                version = request.ExistingConfiguration.Version,
+                contentHash = request.ExistingConfiguration.ContentHash,
+            };
+        }
+        if (request.Selections != null)
+        {
+            parameters["selections"] = request.Selections.Select(selection => new
+            {
+                relativePath = selection.RelativePath,
+                entryPoint = selection.EntryPoint,
+                targetProfile = selection.TargetProfile,
+            }).ToArray();
+        }
+        return await currentRpc.InvokeWithParameterObjectAsync<ConfigurationAuthoringResultModel>(
+                "hlsl/configurationAuthoring",
+                parameters,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    internal async Task<ConfigurationAuthoringModel> GetConfigurationAuthoringAsync(
+        Uri workspaceFolderUri,
+        string existingContent,
+        long? existingVersion,
+        string existingContentHash,
+        IReadOnlyList<ConfigurationSelectionModel> selections,
+        CancellationToken cancellationToken)
+    {
+        if (workspaceFolderUri == null)
+        {
+            throw new ArgumentNullException(nameof(workspaceFolderUri));
+        }
+        return await GetConfigurationAuthoringAsync(
+                new ConfigurationAuthoringRequestModel
+                {
+                    WorkspaceFolder = new ConfigurationWorkspaceFolderModel
+                    {
+                        Uri = workspaceFolderUri.AbsoluteUri,
+                    },
+                    ExistingConfiguration =
+                        existingContent != null || existingVersion.HasValue ||
+                        existingContentHash != null
+                            ? new ConfigurationExistingModel
+                            {
+                                Content = existingContent,
+                                Version = existingVersion,
+                                ContentHash = existingContentHash,
+                            }
+                            : null,
+                    Selections = selections,
+                },
                 cancellationToken)
             .ConfigureAwait(false);
     }

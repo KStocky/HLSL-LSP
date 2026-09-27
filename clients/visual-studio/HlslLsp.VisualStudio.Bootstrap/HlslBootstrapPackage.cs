@@ -6,6 +6,7 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.VisualStudio;
@@ -265,8 +266,9 @@ public sealed class HlslBootstrapPackage : AsyncPackage
             switch (action)
             {
                 case FirstRunInfoBar.ConfigurationAction:
-                    VsShellUtilities.OpenBrowser(
-                        "https://github.com/KStocky/HLSL-LSP/blob/main/docs/shadertoolsconfig.md");
+                    JoinableTaskFactory.RunAsync(
+                            () => AuthorConfigurationAsync(DisposalToken))
+                        .FileAndForget("HlslLsp/FirstRunAuthorConfiguration");
                     break;
                 case FirstRunInfoBar.VariantAction:
                     JoinableTaskFactory.RunAsync(
@@ -337,6 +339,11 @@ public sealed class HlslBootstrapPackage : AsyncPackage
                 new CommandID(commandSet, HlslCommandIds.OpenEffectiveConfiguration));
         openEffectiveConfiguration.BeforeQueryStatus += OnHlslContextCommandBeforeQueryStatus;
         commands.AddCommand(openEffectiveConfiguration);
+        commands.AddCommand(new OleMenuCommand(
+            (_, _) => JoinableTaskFactory.RunAsync(
+                    () => AuthorConfigurationAsync(DisposalToken))
+                .FileAndForget("HlslLsp/AuthorConfiguration"),
+            new CommandID(commandSet, HlslCommandIds.AuthorConfiguration)));
         var compilationInfo = new OleMenuCommand(
                 (_, _) => JoinableTaskFactory.RunAsync(
                         () => ShowCompilationInfoAsync(DisposalToken))
@@ -3293,6 +3300,150 @@ public sealed class HlslBootstrapPackage : AsyncPackage
             return;
         }
         await OpenEffectiveConfigurationAsync(uri, cancellationToken);
+    }
+
+    private async Task<string> GetConfigurationWorkspaceAsync(
+        CancellationToken cancellationToken)
+    {
+        await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+        var solution = await GetServiceAsync(typeof(SVsSolution)) as IVsSolution
+            ?? throw new InvalidOperationException(
+                "Visual Studio's solution service is unavailable.");
+        ErrorHandler.ThrowOnFailure(
+            solution.GetSolutionInfo(out var directory, out _, out _));
+        if (string.IsNullOrWhiteSpace(directory) ||
+            !Directory.Exists(directory))
+        {
+            throw new InvalidOperationException(
+                "Open a solution or folder before creating shadertoolsconfig.json.");
+        }
+        return Path.GetFullPath(directory);
+    }
+
+    private async Task<ITextBuffer> OpenConfigurationBufferAsync(
+        string path,
+        CancellationToken cancellationToken)
+    {
+        await EnsureCallHierarchyEditorServicesAsync(cancellationToken);
+        await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+        if (TryGetOpenCallHierarchyBuffer(new Uri(path)) is { } openBuffer)
+        {
+            return openBuffer;
+        }
+        VsShellUtilities.OpenDocument(this, path, Guid.Empty, out _, out _, out _);
+        return TryGetOpenCallHierarchyBuffer(new Uri(path))
+            ?? throw new InvalidOperationException(
+                "Visual Studio could not open the configuration editor buffer.");
+    }
+
+    private async Task AuthorConfigurationAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            var directory = await GetConfigurationWorkspaceAsync(cancellationToken);
+            var path = Path.Combine(directory, "shadertoolsconfig.json");
+            var workspaceUri = new Uri(
+                directory.TrimEnd(Path.DirectorySeparatorChar) +
+                Path.DirectorySeparatorChar);
+            var exists = File.Exists(path);
+            var buffer = exists
+                ? await OpenConfigurationBufferAsync(path, cancellationToken)
+                : null;
+            var original = buffer?.CurrentSnapshot;
+            var content = original?.GetText();
+            var version = (long?)original?.Version.VersionNumber;
+            var hash = content == null ? null : ConfigurationEditGuard.Hash(content);
+
+            var discovery = await ConfigurationAuthoringBridge.RequestAsync(
+                workspaceUri, content, version, hash, null, cancellationToken);
+            if (discovery == null)
+            {
+                await ShowInformationAsync(
+                    "Open an HLSL document to start the language server before authoring configuration.",
+                    cancellationToken);
+                return;
+            }
+            await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+            var selectionDialog = new ConfigurationSelectionDialog(discovery);
+            if (selectionDialog.ShowModal() != true)
+            {
+                return;
+            }
+            var result = await ConfigurationAuthoringBridge.RequestAsync(
+                workspaceUri,
+                content,
+                version,
+                hash,
+                selectionDialog.SelectedSelections,
+                cancellationToken);
+            if (result?.Configuration == null || result.Preview == null)
+            {
+                throw new InvalidOperationException(
+                    "The configuration authoring response is incomplete.");
+            }
+            if (!Uri.TryCreate(result.Configuration.Uri, UriKind.Absolute, out var resultUri) ||
+                !resultUri.IsFile ||
+                !string.Equals(
+                    Path.GetFullPath(resultUri.LocalPath),
+                    path,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(
+                    "The configuration authoring response targeted an unexpected file.");
+            }
+            await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+            if (new ConfigurationPreviewDialog(result).ShowModal() != true)
+            {
+                return;
+            }
+            var stillExists = File.Exists(path);
+            var currentBuffer = stillExists
+                ? await OpenConfigurationBufferAsync(path, cancellationToken)
+                : null;
+            var current = currentBuffer?.CurrentSnapshot;
+            if (ConfigurationEditGuard.IsStale(
+                    result.Configuration.Exists,
+                    result.Configuration.ExpectedContentVersion,
+                    result.Configuration.ExpectedContentHash,
+                    stillExists,
+                    current == null ? null : (long?)current.Version.VersionNumber,
+                    current?.GetText() ?? string.Empty))
+            {
+                await ShowInformationAsync(
+                    "shadertoolsconfig.json changed after the preview. No changes were applied; run Create/Edit again.",
+                    cancellationToken);
+                return;
+            }
+            await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+            if (currentBuffer != null)
+            {
+                using var edit = currentBuffer.CreateEdit();
+                edit.Replace(0, current.Length, result.Preview.Content);
+                edit.Apply();
+            }
+            else
+            {
+                using var stream = new FileStream(
+                    path, FileMode.CreateNew, FileAccess.Write, FileShare.None,
+                    4096, true);
+                using var writer = new StreamWriter(stream, new UTF8Encoding(false));
+                await writer.WriteAsync(result.Preview.Content);
+                await writer.FlushAsync();
+            }
+            await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+            VsShellUtilities.OpenDocument(
+                this, path, Guid.Empty, out _, out _, out _);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception error)
+        {
+            ActivityLog.LogError(nameof(HlslBootstrapPackage), error.ToString());
+            await ShowInformationAsync(
+                "Could not author HLSL project configuration: " + error.Message,
+                cancellationToken);
+        }
     }
 
     private async Task OpenEffectiveConfigurationAsync(

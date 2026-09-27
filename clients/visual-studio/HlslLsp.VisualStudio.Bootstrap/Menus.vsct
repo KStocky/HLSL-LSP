@@ -16,6 +16,9 @@
       <Group guid="guidHlslLspCommands" id="HlslContextAnalysisGroup" priority="0x0300">
         <Parent guid="guidHlslLspCommands" id="HlslContextMenu"/>
       </Group>
+      <Group guid="guidHlslLspCommands" id="HlslToolsGroup" priority="0x0700">
+        <Parent guid="guidSHLMainMenu" id="IDM_VS_MENU_TOOLS"/>
+      </Group>
     </Groups>
     <Menus>
       <Menu guid="guidHlslLspCommands" id="HlslContextMenu" priority="0x0800" type="Menu">
@@ -62,6 +65,12 @@
           <ButtonText>Open Effective Configuration</ButtonText>
         </Strings>
       </Button>
+      <Button guid="guidHlslLspCommands" id="AuthorConfiguration" priority="0x0103" type="Button">
+        <Parent guid="guidHlslLspCommands" id="HlslToolsGroup"/>
+        <Strings>
+          <ButtonText>Create/Edit HLSL Project Configuration</ButtonText>
+        </Strings>
+      </Button>
       <Button guid="guidHlslLspCommands" id="ShowCompilationInfo" priority="0x0101" type="Button">
         <Parent guid="guidHlslLspCommands" id="HlslContextGroup"/>
         <CommandFlag>DynamicVisibility</CommandFlag>
@@ -106,6 +115,11 @@
       </Button>
     </Buttons>
   </Commands>
+  <CommandPlacements>
+    <CommandPlacement guid="guidHlslLspCommands" id="AuthorConfiguration" priority="0x0103">
+      <Parent guid="guidHlslLspCommands" id="HlslContextGroup"/>
+    </CommandPlacement>
+  </CommandPlacements>
   <Symbols>
     <GuidSymbol name="guidHlslLspPackage" value="{5ac7fbe7-1b9f-45eb-bca6-ffb9ae1ab67f}"/>
     <GuidSymbol name="guidHlslLspCommands" value="{cedfa85a-cd51-4825-af1f-0e05bd475426}">
@@ -125,6 +139,8 @@
       <IDSymbol name="OpenEffectiveConfiguration" value="0x0108"/>
       <IDSymbol name="ExpandMacro" value="0x0109"/>
       <IDSymbol name="ShowStatus" value="0x010a"/>
+      <IDSymbol name="AuthorConfiguration" value="0x010b"/>
+      <IDSymbol name="HlslToolsGroup" value="0x1026"/>
     </GuidSymbol>
   </Symbols>
 </CommandTable>

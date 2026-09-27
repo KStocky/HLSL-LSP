@@ -296,6 +296,7 @@ public sealed class HlslLspActivator :
         VariantBridge.Register(
             languageClient.GetVariantsAsync,
             OnActiveVariantSelectedAsync);
+        ConfigurationAuthoringBridge.Register(languageClient.GetConfigurationAuthoringAsync);
         await broker.LoadAsync(new HlslLanguageClientMetadata(), languageClient);
         host.ScheduleEffectiveContextIndicatorRefresh();
 
