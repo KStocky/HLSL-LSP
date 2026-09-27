@@ -284,6 +284,10 @@ active runtime directory and the loaded DXC version.
 
 ## Configuration
 
+For a complete example with screenshots, shader files, discovery, editable
+drafts, and named variants, follow the
+[configuration authoring tutorial](../../docs/tutorials/configuration-authoring.md).
+
 Run **HLSL: Create shadertoolsconfig.json** or **HLSL: Edit
 shadertoolsconfig.json** for a compiler-guided setup flow. In a multi-root
 window, first choose the workspace. The extension asks the server to discover
