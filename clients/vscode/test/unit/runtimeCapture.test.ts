@@ -179,12 +179,33 @@ void test("preview and apply reject stale sessions and mismatched entry IDs", ()
     ),
   );
   assert(
+    capturePreviewMatches(
+      snapshot,
+      [entry],
+      "file:///C:/Shader%20Workspace/shadertoolsconfig.json",
+      {
+        ...preview,
+        configuration: {
+          ...preview.configuration,
+          uri: "file:///c:/Shader%20Workspace/shadertoolsconfig.json",
+        },
+      },
+    ) ===
+      (process.platform === "win32"),
+  );
+  assert(
     !capturePreviewMatches(
       snapshot,
       [entry],
       "file:///other/shadertoolsconfig.json",
       preview,
     ),
+  );
+  assert(
+    !capturePreviewMatches(snapshot, [entry], preview.configuration.uri, {
+      ...preview,
+      configuration: { ...preview.configuration, uri: "file:///bad%FF" },
+    }),
   );
   assert(
     !capturePreviewMatches(snapshot, [entry], preview.configuration.uri, {

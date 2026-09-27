@@ -91,8 +91,11 @@ variants or explicitly group graphics stages into a pipeline, then inspect
 the editable draft, validation errors, and final JSON preview before confirming
 the normal editor edit. A changed configuration buffer or capture session
 invalidates the preview. **Stop HLSL Compilation Capture** revokes the token
-and discards the in-memory snapshot; no captured settings are written
-automatically. Never share the token or capture secret compiler arguments.
+and retains only a final read-only snapshot for the selected workspace; it
+cannot be previewed or applied after stopping. No captured settings are
+written automatically. Never share the token or capture secret compiler arguments.
+For a worked shader-and-variant example with screenshots of the shared review
+flow, see the [runtime capture tutorial](../../docs/tutorials/runtime-capture.md).
 
 When a `shadertoolsconfig.json` declares named compilation variants under
 `hlsl.variants`, right-click the shader and choose

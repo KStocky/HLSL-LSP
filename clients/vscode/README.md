@@ -109,6 +109,9 @@ child process launched by this extension. See
 
 ## Opt-in runtime capture (read-only review)
 
+For an illustrated two-variant example, follow the
+[runtime capture tutorial](../../docs/tutorials/runtime-capture.md).
+
 Run **HLSL: Start Runtime Capture** to explicitly begin a local in-memory
 session. Choose **Show Connection Details** only when you are ready to supply
 the endpoint and token privately to your own engine's opt-in C++ compile
