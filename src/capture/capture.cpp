@@ -11,15 +11,16 @@
 #include <thread>
 
 #ifndef _WIN32
+#include <cerrno>
 #include <fcntl.h>
+#include <poll.h>
 #include <sys/un.h>
 #endif
 
 namespace hlsl_intellisense::capture {
 
 namespace {
-void transmit(const std::string& endpoint, const std::string& token, const std::string& bytes) {
-    (void)token;
+void transmit(const std::string& endpoint, const std::string& bytes) {
 #ifdef _WIN32
     const std::wstring name(endpoint.begin(), endpoint.end());
     HANDLE pipe = INVALID_HANDLE_VALUE;
@@ -49,7 +50,18 @@ void transmit(const std::string& endpoint, const std::string& token, const std::
     address.sun_family = AF_UNIX;
     if (endpoint.size() < sizeof(address.sun_path)) {
         std::copy(endpoint.begin(), endpoint.end(), address.sun_path);
-        if (connect(socket_fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0) {
+        const auto connected =
+            connect(socket_fd, reinterpret_cast<sockaddr*>(&address), sizeof(address));
+        bool ready = connected == 0;
+        if (!ready && errno == EINPROGRESS) {
+            pollfd descriptor{socket_fd, POLLOUT, 0};
+            int socket_error = 0;
+            socklen_t length = sizeof(socket_error);
+            ready = poll(&descriptor, 1, 250) > 0 &&
+                    getsockopt(socket_fd, SOL_SOCKET, SO_ERROR, &socket_error, &length) == 0 &&
+                    socket_error == 0;
+        }
+        if (ready) {
             (void)fcntl(socket_fd, F_SETFL, fcntl(socket_fd, F_GETFL) & ~O_NONBLOCK);
             timeval timeout{0, 250000};
             (void)setsockopt(socket_fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
@@ -112,13 +124,13 @@ bool Client::connect(std::string endpoint, std::string token) {
             {
                 std::unique_lock lock{state->mutex};
                 state->ready.wait(lock, [&] { return state->stopping || !state->pending.empty(); });
-                if (state->stopping) {
+                if (state->pending.empty()) {
                     return;
                 }
                 bytes = std::move(state->pending.front());
                 state->pending.pop_front();
             }
-            transmit(state->endpoint, state->token, bytes);
+            transmit(state->endpoint, bytes);
             std::fill(bytes.begin(), bytes.end(), '\0');
         }
     });
@@ -130,10 +142,6 @@ void Client::disconnect() noexcept {
     {
         std::lock_guard lock{state_->mutex};
         state_->stopping = true;
-        for (auto& frame : state_->pending) {
-            std::fill(frame.begin(), frame.end(), '\0');
-        }
-        state_->pending.clear();
     }
     state_->ready.notify_one();
     if (state_->worker.joinable()) {

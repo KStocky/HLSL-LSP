@@ -35,6 +35,9 @@ if(WIN32)
     target_link_libraries(hlsl_capture PRIVATE bcrypt advapi32)
 endif()
 hlsl_enable_clang_tidy(hlsl_capture)
+add_executable(hlsl-capture-example EXCLUDE_FROM_ALL examples/capture-client/main.cpp)
+target_link_libraries(hlsl-capture-example PRIVATE hlsl_capture)
+hlsl_enable_clang_tidy(hlsl-capture-example)
 install(TARGETS hlsl_capture
     ARCHIVE DESTINATION lib
     FILE_SET HEADERS DESTINATION include

@@ -17,6 +17,18 @@ application's C++ runtime/compiler. The SDK archive and headers are installed
 with the `SDK` component; external builds must also link Windows `bcrypt` and
 `advapi32` where applicable. There is no DXC dependency in the SDK.
 
+Build the standalone example with
+`cmake --build --preset windows-msvc-debug --target hlsl-capture-example`
+(or the corresponding platform preset). Run it with an existing shader path:
+`hlsl-capture-example <shader-source-path>`. It first reports while
+disconnected, then reads the endpoint and token of an **active** editor capture
+session on separate standard-input lines, connects, reports one illustrative
+`Main`/`ps_6_7` invocation, and disconnects. Review and apply in the editor
+before stopping the session. The example does not compile a shader: in a real
+engine, populate invocation metadata from the actual compile request and keep
+the endpoint and token in a private control channel, never in command-line
+arguments, logs, or source control.
+
 ```cpp
 namespace shader_capture = hlsl_intellisense::capture;
 shader_capture::Client client; // disconnected: report() returns false immediately
@@ -44,8 +56,8 @@ disconnected call only checks an atomic flag. Connected calls serialize
 metadata and try to enqueue without waiting for IPC or a contended lock.
 `false` means the report was not queued. The worker may drop reports if the
 server disconnects; no compilation success/failure depends on capture.
-`disconnect()` and destruction join the worker; call them off the compiler
-critical path. Start/stop session and connect/disconnect should not be
+`disconnect()` and destruction drain queued reports and join the worker (delivery
+is still best effort); call them off the compiler critical path. Start/stop session and connect/disconnect should not be
 concurrently invoked on the *same* object.
 
 ## LSP session methods

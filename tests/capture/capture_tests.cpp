@@ -143,7 +143,9 @@ TEST_CASE("Capture SDK is opt-in, deduplicates and rejects stale or invalid fram
     depth_frame += nested;
     raw(endpoint, depth_frame);
     REQUIRE(wait_for(session, 2, 5));
+    REQUIRE(client.report(invocation));
     client.disconnect();
+    REQUIRE(wait_for(session, 3, 5));
     session.stop();
     CHECK_FALSE(client.report(invocation));
     CHECK_FALSE(session.snapshot().active);
