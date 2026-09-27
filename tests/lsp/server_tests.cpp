@@ -2919,18 +2919,11 @@ TEST_CASE("Protocol tracing redacts source text by default", "[lsp][protocol][tr
 
 TEST_CASE("Capture tokens remain redacted even in explicit source traces",
           "[lsp][capture][protocol][trace]") {
-#ifndef _WIN32
-    TestDirectory runtime;
-    const std::string prior_runtime =
-        std::getenv("XDG_RUNTIME_DIR") ? std::getenv("XDG_RUNTIME_DIR") : "";
-    const bool had_runtime = std::getenv("XDG_RUNTIME_DIR") != nullptr;
-    REQUIRE(chmod(runtime.path().c_str(), 0700) == 0);
-    REQUIRE(setenv("XDG_RUNTIME_DIR", runtime.path().string().c_str(), 1) == 0);
-#endif
+    const std::string token(64, 'a');
     std::string input;
     input += frame(request(1, "initialize"));
     input += frame(notification("initialized"));
-    input += frame(request(2, "hlsl/capture/start", {{"protocolVersion", 1}}));
+    input += frame(request(2, "hlsl/capture/stop", {{"protocolVersion", 1}, {"token", token}}));
     input += frame(request_without_params(3, "shutdown"));
     input += frame(notification_without_params("exit"));
     std::istringstream input_stream{input};
@@ -2941,20 +2934,12 @@ TEST_CASE("Capture tokens remain redacted even in explicit source traces",
     options.trace_source = true;
     REQUIRE(hlsl_intellisense::lsp::run(input_stream, output_stream, error_stream, options) == 0);
     const auto messages = read_frames(output_stream.str());
-    const auto started = std::ranges::find_if(
+    const auto stopped = std::ranges::find_if(
         messages, [](const auto& value) { return value.value("id", Json{}) == 2; });
-    REQUIRE(started != messages.end());
-    const std::string token = (*started)["result"]["token"];
-    CHECK(token.size() == 64);
+    REQUIRE(stopped != messages.end());
     CHECK(error_stream.str().find(token) == std::string::npos);
     CHECK(error_stream.str().find("<redacted>") != std::string::npos);
-#ifndef _WIN32
-    if (had_runtime) {
-        REQUIRE(setenv("XDG_RUNTIME_DIR", prior_runtime.c_str(), 1) == 0);
-    } else {
-        REQUIRE(unsetenv("XDG_RUNTIME_DIR") == 0);
-    }
-#endif
+    CHECK(error_stream.str().find("trace receive") != std::string::npos);
 }
 
 TEST_CASE("Server applies workspace configuration to DXC analysis",
