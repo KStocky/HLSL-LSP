@@ -303,6 +303,10 @@ internal sealed class HlslLanguageClient :
                 targetProfile = selection.TargetProfile,
             }).ToArray();
         }
+        if (request.DraftContent != null)
+        {
+            parameters["draftContent"] = request.DraftContent;
+        }
         return await currentRpc.InvokeWithParameterObjectAsync<ConfigurationAuthoringResultModel>(
                 "hlsl/configurationAuthoring",
                 parameters,
@@ -316,6 +320,7 @@ internal sealed class HlslLanguageClient :
         long? existingVersion,
         string existingContentHash,
         IReadOnlyList<ConfigurationSelectionModel> selections,
+        string draftContent,
         CancellationToken cancellationToken)
     {
         if (workspaceFolderUri == null)
@@ -340,10 +345,22 @@ internal sealed class HlslLanguageClient :
                             }
                             : null,
                     Selections = selections,
+                    DraftContent = draftContent,
                 },
                 cancellationToken)
             .ConfigureAwait(false);
     }
+
+    internal Task<ConfigurationAuthoringModel> GetConfigurationAuthoringAsync(
+        Uri workspaceFolderUri,
+        string existingContent,
+        long? existingVersion,
+        string existingContentHash,
+        IReadOnlyList<ConfigurationSelectionModel> selections,
+        CancellationToken cancellationToken)
+        => GetConfigurationAuthoringAsync(
+            workspaceFolderUri, existingContent, existingVersion,
+            existingContentHash, selections, null, cancellationToken);
 
     internal string RuntimeDirectory => Volatile.Read(ref dxcRuntimeDirectory);
 

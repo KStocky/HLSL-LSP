@@ -140,6 +140,48 @@ TEST_CASE("Configuration preview validation reports production parser fields",
     CHECK(preview.errors[0].field == "hlsl.variantsVersion");
 }
 
+TEST_CASE("Edited drafts validate all supported settings and retain the original edit guard",
+          "[workspace][configuration-authoring]") {
+    TestTree tree;
+    tree.file("Includes/shared.hlsli");
+    tree.file("Shaders/main.hlsl");
+    const std::string original = R"({"custom.setting":{"keep":true}})";
+    const std::string draft = R"({
+      "custom.setting":{"keep":true},
+      "root":true,
+      "hlsl.languageVersion":"2021",
+      "hlsl.additionalIncludeDirectories":["Includes"],
+      "hlsl.virtualDirectoryMappings":{"/Shared":"Includes"},
+      "hlsl.preprocessorDefinitions":{"LIGHT_COUNT":3},
+      "hlsl.additionalArguments":["-Zi"],
+      "hlsl.dxcRuntimeDirectory":"DXC",
+      "hlsl.variantsVersion":1,
+      "hlsl.variants":[{"name":"Debug","hlsl.entryPoint":"Main"}],
+      "hlsl.pipelinesVersion":1,
+      "hlsl.pipelines":[{"name":"Default","stages":{
+        "vertex":{"file":"Shaders/main.hlsl"},
+        "pixel":{"file":"Shaders/main.hlsl"}
+      }}]
+    })";
+    const auto preview =
+        workspace::generate_configuration_preview(tree.path(), original, {}, draft);
+    CHECK(preview.valid);
+    CHECK(preview.changed);
+    CHECK(preview.content == draft);
+    CHECK(nlohmann::json::parse(preview.content)["custom.setting"]["keep"] == true);
+
+    const auto malformed = workspace::generate_configuration_preview(
+        tree.path(), original, {}, R"({"hlsl.variants":[{"name":"Debug"}]})");
+    REQUIRE_FALSE(malformed.valid);
+    REQUIRE(malformed.errors.size() == 1);
+    CHECK(malformed.errors[0].field == "hlsl.variantsVersion");
+
+    const auto repaired =
+        workspace::generate_configuration_preview(tree.path(), R"({"hlsl.variants":[)", {}, draft);
+    CHECK(repaired.valid);
+    CHECK(repaired.content == draft);
+}
+
 TEST_CASE("Empty configuration previews are schema-shaped and hash with SHA-256",
           "[workspace][configuration-authoring]") {
     TestTree tree;

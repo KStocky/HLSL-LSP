@@ -339,6 +339,21 @@ TEST_CASE("Configuration authoring protocol rejects stale hashes and reports mal
     CHECK(malformed_result->result["preview"]["content"] == malformed);
     CHECK(malformed_result->result["preview"]["errors"][0]["field"] == "$");
 
+    const auto repaired = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{5},
+        .method = "hlsl/configurationAuthoring",
+        .params = Json{{"protocolVersion", 1},
+                       {"workspaceFolder", {{"uri", folder_uri}}},
+                       {"existingConfiguration", {{"content", malformed}, {"version", 8}}},
+                       {"draftContent", R"({"root":true,"hlsl.languageVersion":"2021"})"}}});
+    REQUIRE(repaired.has_value());
+    const auto* repaired_result = std::get_if<hlsl_intellisense::json_rpc::Response>(&*repaired);
+    REQUIRE(repaired_result != nullptr);
+    CHECK(repaired_result->result["preview"]["valid"] == true);
+    CHECK(repaired_result->result["configuration"]["expectedContentVersion"] == 8);
+    CHECK(repaired_result->result["configuration"]["expectedContentHash"] ==
+          hlsl_intellisense::workspace::configuration_content_hash(malformed));
+
     hlsl_intellisense::json_rpc::CancellationToken cancellation;
     cancellation.cancel();
     const auto cancelled = server.handle(

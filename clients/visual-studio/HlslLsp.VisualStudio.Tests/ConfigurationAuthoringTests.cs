@@ -152,11 +152,15 @@ public sealed class ConfigurationAuthoringTests
                         TargetProfile = "ps_6_6",
                     },
                 },
+                DraftContent = "{\"hlsl.variantsVersion\":1}",
             },
             CancellationToken.None);
         Assert.Equal("{}", capture.Request["existingConfiguration"]?["content"]?.Value<string>());
         Assert.Equal(7, capture.Request["existingConfiguration"]?["version"]?.Value<int>());
         Assert.Equal("ps_6_6", capture.Request["selections"]?[0]?["targetProfile"]?.Value<string>());
+        Assert.Equal(
+            "{\"hlsl.variantsVersion\":1}",
+            capture.Request["draftContent"]?.Value<string>());
     }
 
     private sealed class AuthoringTarget

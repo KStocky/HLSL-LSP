@@ -36,6 +36,8 @@
     "onCommand:hlsl.showStatus",
     "onCommand:hlsl.createConfiguration",
     "onCommand:hlsl.editConfiguration",
+    "onCommand:hlsl.validateConfigurationDraft",
+    "onCommand:hlsl.cancelConfigurationDraft",
     "onCommand:hlsl.openEffectiveConfigurationFile",
     "onCommand:hlsl.showOutput",
     "onCommand:hlsl.showDiagnostics",
@@ -112,6 +114,17 @@
         "category": "HLSL"
       },
       {
+        "command": "hlsl.validateConfigurationDraft",
+        "title": "HLSL: Validate Configuration Draft",
+        "shortTitle": "Validate Draft",
+        "category": "HLSL"
+      },
+      {
+        "command": "hlsl.cancelConfigurationDraft",
+        "title": "HLSL: Cancel Configuration Draft",
+        "category": "HLSL"
+      },
+      {
         "command": "hlsl.openEffectiveConfigurationFile",
         "title": "HLSL: Open Effective Configuration File",
         "shortTitle": "Open Effective Configuration",
@@ -178,6 +191,18 @@
       }
     ],
     "menus": {
+      "editor/title": [
+        {
+          "command": "hlsl.validateConfigurationDraft",
+          "when": "resourceScheme == untitled && editorLangId == json && hlsl.configurationDraftOpen",
+          "group": "navigation"
+        },
+        {
+          "command": "hlsl.cancelConfigurationDraft",
+          "when": "resourceScheme == untitled && editorLangId == json && hlsl.configurationDraftOpen",
+          "group": "navigation@1"
+        }
+      ],
       "editor/context": [
         {
           "submenu": "hlsl.editorContext",

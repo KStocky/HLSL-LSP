@@ -18,6 +18,9 @@ public sealed class ConfigurationAuthoringRequestModel
 
     [JsonProperty(NullValueHandling = NullValueHandling.Ignore)]
     public IReadOnlyList<ConfigurationSelectionModel> Selections { get; set; }
+
+    [JsonProperty(NullValueHandling = NullValueHandling.Ignore)]
+    public string DraftContent { get; set; }
 }
 
 public sealed class ConfigurationWorkspaceFolderModel
@@ -240,10 +243,12 @@ public static class ConfigurationPreviewValidation
 public static class ConfigurationAuthoringBridge
 {
     private static Func<Uri, string, long?, string, IReadOnlyList<ConfigurationSelectionModel>,
+        string,
         CancellationToken, Task<ConfigurationAuthoringModel>> request;
 
     public static void Register(
         Func<Uri, string, long?, string, IReadOnlyList<ConfigurationSelectionModel>,
+            string,
             CancellationToken, Task<ConfigurationAuthoringModel>> handler)
     {
         Volatile.Write(ref request, handler ?? throw new ArgumentNullException(nameof(handler)));
@@ -258,6 +263,18 @@ public static class ConfigurationAuthoringBridge
         string existingContentHash,
         IReadOnlyList<ConfigurationSelectionModel> selections,
         CancellationToken cancellationToken)
+        => RequestDraftAsync(
+            workspaceFolderUri, existingContent, existingVersion,
+            existingContentHash, selections, null, cancellationToken);
+
+    public static Task<ConfigurationAuthoringModel> RequestDraftAsync(
+        Uri workspaceFolderUri,
+        string existingContent,
+        long? existingVersion,
+        string existingContentHash,
+        IReadOnlyList<ConfigurationSelectionModel> selections,
+        string draftContent,
+        CancellationToken cancellationToken)
     {
         var handler = Volatile.Read(ref request);
         return handler == null
@@ -268,6 +285,7 @@ public static class ConfigurationAuthoringBridge
                 existingVersion,
                 existingContentHash,
                 selections,
+                draftContent,
                 cancellationToken);
     }
 }

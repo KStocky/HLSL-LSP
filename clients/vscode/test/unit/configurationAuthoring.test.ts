@@ -4,6 +4,8 @@ import test from "node:test";
 import {
   configurationCandidates,
   configurationContentHash,
+  configurationDraftInitialContent,
+  configurationDraftTooLarge,
   configurationIsStale,
   formatConfigurationErrors,
   type ConfigurationAuthoringResult,
@@ -111,4 +113,26 @@ void test("configuration validation errors retain field addresses and codes", ()
     ]),
     "hlsl.fileGroups[0].hlsl.targetProfile: Unsupported target profile. [invalid_target_profile]",
   );
+});
+
+void test("invalid generated previews retain malformed original content for repair", () => {
+  assert.equal(
+    configurationDraftInitialContent(
+      {
+        ...result,
+        preview: { ...result.preview, valid: false, content: "{}" },
+      },
+      '{"hlsl":',
+    ),
+    '{"hlsl":',
+  );
+  assert.equal(
+    configurationDraftInitialContent(result, '{"old":true}'),
+    "{}\n",
+  );
+});
+
+void test("draft limit measures UTF-8 bytes, including multibyte characters", () => {
+  assert.equal(configurationDraftTooLarge("a".repeat(2 * 1024 * 1024)), false);
+  assert.equal(configurationDraftTooLarge("é".repeat(1024 * 1024) + "a"), true);
 });

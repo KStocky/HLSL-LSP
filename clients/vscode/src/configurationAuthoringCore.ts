@@ -15,6 +15,7 @@ export interface ConfigurationAuthoringParams {
     readonly contentHash: string;
   };
   readonly selections?: readonly ConfigurationSelection[];
+  readonly draftContent?: string;
 }
 
 interface ConfigurationEntryPoint {
@@ -120,4 +121,19 @@ export function configurationIsStale(
     (expectedHash !== null &&
       expectedHash !== configurationContentHash(currentContent))
   );
+}
+
+export const maximumConfigurationDraftBytes = 2 * 1024 * 1024;
+
+export function configurationDraftTooLarge(content: string): boolean {
+  return Buffer.byteLength(content, "utf8") > maximumConfigurationDraftBytes;
+}
+
+export function configurationDraftInitialContent(
+  result: ConfigurationAuthoringResult,
+  existingContent: string | undefined,
+): string {
+  return result.preview.valid
+    ? result.preview.content
+    : (existingContent ?? result.preview.content);
 }

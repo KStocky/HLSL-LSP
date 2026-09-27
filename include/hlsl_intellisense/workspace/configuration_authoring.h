@@ -56,7 +56,8 @@ discover_shader_files(const std::filesystem::path& workspace,
 [[nodiscard]] ConfigurationPreview
 generate_configuration_preview(const std::filesystem::path& workspace,
                                const std::optional<std::string>& existing_content,
-                               const std::vector<ConfigurationSelection>& selections);
+                               const std::vector<ConfigurationSelection>& selections,
+                               const std::optional<std::string>& draft_content = std::nullopt);
 
 [[nodiscard]] std::string configuration_content_hash(std::string_view content);
 

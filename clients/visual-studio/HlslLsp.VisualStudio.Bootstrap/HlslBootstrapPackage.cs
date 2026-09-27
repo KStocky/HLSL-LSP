@@ -3392,6 +3392,53 @@ public sealed class HlslBootstrapPackage : AsyncPackage
                     "The configuration authoring response targeted an unexpected file.");
             }
             await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+            while (true)
+            {
+                var draftDialog = new ConfigurationDraftDialog(result);
+                if (draftDialog.ShowModal() != true)
+                {
+                    return;
+                }
+                if (Encoding.UTF8.GetByteCount(draftDialog.DraftContent) > 2 * 1024 * 1024)
+                {
+                    await ShowInformationAsync(
+                        "Configuration drafts must be smaller than 2 MiB.",
+                        cancellationToken);
+                    continue;
+                }
+                if (result.Preview.Valid &&
+                    string.Equals(
+                        draftDialog.DraftContent,
+                        result.Preview.Content,
+                        StringComparison.Ordinal))
+                {
+                    break;
+                }
+                result = await ConfigurationAuthoringBridge.RequestDraftAsync(
+                    workspaceUri,
+                    content,
+                    version,
+                    hash,
+                    selectionDialog.SelectedSelections,
+                    draftDialog.DraftContent,
+                    cancellationToken);
+                if (result?.Configuration == null || result.Preview == null ||
+                    !Uri.TryCreate(result.Configuration.Uri, UriKind.Absolute, out resultUri) ||
+                    !resultUri.IsFile ||
+                    !string.Equals(
+                        Path.GetFullPath(resultUri.LocalPath),
+                        path,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidOperationException(
+                        "The draft validation response targeted an unexpected file.");
+                }
+                await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+                if (result.Preview.Valid)
+                {
+                    break;
+                }
+            }
             if (new ConfigurationPreviewDialog(result).ShowModal() != true)
             {
                 return;
@@ -3423,12 +3470,28 @@ public sealed class HlslBootstrapPackage : AsyncPackage
             }
             else
             {
-                using var stream = new FileStream(
-                    path, FileMode.CreateNew, FileAccess.Write, FileShare.None,
-                    4096, true);
-                using var writer = new StreamWriter(stream, new UTF8Encoding(false));
-                await writer.WriteAsync(result.Preview.Content);
-                await writer.FlushAsync();
+                var temporaryPath = Path.Combine(
+                    directory,
+                    ".shadertoolsconfig-" + Guid.NewGuid().ToString("N") + ".tmp");
+                try
+                {
+                    using (var stream = new FileStream(
+                               temporaryPath, FileMode.CreateNew, FileAccess.Write,
+                               FileShare.None, 4096, true))
+                    using (var writer = new StreamWriter(stream, new UTF8Encoding(false)))
+                    {
+                        await writer.WriteAsync(result.Preview.Content);
+                        await writer.FlushAsync();
+                    }
+                    File.Move(temporaryPath, path);
+                }
+                finally
+                {
+                    if (File.Exists(temporaryPath))
+                    {
+                        File.Delete(temporaryPath);
+                    }
+                }
             }
             await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
             VsShellUtilities.OpenDocument(

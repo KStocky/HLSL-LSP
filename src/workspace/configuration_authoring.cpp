@@ -242,8 +242,23 @@ ConfigurationDiscovery discover_shader_files(const std::filesystem::path& worksp
 ConfigurationPreview
 generate_configuration_preview(const std::filesystem::path& workspace,
                                const std::optional<std::string>& existing_content,
-                               const std::vector<ConfigurationSelection>& selections) {
+                               const std::vector<ConfigurationSelection>& selections,
+                               const std::optional<std::string>& draft_content) {
     ConfigurationPreview result;
+    if (draft_content) {
+        result.content = *draft_content;
+        result.changed = !existing_content || result.content != *existing_content;
+        try {
+            validate_workspace_configuration_content(result.content,
+                                                     workspace / configuration_file_name);
+            result.valid = true;
+        } catch (const ConfigurationError& error) {
+            result.errors.push_back({.code = error_code(error.code()),
+                                     .field = error.key().empty() ? "$" : error.key(),
+                                     .message = error.what()});
+        }
+        return result;
+    }
     Json document;
     if (existing_content.has_value()) {
         try {

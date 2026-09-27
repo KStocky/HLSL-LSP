@@ -6569,8 +6569,12 @@ Json Server::configuration_authoring(const std::optional<Json>& params,
         }
     }
 
-    const auto preview =
-        workspace::generate_configuration_preview(workspace_path, existing_content, selections);
+    const auto draft_content = optional_string_member(value, "draftContent");
+    if (draft_content && draft_content->size() > 2U * 1024U * 1024U) {
+        invalid_params("draftContent exceeds the 2 MiB configuration limit");
+    }
+    const auto preview = workspace::generate_configuration_preview(workspace_path, existing_content,
+                                                                   selections, draft_content);
     Json files = Json::array();
     for (const auto& file : analyses) {
         Json entry_points = Json::array();

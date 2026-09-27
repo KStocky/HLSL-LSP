@@ -28,7 +28,8 @@ hlsl/configurationAuthoring
       "entryPoint": "MainPS",
       "targetProfile": "ps_6_6"
     }
-  ]
+  ],
+  "draftContent": "{\n  ...\n}\n"
 }
 ```
 
@@ -43,6 +44,14 @@ hlsl/configurationAuthoring
   target profile returned by DXC discovery. When omitted, the preview includes
   only candidates for which exactly one probed profile succeeded. Ambiguous
   candidates remain in the result for the client to resolve explicitly.
+- `draftContent` is optional (maximum 2 MiB). After reviewing the generated
+  preview, a client may submit the user's edited JSON to validate all supported
+  settings, including include paths, mappings, defines, compiler options,
+  variants, and pipelines. It is validated by the production parser without
+  applying generation again. The expected version and hash still refer to the
+  original file, not this draft; a client must compare them before applying.
+  Invalid existing content can be repaired using a valid draft. Clients must
+  make edited drafts visible and require confirmation before applying them.
 
 Clients should normally send their current in-memory configuration content and
 document version. Before applying the returned preview, compare

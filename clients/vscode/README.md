@@ -248,14 +248,30 @@ and DXC-validate shader files, entry points, and target profiles; uniquely
 resolved entries are preselected, while ambiguous profiles require an explicit
 choice. Multiple candidates can be selected.
 
-The server returns a deterministic preview without writing files. VS Code shows
-that preview as a JSON diff and requires confirmation before applying it as a
-normal `WorkspaceEdit`, so the change remains visible to source control.
-Existing unsaved configuration content is included in the request. Immediately
+The generated preview opens as an **untitled, editable JSON draft**, not as the
+original file. Edit it using VS Code's native editor, then choose **HLSL:
+Validate Configuration Draft** from the editor title or Command Palette (or
+the initial notification). Use **HLSL: Cancel Configuration Draft** to abandon
+the flow. You can add or change includes, virtual directory mappings, defines,
+DXC arguments, language version, runtime, file groups, variants, and pipelines;
+see the [configuration reference](../../docs/shadertoolsconfig.md) for the
+supported JSON fields. A malformed existing configuration opens for repair
+instead of preventing editing. Validation sends the entire draft to the server;
+errors show their field paths and codes, and you can correct the draft and
+validate again. Drafts are limited to 2 MiB of UTF-8 text. The editor's JSON
+syntax checks are helpful but server validation is authoritative.
+
+After successful validation, VS Code shows a diff against the original and
+requires explicit confirmation before applying a normal `WorkspaceEdit`.
+Editing the untitled draft does **not** save or modify the original file.
+Existing unsaved configuration content is included in requests; immediately
 before applying, the extension compares the server's expected document version
-and content hash with the current editor buffer; stale previews are refused and
-can be restarted. Validation failures identify the exact configuration field,
-and the resulting file opens after a successful apply.
+and content hash with the current original editor buffer. Stale previews are
+refused and can be restarted. A changed draft must be revalidated. The draft
+remains untitled even if you cancel or decline confirmation; close/discard it
+manually when finished (it may also remain open after applying). The resulting
+configuration opens after a successful apply.
+**Review the diff:** generated previews may change formatting or comments.
 
 `hlsl.languageVersion` defaults to `2021` as a _client default_. It remains
 below `shadertoolsconfig.json` in the server's precedence order. The following

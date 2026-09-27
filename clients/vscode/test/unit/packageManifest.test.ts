@@ -56,6 +56,25 @@ void test("configuration authoring commands activate the extension", () => {
   assert(
     manifest.activationEvents.includes("onCommand:hlsl.editConfiguration"),
   );
+  assert(
+    manifest.activationEvents.includes(
+      "onCommand:hlsl.validateConfigurationDraft",
+    ),
+  );
+  assert(
+    manifest.activationEvents.includes(
+      "onCommand:hlsl.cancelConfigurationDraft",
+    ),
+  );
+  assert.deepEqual(
+    manifest.contributes.menus["editor/title"]?.map((entry) => entry.command),
+    ["hlsl.validateConfigurationDraft", "hlsl.cancelConfigurationDraft"],
+  );
+  assert(
+    manifest.contributes.menus["editor/title"].every((entry) =>
+      entry.when?.includes("resourceScheme == untitled"),
+    ),
+  );
 });
 
 void test("package contributes an HLSL-only editor context submenu", () => {
