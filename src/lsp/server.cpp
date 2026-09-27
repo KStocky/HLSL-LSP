@@ -6424,7 +6424,11 @@ Json Server::configuration_authoring(const std::optional<Json>& params,
                                              std::string{std::istreambuf_iterator<char>{stream},
                                                          std::istreambuf_iterator<char>{}}};
         }();
-        FileAnalysis file{.path = path, .size = snapshot.text().size()};
+        FileAnalysis file{.path = path,
+                          .size = snapshot.text().size(),
+                          .entry_points = {},
+                          .error = {},
+                          .truncated = false};
         const auto identity =
             "$configuration-authoring\n" + std::to_string(sequence) + "\n" + path.generic_string();
         try {
@@ -6453,7 +6457,10 @@ Json Server::configuration_authoring(const std::optional<Json>& params,
                 EntryPoint candidate{
                     .name = function.name,
                     .line = function.location.line > 0 ? function.location.line - 1 : 0,
-                    .character = function.location.column > 0 ? function.location.column - 1 : 0};
+                    .character = function.location.column > 0 ? function.location.column - 1 : 0,
+                    .profiles = {},
+                    .state = {},
+                    .explanation = {}};
                 if (name_counts[function.name] > 1) {
                     candidate.state = "ambiguous";
                     candidate.explanation =
