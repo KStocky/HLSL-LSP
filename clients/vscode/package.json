@@ -34,6 +34,10 @@
     "onCommand:hlsl.restartServer",
     "onCommand:hlsl.stopServer",
     "onCommand:hlsl.showStatus",
+    "onCommand:hlsl.createConfiguration",
+    "onCommand:hlsl.editConfiguration",
+    "onCommand:hlsl.validateConfigurationDraft",
+    "onCommand:hlsl.cancelConfigurationDraft",
     "onCommand:hlsl.openEffectiveConfigurationFile",
     "onCommand:hlsl.showOutput",
     "onCommand:hlsl.showDiagnostics",
@@ -45,6 +49,12 @@
     "onCommand:hlsl.showEntryPointDataFlow",
     "onCommand:hlsl.showComputeVisualization",
     "onCommand:hlsl.selectVariant",
+    "onCommand:hlsl.startCapture",
+    "onCommand:hlsl.stopCapture",
+    "onCommand:hlsl.captureStatus",
+    "onCommand:hlsl.reviewCapture",
+    "onCommand:hlsl.validateCaptureDraft",
+    "onCommand:hlsl.cancelCaptureDraft",
     "onWebviewPanel:hlslMemoryLayout",
     "onWebviewPanel:hlslCompilationInfo",
     "onWebviewPanel:hlslResourceBindings",
@@ -95,6 +105,29 @@
       {
         "command": "hlsl.showOutput",
         "title": "HLSL: Show Language Server Output",
+        "category": "HLSL"
+      },
+      {
+        "command": "hlsl.createConfiguration",
+        "title": "HLSL: Create shadertoolsconfig.json",
+        "shortTitle": "Create Configuration",
+        "category": "HLSL"
+      },
+      {
+        "command": "hlsl.editConfiguration",
+        "title": "HLSL: Edit shadertoolsconfig.json",
+        "shortTitle": "Edit Configuration",
+        "category": "HLSL"
+      },
+      {
+        "command": "hlsl.validateConfigurationDraft",
+        "title": "HLSL: Validate Configuration Draft",
+        "shortTitle": "Validate Draft",
+        "category": "HLSL"
+      },
+      {
+        "command": "hlsl.cancelConfigurationDraft",
+        "title": "HLSL: Cancel Configuration Draft",
         "category": "HLSL"
       },
       {
@@ -155,6 +188,42 @@
         "title": "HLSL: Select Shader Variant",
         "shortTitle": "Select Shader Variant",
         "category": "HLSL"
+      },
+      {
+        "command": "hlsl.startCapture",
+        "title": "HLSL: Start Runtime Capture",
+        "shortTitle": "Start Runtime Capture",
+        "category": "HLSL"
+      },
+      {
+        "command": "hlsl.stopCapture",
+        "title": "HLSL: Stop Runtime Capture",
+        "shortTitle": "Stop Runtime Capture",
+        "category": "HLSL"
+      },
+      {
+        "command": "hlsl.captureStatus",
+        "title": "HLSL: Show Runtime Capture Status",
+        "shortTitle": "Capture Status",
+        "category": "HLSL"
+      },
+      {
+        "command": "hlsl.reviewCapture",
+        "title": "HLSL: Review Runtime Capture",
+        "shortTitle": "Review Runtime Capture",
+        "category": "HLSL"
+      },
+      {
+        "command": "hlsl.validateCaptureDraft",
+        "title": "HLSL: Validate Capture Configuration Draft",
+        "shortTitle": "Validate Capture Draft",
+        "category": "HLSL"
+      },
+      {
+        "command": "hlsl.cancelCaptureDraft",
+        "title": "HLSL: Cancel Capture Configuration Draft",
+        "shortTitle": "Cancel Capture Draft",
+        "category": "HLSL"
       }
     ],
     "submenus": [
@@ -164,6 +233,28 @@
       }
     ],
     "menus": {
+      "editor/title": [
+        {
+          "command": "hlsl.validateConfigurationDraft",
+          "when": "resourceScheme == untitled && editorLangId == json && hlsl.configurationDraftOpen",
+          "group": "navigation"
+        },
+        {
+          "command": "hlsl.cancelConfigurationDraft",
+          "when": "resourceScheme == untitled && editorLangId == json && hlsl.configurationDraftOpen",
+          "group": "navigation@1"
+        },
+        {
+          "command": "hlsl.validateCaptureDraft",
+          "when": "resourceScheme == untitled && editorLangId == json && hlsl.captureDraftOpen",
+          "group": "navigation@2"
+        },
+        {
+          "command": "hlsl.cancelCaptureDraft",
+          "when": "resourceScheme == untitled && editorLangId == json && hlsl.captureDraftOpen",
+          "group": "navigation@3"
+        }
+      ],
       "editor/context": [
         {
           "submenu": "hlsl.editorContext",
@@ -178,24 +269,54 @@
           "group": "1_configuration@0"
         },
         {
-          "command": "hlsl.openEffectiveConfigurationFile",
+          "command": "hlsl.createConfiguration",
           "when": "editorLangId == hlsl",
           "group": "1_configuration@1"
         },
         {
-          "command": "hlsl.selectVariant",
+          "command": "hlsl.editConfiguration",
           "when": "editorLangId == hlsl",
           "group": "1_configuration@2"
         },
         {
-          "command": "hlsl.showCompilationInfo",
+          "command": "hlsl.openEffectiveConfigurationFile",
           "when": "editorLangId == hlsl",
           "group": "1_configuration@3"
         },
         {
-          "command": "hlsl.showPreprocessorExplorer",
+          "command": "hlsl.selectVariant",
           "when": "editorLangId == hlsl",
           "group": "1_configuration@4"
+        },
+        {
+          "command": "hlsl.showCompilationInfo",
+          "when": "editorLangId == hlsl",
+          "group": "1_configuration@5"
+        },
+        {
+          "command": "hlsl.showPreprocessorExplorer",
+          "when": "editorLangId == hlsl",
+          "group": "1_configuration@6"
+        },
+        {
+          "command": "hlsl.startCapture",
+          "when": "editorLangId == hlsl",
+          "group": "1_configuration@7"
+        },
+        {
+          "command": "hlsl.captureStatus",
+          "when": "editorLangId == hlsl",
+          "group": "1_configuration@8"
+        },
+        {
+          "command": "hlsl.reviewCapture",
+          "when": "editorLangId == hlsl",
+          "group": "1_configuration@9"
+        },
+        {
+          "command": "hlsl.stopCapture",
+          "when": "editorLangId == hlsl",
+          "group": "1_configuration@10"
         },
         {
           "command": "hlsl.expandMacro",

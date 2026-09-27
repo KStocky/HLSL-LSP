@@ -120,7 +120,7 @@ internal static class FirstRunInfoBar
             "HLSL-LSP is active. Right-click the editor for the HLSL menu.",
             new IVsInfoBarActionItem[]
             {
-                new InfoBarHyperlink("Configuration guide", ConfigurationAction),
+                new InfoBarHyperlink("Create/edit project configuration", ConfigurationAction),
                 new InfoBarHyperlink("Select variant", VariantAction),
                 new InfoBarHyperlink("Setup diagnostics", DiagnosticsAction),
             },

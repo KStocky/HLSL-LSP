@@ -1,7 +1,9 @@
 #include <hlsl_intellisense/lsp/server.h>
 
+#include "../capture/wire.h"
 #include <hlsl_intellisense/json_rpc/framing.h>
 #include <hlsl_intellisense/workspace/configuration.h>
+#include <hlsl_intellisense/workspace/configuration_authoring.h>
 #include <hlsl_intellisense/workspace/error.h>
 #include <hlsl_intellisense/workspace/include_resolver.h>
 #include <hlsl_intellisense/workspace/text_position.h>
@@ -19,6 +21,7 @@
 #include <iterator>
 #include <limits>
 #include <map>
+#include <set>
 #include <stdexcept>
 #include <thread>
 #include <tuple>
@@ -129,6 +132,18 @@ effective_shader_target(const workspace::WorkspaceConfiguration& configuration) 
         invalid_params(std::string{"Expected object: "} + std::string{name});
     }
     return value;
+}
+
+[[nodiscard]] std::optional<std::string> optional_string_member(const Json& object,
+                                                                std::string_view name) {
+    const auto value = object.find(name);
+    if (value == object.end() || value->is_null()) {
+        return std::nullopt;
+    }
+    if (!value->is_string()) {
+        invalid_params(std::string{"Expected string or null: "} + std::string{name});
+    }
+    return value->get<std::string>();
 }
 
 [[nodiscard]] std::string string_member(const Json& object, std::string_view name) {
@@ -2298,6 +2313,10 @@ Server::Server(NotificationSender sender, Logger logger, ServerOptions options,
 Server::~Server() {
     cancel_all_requests();
     {
+        std::scoped_lock capture_lock{capture_mutex_};
+        capture_.stop();
+    }
+    {
         std::scoped_lock state_lock{state_mutex_};
         state_ = State::shutdown;
     }
@@ -2388,6 +2407,19 @@ void Server::register_handlers() {
                                          });
     dispatcher_.register_request_handler(
         "hlsl/dxcRuntime", [this](const auto& params) { return dxc_runtime(params); });
+    dispatcher_.register_request_handler("hlsl/configurationAuthoring",
+                                         [this](const auto& params, const auto& context) {
+                                             return configuration_authoring(params, context);
+                                         });
+    for (const std::string_view action : {"start", "stop", "status", "snapshot"}) {
+        dispatcher_.register_request_handler(
+            "hlsl/capture/" + std::string(action),
+            [this, action](const auto& params) { return capture_session(action, params); });
+    }
+    dispatcher_.register_request_handler("hlsl/capture/preview",
+                                         [this](const auto& params, const auto& context) {
+                                             return capture_preview(params, context);
+                                         });
     dispatcher_.register_request_handler("hlsl/variants",
                                          [this](const auto& params) { return variants(params); });
     dispatcher_.register_request_handler(
@@ -2616,7 +2648,447 @@ Json Server::shutdown(const std::optional<Json>& params) {
         clean_shutdown_ = true;
     }
     analysis_.shutdown();
+    {
+        std::scoped_lock capture_lock{capture_mutex_};
+        capture_.stop();
+    }
     return nullptr;
+}
+
+namespace {
+std::string capture_entry_id(std::string_view session_id, const capture::Invocation& invocation) {
+    return workspace::configuration_content_hash(std::string{session_id} + "\n" +
+                                                 capture::detail::encode(invocation).dump());
+}
+
+Json capture_review(const capture::Invocation& invocation,
+                    const std::optional<std::filesystem::path>& workspace_path) {
+    Json review = {{"eligible", false},
+                   {"requiresConfirmation", true},
+                   {"selection", nullptr},
+                   {"settings", Json::object()},
+                   {"fileGroup", nullptr},
+                   {"warnings", Json::array()},
+                   {"warningCodes", Json::array()}};
+    auto& settings = review["settings"];
+    const auto warn = [&](std::string_view code, std::string_view message) {
+        review["warningCodes"].push_back(code);
+        review["warnings"].push_back(message);
+    };
+    if (!invocation.entry_point.empty()) {
+        settings["hlsl.entryPoint"] = invocation.entry_point;
+    }
+    settings["hlsl.targetProfile"] = invocation.target_profile;
+    if (!invocation.language_version.empty()) {
+        settings["hlsl.languageVersion"] = invocation.language_version;
+    }
+    if (!invocation.include_directories.empty()) {
+        settings["hlsl.additionalIncludeDirectories"] = invocation.include_directories;
+        warn("includeDirectories", "Review include directories relative to the configuration.");
+    }
+    if (!invocation.arguments.empty()) {
+        settings["hlsl.additionalArguments"] = invocation.arguments;
+        warn("arguments", "Review compiler arguments for transient paths and secrets.");
+    }
+    if (!invocation.output_mode.empty()) {
+        warn("outputMode",
+             "Output mode has no configuration field; review compiler arguments manually.");
+    }
+
+    bool conflicting = false;
+    const auto insert_pairs = [&](const auto& pairs, std::string_view key) {
+        if (pairs.empty()) {
+            return;
+        }
+        Json values = Json::object();
+        for (const auto& [name, value] : pairs) {
+            if (name.empty() || (values.contains(name) && values[name] != value)) {
+                conflicting = true;
+            } else {
+                values[name] = value;
+            }
+        }
+        settings[std::string(key)] = std::move(values);
+    };
+    insert_pairs(invocation.defines, "hlsl.preprocessorDefinitions");
+    insert_pairs(invocation.virtual_mappings, "hlsl.virtualDirectoryMappings");
+    if (!invocation.virtual_mappings.empty()) {
+        warn("virtualMappings", "Review virtual mapping targets relative to the configuration.");
+    }
+    if (conflicting) {
+        warn("conflictingKeys",
+             "Conflicting or empty definition/mapping keys require manual resolution.");
+    }
+
+    if (!workspace_path) {
+        warn("workspaceRequired", "Specify workspaceFolder to resolve a disk-backed source.");
+        return review;
+    }
+    if (invocation.source.find("://") != std::string::npos ||
+        invocation.source.starts_with("virtual:")) {
+        warn("logicalIdentity",
+             "Host logical identity is not a verified disk path; select a file manually.");
+        return review;
+    }
+    const auto source = std::filesystem::path{invocation.source};
+    const auto file = (source.is_absolute() ? source : *workspace_path / source).lexically_normal();
+    if (file.generic_string().starts_with("//") ||
+        workspace_path->generic_string().starts_with("//")
+#ifdef _WIN32
+        || GetDriveTypeW(file.root_path().c_str()) == DRIVE_REMOTE ||
+        GetDriveTypeW(workspace_path->root_path().c_str()) == DRIVE_REMOTE
+#endif
+    ) {
+        warn("networkPath", "Network-backed paths are not probed by capture review.");
+        return review;
+    }
+    const auto relative = file.lexically_relative(*workspace_path);
+    if (relative.empty() || relative == "." || relative.is_absolute() ||
+        std::ranges::any_of(relative, [](const auto& component) { return component == ".."; }) ||
+        relative.generic_string().find_first_of("*?[]") != std::string::npos) {
+        warn("outsideWorkspace", "Source is outside the workspace or contains a glob.");
+        return review;
+    }
+    std::error_code error;
+    if (!std::filesystem::is_regular_file(file, error)) {
+        warn("missingFile", "Source is not a verified disk file; select a file manually.");
+        return review;
+    }
+    const auto canonical_file = std::filesystem::canonical(file, error);
+    const auto canonical_workspace = std::filesystem::canonical(*workspace_path, error);
+    const auto resolved = canonical_file.lexically_relative(canonical_workspace);
+    if (error || resolved.empty() || resolved.is_absolute() ||
+        std::ranges::any_of(resolved, [](const auto& component) { return component == ".."; })) {
+        warn("resolvedOutsideWorkspace", "Source resolves outside the workspace.");
+        return review;
+    }
+    for (auto directory = file.parent_path(); directory != *workspace_path;
+         directory = directory.parent_path()) {
+        if (std::filesystem::exists(directory / "shadertoolsconfig.json", error) || error) {
+            warn("nestedConfiguration",
+                 "Source belongs to a nested configuration; choose its workspace explicitly.");
+            return review;
+        }
+        if (directory == directory.parent_path()) {
+            break;
+        }
+    }
+    const auto relative_path = relative.generic_string();
+    review["selection"] = {{"relativePath", relative_path},
+                           {"entryPoint", invocation.entry_point},
+                           {"targetProfile", invocation.target_profile}};
+    if (conflicting || invocation.entry_point.empty()) {
+        warn("entryPointOrSettings",
+             "A file group requires a resolved entry point and unambiguous settings.");
+        return review;
+    }
+    review["fileGroup"] = settings;
+    review["fileGroup"]["files"] = Json::array({relative_path});
+    review["eligible"] = true;
+    return review;
+}
+} // namespace
+
+Json Server::capture_session(std::string_view action, const std::optional<Json>& params) {
+    std::scoped_lock capture_lock{capture_mutex_};
+    require_running();
+    const auto& request = object_params(params);
+    if (!request.contains("protocolVersion") || !request["protocolVersion"].is_number_integer() ||
+        request["protocolVersion"] != capture::protocol_version) {
+        invalid_params("Unsupported capture protocolVersion");
+    }
+    if (action == "start") {
+        if (request.size() != 1) {
+            invalid_params("Capture start accepts only protocolVersion");
+        }
+        if (!capture_.start()) {
+            throw HandlerError{json_rpc::internal_error_code,
+                               "Private capture endpoint unavailable"};
+        }
+        const auto state = capture_.snapshot();
+        const auto token = capture_.token();
+        return {{"protocolVersion", 1},
+                {"sessionId", workspace::configuration_content_hash(token)},
+                {"endpoint", state.endpoint},
+                {"token", token}};
+    }
+    if (action == "stop") {
+        if (request.size() != 2 || !request.contains("token") || !request["token"].is_string() ||
+            request["token"] != capture_.token() || capture_.token().empty()) {
+            invalid_params("Stale capture session");
+        }
+        capture_.stop();
+        return {{"protocolVersion", 1}, {"active", false}};
+    }
+    std::optional<std::filesystem::path> review_workspace;
+    if (action == "snapshot" && request.contains("workspaceFolder")) {
+        const auto& folder_value = object_member(request, "workspaceFolder");
+        workspace::DocumentUri folder_uri = [&] {
+            try {
+                return workspace::DocumentUri::from_uri(string_member(folder_value, "uri"));
+            } catch (const workspace::DocumentError& error) {
+                invalid_params(error.what());
+            }
+        }();
+        {
+            std::scoped_lock state_lock{state_mutex_};
+            if (!workspace_folders_.contains(folder_uri.identity())) {
+                invalid_params("workspaceFolder.uri is not an initialized workspace folder");
+            }
+        }
+        review_workspace = std::filesystem::path{folder_uri.path()}.lexically_normal();
+    }
+    if (request.size() != (review_workspace ? 2U : 1U)) {
+        invalid_params("Capture status/snapshot accepts only protocolVersion and workspaceFolder");
+    }
+    const auto state = capture_.snapshot();
+    const auto session_id = state.active
+                                ? Json(workspace::configuration_content_hash(capture_.token()))
+                                : Json(nullptr);
+    Json result = {{"protocolVersion", 1},       {"sessionId", session_id},
+                   {"active", state.active},     {"accepted", state.accepted},
+                   {"rejected", state.rejected}, {"overflow", state.overflow}};
+    if (action == "snapshot") {
+        result["entries"] = Json::array();
+        for (const auto& entry : state.entries) {
+            result["entries"].push_back(
+                {{"id", capture_entry_id(session_id.get<std::string>(), entry.invocation)},
+                 {"invocation", capture::detail::encode(entry.invocation)},
+                 {"count", entry.count},
+                 {"review", capture_review(entry.invocation, review_workspace)}});
+        }
+    }
+    return result;
+}
+
+Json Server::capture_preview(const std::optional<Json>& params,
+                             const json_rpc::RequestContext& context) {
+    std::scoped_lock capture_lock{capture_mutex_};
+    require_running();
+    const auto& request = object_params(params);
+    if (request.size() < 4 || request.size() > 7 ||
+        integer_member(request, "protocolVersion") != capture::protocol_version) {
+        invalid_params("Unsupported capture preview request");
+    }
+    for (const auto& [key, ignored] : request.items()) {
+        (void)ignored;
+        if (key != "protocolVersion" && key != "sessionId" && key != "workspaceFolder" &&
+            key != "selectedEntryIds" && key != "variants" && key != "pipelines" &&
+            key != "existingConfiguration") {
+            invalid_params("Unknown capture preview parameter");
+        }
+    }
+    const auto session_id = string_member(request, "sessionId");
+    const auto snapshot = capture_.snapshot();
+    if (!snapshot.active || session_id.size() != 71 ||
+        session_id != workspace::configuration_content_hash(capture_.token())) {
+        invalid_params("Stale capture session");
+    }
+    workspace::DocumentUri folder_uri = [&] {
+        try {
+            return workspace::DocumentUri::from_uri(
+                string_member(object_member(request, "workspaceFolder"), "uri"));
+        } catch (const workspace::DocumentError& error) {
+            invalid_params(error.what());
+        }
+    }();
+    std::filesystem::path workspace_path;
+    {
+        std::scoped_lock state_lock{state_mutex_};
+        const auto found = workspace_folders_.find(folder_uri.identity());
+        if (found == workspace_folders_.end()) {
+            invalid_params("workspaceFolder.uri is not an initialized workspace folder");
+        }
+        workspace_path = found->second.lexically_normal();
+    }
+    const auto& ids = member(request, "selectedEntryIds");
+    if (!ids.is_array() || ids.empty() || ids.size() > 64) {
+        invalid_params("selectedEntryIds must contain 1..64 entry IDs");
+    }
+    std::map<std::string, const capture::Entry*, std::less<>> available;
+    for (const auto& entry : snapshot.entries) {
+        available.emplace(capture_entry_id(session_id, entry.invocation), &entry);
+    }
+    std::vector<workspace::CapturedConfigurationEntry> entries;
+    std::vector<const capture::Entry*> selected;
+    std::map<std::string, std::size_t, std::less<>> selected_by_id;
+    entries.reserve(ids.size());
+    selected.reserve(ids.size());
+    for (const auto& id_value : ids) {
+        context.cancellation.throw_if_cancellation_requested();
+        if (!id_value.is_string()) {
+            invalid_params("selectedEntryIds must contain strings");
+        }
+        const auto id = id_value.get<std::string>();
+        if (id.size() != 71 || !id.starts_with("sha256:")) {
+            invalid_params("Invalid captured entry ID");
+        }
+        const auto found = available.find(id);
+        if (found == available.end() || !selected_by_id.emplace(id, entries.size()).second) {
+            invalid_params("Unknown, duplicate, or stale captured entry ID");
+        }
+        const auto review = capture_review(found->second->invocation, workspace_path);
+        if (!review["eligible"].get<bool>()) {
+            invalid_params("Selected captured entry is not eligible for this workspace");
+        }
+        const auto& invocation = found->second->invocation;
+        entries.push_back(
+            {.file = workspace_path / review["selection"]["relativePath"].get<std::string>(),
+             .entry_point = invocation.entry_point,
+             .target_profile = invocation.target_profile,
+             .settings_json = review["settings"].dump(),
+             .variant_name = std::nullopt});
+        selected.push_back(found->second);
+    }
+
+    if (const auto variants = request.find("variants"); variants != request.end()) {
+        if (!variants->is_array() || variants->size() > 64) {
+            invalid_params("variants must be an array of at most 64 names");
+        }
+        std::set<std::string> names;
+        for (const auto& variant : *variants) {
+            if (!variant.is_object() || variant.size() != 2) {
+                invalid_params("Each variant requires entryId and name");
+            }
+            const auto id = string_member(variant, "entryId");
+            const auto name = string_member(variant, "name");
+            const auto found = selected_by_id.find(id);
+            if (found == selected_by_id.end() || name.empty() || name.size() > 128 ||
+                !names.insert(name).second || entries[found->second].variant_name) {
+                invalid_params("Variant name or selected entry ID is invalid or duplicated");
+            }
+            entries[found->second].variant_name = name;
+        }
+    }
+    std::map<std::string, std::size_t> file_counts;
+    for (const auto& entry : entries) {
+        ++file_counts[entry.file.generic_string()];
+    }
+    for (const auto& entry : entries) {
+        if (file_counts[entry.file.generic_string()] > 1 && !entry.variant_name) {
+            invalid_params("Every captured permutation of one file requires a variant name");
+        }
+    }
+
+    std::vector<workspace::CapturedPipeline> pipelines;
+    if (const auto value = request.find("pipelines"); value != request.end()) {
+        if (!value->is_array() || value->size() > 16) {
+            invalid_params("pipelines must be an array of at most 16 pipelines");
+        }
+        const std::map<std::string, std::string> profiles{{"vertex", "vs_"},
+                                                          {"pixel", "ps_"},
+                                                          {"hull", "hs_"},
+                                                          {"domain", "ds_"},
+                                                          {"geometry", "gs_"}};
+        std::set<std::string> names;
+        for (const auto& candidate : *value) {
+            if (!candidate.is_object() || candidate.size() != 3) {
+                invalid_params("Each pipeline requires name, source, and stages");
+            }
+            const auto name = string_member(candidate, "name");
+            const auto source = string_member(candidate, "source");
+            const auto& stages = object_member(candidate, "stages");
+            if (name.empty() || name.size() > 128 || !names.insert(name).second ||
+                (source != "host" && source != "user") || !stages.is_object() ||
+                stages.size() < 2 || stages.size() > 5 || !stages.contains("vertex") ||
+                !stages.contains("pixel") || stages.contains("hull") != stages.contains("domain")) {
+                invalid_params("Invalid pipeline name, source, or stage set");
+            }
+            workspace::CapturedPipeline pipeline{.name = name, .stages = {}};
+            for (const auto& [stage, id_value] : stages.items()) {
+                const auto expected = profiles.find(stage);
+                if (expected == profiles.end() || !id_value.is_string()) {
+                    invalid_params("Unknown pipeline stage or entry ID");
+                }
+                const auto found = selected_by_id.find(id_value.get<std::string>());
+                if (found == selected_by_id.end() ||
+                    !selected[found->second]->invocation.target_profile.starts_with(
+                        expected->second) ||
+                    (source == "host" && (selected[found->second]->invocation.pipeline != name ||
+                                          selected[found->second]->invocation.stage != stage))) {
+                    invalid_params("Pipeline stage has no matching selected entry or correlation");
+                }
+                pipeline.stages.push_back({.stage = stage, .entry_index = found->second});
+            }
+            pipelines.push_back(std::move(pipeline));
+        }
+    }
+
+    std::optional<std::string> content;
+    std::optional<std::int64_t> version;
+    std::optional<std::string> supplied_hash;
+    if (const auto existing = request.find("existingConfiguration");
+        existing != request.end() && !existing->is_null()) {
+        if (!existing->is_object() || existing->size() > 3) {
+            invalid_params("existingConfiguration must be an object");
+        }
+        for (const auto& [key, ignored] : existing->items()) {
+            (void)ignored;
+            if (key != "content" && key != "contentHash" && key != "version") {
+                invalid_params("Unknown existingConfiguration property");
+            }
+        }
+        content = optional_string_member(*existing, "content");
+        supplied_hash = optional_string_member(*existing, "contentHash");
+        if (const auto number = existing->find("version");
+            number != existing->end() && !number->is_null()) {
+            if (!number->is_number_integer()) {
+                invalid_params("existingConfiguration.version must be an integer");
+            }
+            version = number->get<std::int64_t>();
+        }
+    }
+    constexpr std::uintmax_t max_content = 2U * 1024U * 1024U;
+    if (content && content->size() > max_content) {
+        invalid_params("Existing configuration exceeds 2 MiB");
+    }
+    const auto configuration_path = workspace_path / workspace::configuration_file_name;
+    std::error_code error;
+    const bool exists = std::filesystem::is_regular_file(configuration_path, error);
+    if (error && error != std::errc::no_such_file_or_directory) {
+        throw HandlerError{json_rpc::internal_error_code, "Unable to inspect configuration"};
+    }
+    if (!content && exists) {
+        if (std::filesystem::file_size(configuration_path, error) > max_content || error) {
+            invalid_params("Existing configuration exceeds 2 MiB or cannot be read");
+        }
+        std::ifstream stream{configuration_path, std::ios::binary};
+        if (!stream) {
+            throw HandlerError{json_rpc::internal_error_code, "Unable to read configuration"};
+        }
+        content =
+            std::string{std::istreambuf_iterator<char>{stream}, std::istreambuf_iterator<char>{}};
+        if (content->size() > max_content) {
+            invalid_params("Existing configuration exceeds 2 MiB");
+        }
+    }
+    if (supplied_hash &&
+        (!content || *supplied_hash != workspace::configuration_content_hash(*content))) {
+        invalid_params("existingConfiguration.contentHash does not match current content");
+    }
+    context.cancellation.throw_if_cancellation_requested();
+    const auto preview = workspace::generate_capture_configuration_preview(workspace_path, content,
+                                                                           entries, pipelines);
+    Json errors = Json::array();
+    for (const auto& issue : preview.errors) {
+        errors.push_back(
+            {{"code", issue.code}, {"field", issue.field}, {"message", issue.message}});
+    }
+    return {{"protocolVersion", 1},
+            {"sessionId", session_id},
+            {"selectedEntryIds", ids},
+            {"configuration",
+             {{"uri", workspace::DocumentUri::from_path(configuration_path.string()).uri()},
+              {"exists", exists},
+              {"expectedContentVersion", version ? Json(*version) : Json(nullptr)},
+              {"expectedContentHash",
+               content ? Json(workspace::configuration_content_hash(*content)) : Json(nullptr)}}},
+            {"preview",
+             {{"content", preview.content},
+              {"contentHash", workspace::configuration_content_hash(preview.content)},
+              {"valid", preview.valid},
+              {"changed", preview.changed},
+              {"errors", std::move(errors)}}}};
 }
 
 Json Server::completion(const std::optional<Json>& params,
@@ -6268,6 +6740,356 @@ Json Server::dxc_runtime(const std::optional<Json>& params) {
     return result;
 }
 
+Json Server::configuration_authoring(const std::optional<Json>& params,
+                                     const json_rpc::RequestContext& context) {
+    require_running();
+    const auto& value = object_params(params);
+    if (integer_member(value, "protocolVersion") !=
+        workspace::configuration_authoring_protocol_version) {
+        invalid_params("Unsupported hlsl/configurationAuthoring protocolVersion");
+    }
+    const auto& folder_value = object_member(value, "workspaceFolder");
+    workspace::DocumentUri folder_uri = [&] {
+        try {
+            return workspace::DocumentUri::from_uri(string_member(folder_value, "uri"));
+        } catch (const workspace::DocumentError& error) {
+            invalid_params(error.what());
+        }
+    }();
+    const auto workspace_path = std::filesystem::path{folder_uri.path()};
+    std::vector<workspace::SourceSnapshot> open_documents;
+    {
+        std::scoped_lock state_lock{state_mutex_};
+        if (!workspace_folders_.contains(folder_uri.identity())) {
+            invalid_params("workspaceFolder.uri is not an initialized workspace folder");
+        }
+        open_documents = documents_.open_snapshots();
+    }
+
+    std::optional<std::string> existing_content;
+    std::optional<std::int64_t> existing_version;
+    std::optional<std::string> supplied_hash;
+    if (const auto existing = value.find("existingConfiguration");
+        existing != value.end() && !existing->is_null()) {
+        if (!existing->is_object()) {
+            invalid_params("existingConfiguration must be an object or null");
+        }
+        existing_content = optional_string_member(*existing, "content");
+        supplied_hash = optional_string_member(*existing, "contentHash");
+        if (const auto version = existing->find("version");
+            version != existing->end() && !version->is_null()) {
+            if (!version->is_number_integer()) {
+                invalid_params("existingConfiguration.version must be an integer or null");
+            }
+            existing_version = version->get<std::int64_t>();
+        }
+    }
+
+    const auto configuration_path = workspace_path / workspace::configuration_file_name;
+    std::error_code configuration_error;
+    const bool configuration_exists =
+        std::filesystem::is_regular_file(configuration_path, configuration_error);
+    if (configuration_error && configuration_error != std::errc::no_such_file_or_directory) {
+        throw HandlerError{json_rpc::internal_error_code,
+                           "Unable to inspect existing configuration"};
+    }
+    if (!existing_content) {
+        if (configuration_exists) {
+            std::ifstream stream{configuration_path, std::ios::binary};
+            if (!stream) {
+                throw HandlerError{json_rpc::internal_error_code,
+                                   "Unable to read existing configuration"};
+            }
+            existing_content = std::string{std::istreambuf_iterator<char>{stream},
+                                           std::istreambuf_iterator<char>{}};
+        }
+    }
+    if (supplied_hash &&
+        (!existing_content ||
+         *supplied_hash != workspace::configuration_content_hash(*existing_content))) {
+        invalid_params("existingConfiguration.contentHash does not match current content");
+    }
+
+    workspace::ConfigurationDiscoveryLimits limits;
+    constexpr std::size_t max_entry_points_per_file = 32;
+    constexpr std::size_t max_compiler_probes = 96;
+    const auto discovery = workspace::discover_shader_files(workspace_path, limits, [&context] {
+        context.cancellation.throw_if_cancellation_requested();
+    });
+
+    struct EntryPoint {
+        std::string name;
+        std::uint32_t line{};
+        std::uint32_t character{};
+        std::vector<std::string> profiles;
+        std::string state;
+        std::string explanation;
+    };
+    struct FileAnalysis {
+        std::filesystem::path path;
+        std::uintmax_t size{};
+        std::vector<EntryPoint> entry_points;
+        std::string error;
+        bool truncated{};
+    };
+
+    const auto collect_functions = [](const auto& self, const std::vector<dxc::Symbol>& symbols,
+                                      std::vector<dxc::Symbol>& output,
+                                      std::size_t maximum) -> void {
+        for (const auto& symbol : symbols) {
+            if (output.size() == maximum) {
+                return;
+            }
+            if (symbol.cursor_kind == 8) {
+                output.push_back(symbol);
+            } else if (symbol.cursor_kind == 22) {
+                self(self, symbol.children, output, maximum);
+            }
+        }
+    };
+    constexpr std::array profiles{std::string_view{"vs_6_6"}, std::string_view{"ps_6_6"},
+                                  std::string_view{"cs_6_6"}, std::string_view{"gs_6_6"},
+                                  std::string_view{"hs_6_6"}, std::string_view{"ds_6_6"},
+                                  std::string_view{"ms_6_6"}, std::string_view{"as_6_6"}};
+
+    std::unordered_map<std::string, workspace::SourceSnapshot> open_by_identity;
+    for (const auto& snapshot : open_documents) {
+        open_by_identity.emplace(snapshot.document_uri().identity(), snapshot);
+    }
+    std::vector<FileAnalysis> analyses;
+    analyses.reserve(discovery.shader_files.size());
+    std::size_t probes{};
+    bool analysis_truncated = discovery.truncated;
+    auto analysis_truncation_reason = discovery.truncation_reason;
+    const auto sequence = configuration_authoring_sequence_.fetch_add(1);
+    for (const auto& path : discovery.shader_files) {
+        context.cancellation.throw_if_cancellation_requested();
+        const auto uri = workspace::DocumentUri::from_path(path.string());
+        workspace::SourceSnapshot snapshot = [&] {
+            if (const auto open = open_by_identity.find(uri.identity());
+                open != open_by_identity.end()) {
+                return open->second;
+            }
+            std::ifstream stream{path, std::ios::binary};
+            if (!stream) {
+                throw std::runtime_error{"Unable to read shader file"};
+            }
+            return workspace::SourceSnapshot{uri, "hlsl", 0,
+                                             std::string{std::istreambuf_iterator<char>{stream},
+                                                         std::istreambuf_iterator<char>{}}};
+        }();
+        FileAnalysis file{.path = path,
+                          .size = snapshot.text().size(),
+                          .entry_points = {},
+                          .error = {},
+                          .truncated = false};
+        const auto identity =
+            "$configuration-authoring\n" + std::to_string(sequence) + "\n" + path.generic_string();
+        try {
+            workspace::WorkspaceConfiguration configuration;
+            configuration.language_version = "2021";
+            if (!analysis_.analyze(analysis::AnalysisInput{.root = snapshot,
+                                                           .open_documents = open_documents,
+                                                           .configuration = configuration,
+                                                           .generation = 0,
+                                                           .analysis_identity = identity,
+                                                           .publish_diagnostics = false,
+                                                           .request_compilation_info = false})) {
+                throw std::runtime_error{"Analysis queue is full"};
+            }
+            bool symbols_truncated{};
+            const auto symbols = analysis_.document_symbols(
+                identity, snapshot.version(), context.cancellation, symbols_truncated);
+            std::vector<dxc::Symbol> functions;
+            collect_functions(collect_functions, symbols, functions, max_entry_points_per_file);
+            file.truncated = symbols_truncated || functions.size() == max_entry_points_per_file;
+            std::map<std::string, std::size_t, std::less<>> name_counts;
+            for (const auto& function : functions) {
+                ++name_counts[function.name];
+            }
+            for (const auto& function : functions) {
+                EntryPoint candidate{
+                    .name = function.name,
+                    .line = function.location.line > 0 ? function.location.line - 1 : 0,
+                    .character = function.location.column > 0 ? function.location.column - 1 : 0,
+                    .profiles = {},
+                    .state = {},
+                    .explanation = {}};
+                if (name_counts[function.name] > 1) {
+                    candidate.state = "ambiguous";
+                    candidate.explanation =
+                        "DXC reported multiple free-function definitions with this name.";
+                    file.entry_points.push_back(std::move(candidate));
+                    continue;
+                }
+                bool all_profiles_probed = true;
+                for (const auto profile : profiles) {
+                    if (probes == max_compiler_probes) {
+                        analysis_truncated = true;
+                        analysis_truncation_reason = "compilerProbeLimit";
+                        all_profiles_probed = false;
+                        break;
+                    }
+                    ++probes;
+                    context.cancellation.throw_if_cancellation_requested();
+                    configuration.target_profile = std::string{profile};
+                    configuration.entry_point = function.name;
+                    if (!analysis_.analyze(
+                            analysis::AnalysisInput{.root = snapshot,
+                                                    .open_documents = open_documents,
+                                                    .configuration = configuration,
+                                                    .generation = probes,
+                                                    .analysis_identity = identity,
+                                                    .publish_diagnostics = false,
+                                                    .request_compilation_info = false})) {
+                        throw std::runtime_error{"Analysis queue is full"};
+                    }
+                    const auto compilation = analysis_.compilation_info(
+                        identity, snapshot.version(), path.string(), context.cancellation);
+                    if (compilation.success) {
+                        candidate.profiles.emplace_back(profile);
+                    }
+                }
+                if (!all_profiles_probed) {
+                    candidate.state = "ambiguous";
+                    candidate.explanation =
+                        "The compiler probe budget was exhausted; validated profiles are "
+                        "incomplete and the client must choose explicitly.";
+                } else if (candidate.profiles.empty()) {
+                    candidate.state = "unresolved";
+                    candidate.explanation =
+                        "DXC did not validate this function for any probed shader profile.";
+                } else if (candidate.profiles.size() == 1) {
+                    candidate.state = "resolved";
+                    candidate.explanation = "DXC validated exactly one probed shader profile.";
+                } else {
+                    candidate.state = "ambiguous";
+                    candidate.explanation =
+                        "DXC validated multiple shader profiles; the client must choose one.";
+                }
+                file.entry_points.push_back(std::move(candidate));
+            }
+        } catch (const json_rpc::HandlerError&) {
+            analysis_.erase(identity);
+            throw;
+        } catch (const std::exception& error) {
+            file.error = error.what();
+        }
+        analysis_.erase(identity);
+        analyses.push_back(std::move(file));
+    }
+
+    std::vector<workspace::ConfigurationSelection> selections;
+    if (const auto requested = value.find("selections"); requested != value.end()) {
+        if (!requested->is_array()) {
+            invalid_params("selections must be an array");
+        }
+        for (const auto& selection : *requested) {
+            if (!selection.is_object()) {
+                invalid_params("Each selection must be an object");
+            }
+            auto relative = std::filesystem::path{string_member(selection, "relativePath")};
+            if (relative.empty() || relative.is_absolute() ||
+                std::ranges::find(relative, std::filesystem::path{".."}) != relative.end()) {
+                invalid_params("selection.relativePath must remain inside the workspace");
+            }
+            const auto selected_path = (workspace_path / relative).lexically_normal();
+            const auto analysis = std::ranges::find(analyses, selected_path, &FileAnalysis::path);
+            if (analysis == analyses.end()) {
+                invalid_params("selection.relativePath was not discovered");
+            }
+            const auto entry_point = string_member(selection, "entryPoint");
+            const auto target_profile = string_member(selection, "targetProfile");
+            const auto candidate =
+                std::ranges::find(analysis->entry_points, entry_point, &EntryPoint::name);
+            if (candidate == analysis->entry_points.end() ||
+                std::ranges::find(candidate->profiles, target_profile) ==
+                    candidate->profiles.end()) {
+                invalid_params("selection is not a compiler-validated candidate");
+            }
+            selections.push_back({.file = selected_path,
+                                  .entry_point = entry_point,
+                                  .target_profile = target_profile});
+        }
+    } else {
+        for (const auto& file : analyses) {
+            for (const auto& candidate : file.entry_points) {
+                if (candidate.state == "resolved") {
+                    selections.push_back({.file = file.path,
+                                          .entry_point = candidate.name,
+                                          .target_profile = candidate.profiles.front()});
+                }
+            }
+        }
+    }
+
+    const auto draft_content = optional_string_member(value, "draftContent");
+    if (draft_content && draft_content->size() > 2U * 1024U * 1024U) {
+        invalid_params("draftContent exceeds the 2 MiB configuration limit");
+    }
+    const auto preview = workspace::generate_configuration_preview(workspace_path, existing_content,
+                                                                   selections, draft_content);
+    Json files = Json::array();
+    for (const auto& file : analyses) {
+        Json entry_points = Json::array();
+        for (const auto& candidate : file.entry_points) {
+            entry_points.push_back(
+                Json{{"name", candidate.name},
+                     {"location", {{"line", candidate.line}, {"character", candidate.character}}},
+                     {"targetProfiles", candidate.profiles},
+                     {"state", candidate.state},
+                     {"explanation", candidate.explanation}});
+        }
+        files.push_back(
+            Json{{"uri", workspace::DocumentUri::from_path(file.path.string()).uri()},
+                 {"relativePath", file.path.lexically_relative(workspace_path).generic_string()},
+                 {"size", file.size},
+                 {"entryPoints", std::move(entry_points)},
+                 {"truncated", file.truncated},
+                 {"analysisError", file.error.empty() ? Json(nullptr) : Json(file.error)}});
+    }
+    Json nested = Json::array();
+    for (const auto& path : discovery.nested_configurations) {
+        nested.push_back(workspace::DocumentUri::from_path(path.string()).uri());
+    }
+    Json errors = Json::array();
+    for (const auto& error : preview.errors) {
+        errors.push_back(
+            Json{{"code", error.code}, {"field", error.field}, {"message", error.message}});
+    }
+    const auto expected_hash = existing_content
+                                   ? Json(workspace::configuration_content_hash(*existing_content))
+                                   : Json(nullptr);
+    return {
+        {"protocolVersion", workspace::configuration_authoring_protocol_version},
+        {"configuration",
+         {{"uri", workspace::DocumentUri::from_path(configuration_path.string()).uri()},
+          {"exists", configuration_exists},
+          {"expectedContentVersion",
+           existing_version.has_value() ? Json(*existing_version) : Json(nullptr)},
+          {"expectedContentHash", expected_hash}}},
+        {"discovery",
+         {{"files", std::move(files)},
+          {"nestedConfigurations", std::move(nested)},
+          {"directoriesVisited", discovery.directories_visited},
+          {"compilerProbes", probes},
+          {"truncated", analysis_truncated},
+          {"truncationReason",
+           analysis_truncation_reason.empty() ? Json(nullptr) : Json(analysis_truncation_reason)},
+          {"limits",
+           {{"maxDirectories", limits.max_directories},
+            {"maxFiles", limits.max_files},
+            {"maxFileSize", limits.max_file_size},
+            {"maxEntryPointsPerFile", max_entry_points_per_file},
+            {"maxCompilerProbes", max_compiler_probes}}}}},
+        {"preview",
+         {{"content", preview.content},
+          {"contentHash", workspace::configuration_content_hash(preview.content)},
+          {"valid", preview.valid},
+          {"changed", preview.changed},
+          {"errors", std::move(errors)}}}};
+}
+
 void Server::reevaluate_variant_selection() {
     std::string issue_message;
     bool issue_is_error = false;
@@ -6995,6 +7817,24 @@ void trace_payload(std::ostream& errors, std::mutex& mutex, std::string_view dir
     }
     if (!include_source) {
         value = summarize_protocol_payload(value, payload.size());
+    } else {
+        const auto redact_tokens = [&](const auto& self, Json& node) -> void {
+            if (node.is_object()) {
+                if (node.contains("token")) {
+                    node["token"] = "<redacted>";
+                }
+                for (auto& [key, child] : node.items()) {
+                    if (key != "token") {
+                        self(self, child);
+                    }
+                }
+            } else if (node.is_array()) {
+                for (auto& child : node) {
+                    self(self, child);
+                }
+            }
+        };
+        redact_tokens(redact_tokens, value);
     }
     errors << "HLSL-LSP trace " << direction << ": " << value.dump() << '\n';
 }

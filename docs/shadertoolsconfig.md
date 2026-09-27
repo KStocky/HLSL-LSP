@@ -13,6 +13,28 @@ The shared fields make existing HLSL Tools configurations reusable. HLSL-LSP
 also adds DXC-oriented language-version, target, entry-point, and argument
 settings.
 
+Both editor clients can build a guided preview through the shared, read-only
+[`hlsl/configurationAuthoring`](configuration-authoring.md) protocol. Discovery,
+compiler-authoritative entry-point/profile candidates, deterministic merging,
+validation errors, and concurrent-edit guards are implemented by the server;
+clients remain responsible for presenting and applying the returned text.
+
+In Visual Studio, use **Tools > Create/Edit HLSL Project Configuration**
+or **HLSL > Create/Edit HLSL Project Configuration** in the shader editor.
+The first-run information bar links to the same workflow. With a solution
+open, select compiler-validated shader entries and explicitly choose any
+ambiguous profiles. Review the full JSON preview and validation errors before
+confirming. The editable draft supports additional include directories, virtual
+mappings, defines, compiler arguments, runtime selection, variants, and
+pipelines; **Validate Draft** checks those fields with the same production
+loader and shows field-addressed errors for correction. Visual Studio checks
+the document version and content hash again
+before updating the editor buffer, including unsaved changes; a stale preview
+must be regenerated. The edit remains in the normal document and source-control
+workflow. For a new file, Visual Studio creates the configuration beside the
+solution file. The preview may normalize existing JSON formatting or remove
+comments, but preserves unknown properties, variants, and pipelines.
+
 ## Example
 
 JSON comments are accepted.

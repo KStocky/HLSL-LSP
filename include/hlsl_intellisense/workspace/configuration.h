@@ -156,6 +156,12 @@ load_workspace_configuration(const std::filesystem::path& shader_directory);
 [[nodiscard]] WorkspaceConfiguration
 load_workspace_configuration_for_file(const std::filesystem::path& shader_file);
 
+// Parses and validates in-memory configuration content through the same
+// production parser used for files on disk. `path` supplies the location used
+// for relative-path resolution and field-addressable diagnostics.
+void validate_workspace_configuration_content(std::string_view content,
+                                              const std::filesystem::path& path);
+
 [[nodiscard]] WorkspaceConfiguration
 apply_configuration_overrides(WorkspaceConfiguration configuration,
                               const ConfigurationOverrides& overrides,

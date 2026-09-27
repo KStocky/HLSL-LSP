@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -21,8 +22,13 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <vector>
+
+#ifndef _WIN32
+#include <sys/stat.h>
+#endif
 
 namespace {
 
@@ -238,6 +244,598 @@ TEST_CASE("LSP handler enforces lifecycle and invalid parameters", "[lsp][handle
         hlsl_intellisense::json_rpc::Notification{.method = "exit", .params = std::nullopt}));
     CHECK(server.exit_requested());
     CHECK(server.exit_code() == 1);
+}
+
+TEST_CASE("Capture LSP session methods require explicit start and never edit files",
+          "[lsp][capture]") {
+#ifndef _WIN32
+    TestDirectory runtime;
+    const std::string prior_runtime =
+        std::getenv("XDG_RUNTIME_DIR") ? std::getenv("XDG_RUNTIME_DIR") : "";
+    const bool had_runtime = std::getenv("XDG_RUNTIME_DIR") != nullptr;
+    REQUIRE(chmod(runtime.path().c_str(), 0700) == 0);
+    REQUIRE(setenv("XDG_RUNTIME_DIR", runtime.path().string().c_str(), 1) == 0);
+#endif
+    hlsl_intellisense::lsp::Server server{[](const auto&) {}};
+    const auto call = [&server](std::int64_t id, std::string method, Json params) {
+        return server.handle(hlsl_intellisense::json_rpc::Request{
+            .id = id, .method = std::move(method), .params = std::move(params)});
+    };
+    REQUIRE(call(1, "initialize", Json::object()).has_value());
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    const auto status = call(2, "hlsl/capture/status", {{"protocolVersion", 1}});
+    REQUIRE(status.has_value());
+    CHECK(std::get<hlsl_intellisense::json_rpc::Response>(*status).result["active"] == false);
+    const auto start = call(3, "hlsl/capture/start", {{"protocolVersion", 1}});
+    REQUIRE(start.has_value());
+    const auto& result = std::get<hlsl_intellisense::json_rpc::Response>(*start).result;
+    CHECK(result["endpoint"].is_string());
+    const std::string token = result["token"];
+    CHECK(token.size() == 64);
+    const auto snapshot = call(4, "hlsl/capture/snapshot", {{"protocolVersion", 1}});
+    REQUIRE(snapshot.has_value());
+    const auto& captured = std::get<hlsl_intellisense::json_rpc::Response>(*snapshot).result;
+    CHECK(captured["active"] == true);
+    CHECK(captured["entries"].empty());
+    CHECK_FALSE(captured.contains("token"));
+    const auto stale =
+        call(5, "hlsl/capture/stop", {{"protocolVersion", 1}, {"token", std::string(64, '0')}});
+    REQUIRE(stale.has_value());
+    CHECK(std::holds_alternative<hlsl_intellisense::json_rpc::ErrorResponse>(*stale));
+    const auto stop = call(6, "hlsl/capture/stop", {{"protocolVersion", 1}, {"token", token}});
+    REQUIRE(stop.has_value());
+    CHECK(std::get<hlsl_intellisense::json_rpc::Response>(*stop).result["active"] == false);
+#ifndef _WIN32
+    if (had_runtime) {
+        REQUIRE(setenv("XDG_RUNTIME_DIR", prior_runtime.c_str(), 1) == 0);
+    } else {
+        REQUIRE(unsetenv("XDG_RUNTIME_DIR") == 0);
+    }
+#endif
+}
+
+TEST_CASE("Capture snapshot projects verified files into review-only configuration fragments",
+          "[lsp][capture]") {
+    TestDirectory directory;
+    const auto shader = directory.path() / "Shaders" / "main.hlsl";
+    std::filesystem::create_directories(shader.parent_path());
+    {
+        std::ofstream output{shader};
+        REQUIRE(output);
+        output << "float4 Main() : SV_Target { return 1; }\n";
+    }
+    TestDirectory outside;
+    const auto external = outside.path() / "other.hlsl";
+    {
+        std::ofstream output{external};
+        REQUIRE(output);
+        output << "float4 Main() : SV_Target { return 1; }\n";
+    }
+#ifndef _WIN32
+    TestDirectory runtime;
+    const std::string prior_runtime =
+        std::getenv("XDG_RUNTIME_DIR") ? std::getenv("XDG_RUNTIME_DIR") : "";
+    const bool had_runtime = std::getenv("XDG_RUNTIME_DIR") != nullptr;
+    REQUIRE(chmod(runtime.path().c_str(), 0700) == 0);
+    REQUIRE(setenv("XDG_RUNTIME_DIR", runtime.path().string().c_str(), 1) == 0);
+#endif
+    const auto folder_uri =
+        hlsl_intellisense::workspace::DocumentUri::from_path(directory.path().string()).uri();
+    hlsl_intellisense::lsp::Server server{[](const auto&) {}};
+    const auto call = [&server](std::int64_t id, std::string method, Json params) {
+        const auto response = server.handle(hlsl_intellisense::json_rpc::Request{
+            .id = id, .method = std::move(method), .params = std::move(params)});
+        REQUIRE(response.has_value());
+        return *response;
+    };
+    (void)call(1, "initialize",
+               {{"workspaceFolders", Json::array({{{"uri", folder_uri}, {"name", "test"}}})}});
+    (void)server.handle(hlsl_intellisense::json_rpc::Notification{.method = "initialized",
+                                                                  .params = Json::object()});
+    const auto started = call(2, "hlsl/capture/start", {{"protocolVersion", 1}});
+    const auto& credentials = std::get<hlsl_intellisense::json_rpc::Response>(started).result;
+    hlsl_intellisense::capture::Client client;
+    REQUIRE(client.connect(credentials["endpoint"], credentials["token"]));
+    const auto enqueue = [&client](const auto& event) {
+        for (int attempt = 0; attempt < 100; ++attempt) {
+            if (client.report(event)) {
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return false;
+    };
+    hlsl_intellisense::capture::Invocation file_event;
+    file_event.source = shader.string();
+    file_event.entry_point = "Main";
+    file_event.target_profile = "ps_6_7";
+    file_event.language_version = "2021";
+    file_event.defines = {{"QUALITY", "high"}};
+    file_event.include_directories = {"Shaders"};
+    file_event.arguments = {"-Zi"};
+    file_event.output_mode = "dxil";
+    REQUIRE(enqueue(file_event));
+    auto virtual_event = file_event;
+    virtual_event.source = "virtual:/generated/main.hlsl";
+    virtual_event.virtual_mappings = {{"/Project", "Shaders"}};
+    REQUIRE(enqueue(virtual_event));
+    auto conflicting_event = file_event;
+    conflicting_event.defines = {{"QUALITY", "high"}, {"QUALITY", "low"}};
+    REQUIRE(enqueue(conflicting_event));
+    auto outside_event = file_event;
+    outside_event.source = external.string();
+    REQUIRE(enqueue(outside_event));
+    bool received = false;
+    for (int attempt = 0; attempt < 200; ++attempt) {
+        const auto state = call(3, "hlsl/capture/status", {{"protocolVersion", 1}});
+        if (std::get<hlsl_intellisense::json_rpc::Response>(state).result["accepted"] == 4) {
+            received = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    REQUIRE(received);
+    const auto unscoped = call(4, "hlsl/capture/snapshot", {{"protocolVersion", 1}});
+    const auto& unscoped_entries =
+        std::get<hlsl_intellisense::json_rpc::Response>(unscoped).result["entries"];
+    REQUIRE(unscoped_entries.size() == 4);
+    for (const auto& entry : unscoped_entries) {
+        CHECK(entry["review"]["eligible"] == false);
+        CHECK(entry["review"]["fileGroup"].is_null());
+        CHECK(entry["review"]["settings"]["hlsl.targetProfile"] == "ps_6_7");
+    }
+    const auto snapshot =
+        call(5, "hlsl/capture/snapshot",
+             {{"protocolVersion", 1}, {"workspaceFolder", {{"uri", folder_uri}}}});
+    const auto& entries =
+        std::get<hlsl_intellisense::json_rpc::Response>(snapshot).result["entries"];
+    REQUIRE(entries.size() == 4);
+    Json selected_file_group;
+    for (const auto& entry : entries) {
+        const auto& review = entry["review"];
+        CHECK(review["requiresConfirmation"] == true);
+        if (entry["invocation"]["source"] == "virtual:/generated/main.hlsl") {
+            CHECK_FALSE(review["eligible"].get<bool>());
+            CHECK(review["selection"].is_null());
+            CHECK(review["fileGroup"].is_null());
+            CHECK(std::ranges::find(review["warningCodes"], "logicalIdentity") !=
+                  review["warningCodes"].end());
+        } else if (entry["invocation"]["source"] == external.string()) {
+            CHECK_FALSE(review["eligible"].get<bool>());
+            CHECK(review["fileGroup"].is_null());
+            CHECK(std::ranges::find(review["warningCodes"], "outsideWorkspace") !=
+                  review["warningCodes"].end());
+        } else if (entry["invocation"]["defines"].size() == 2) {
+            CHECK_FALSE(review["eligible"].get<bool>());
+            CHECK(review["fileGroup"].is_null());
+            CHECK(std::ranges::find(review["warningCodes"], "conflictingKeys") !=
+                  review["warningCodes"].end());
+        } else {
+            CHECK(review["eligible"] == true);
+            CHECK(review["selection"] == Json{{"relativePath", "Shaders/main.hlsl"},
+                                              {"entryPoint", "Main"},
+                                              {"targetProfile", "ps_6_7"}});
+            CHECK(review["fileGroup"]["files"] == Json::array({"Shaders/main.hlsl"}));
+            CHECK(review["fileGroup"]["hlsl.preprocessorDefinitions"]["QUALITY"] == "high");
+            CHECK(review["fileGroup"]["hlsl.additionalArguments"] == Json::array({"-Zi"}));
+            CHECK_FALSE(review["warnings"].empty());
+            CHECK(std::ranges::find(review["warningCodes"], "arguments") !=
+                  review["warningCodes"].end());
+            selected_file_group = review["fileGroup"];
+        }
+    }
+    const auto rejected =
+        call(6, "hlsl/capture/snapshot",
+             {{"protocolVersion", 1}, {"workspaceFolder", {{"uri", "file:///unregistered"}}}});
+    CHECK(std::holds_alternative<hlsl_intellisense::json_rpc::ErrorResponse>(rejected));
+    REQUIRE(selected_file_group.is_object());
+    const Json draft = {{"root", true},
+                        {"unknown.extra", {{"retained", true}}},
+                        {"hlsl.fileGroups", Json::array({selected_file_group})}};
+    const auto preview = call(7, "hlsl/configurationAuthoring",
+                              {{"protocolVersion", 1},
+                               {"workspaceFolder", {{"uri", folder_uri}}},
+                               {"draftContent", draft.dump()}});
+    const auto& preview_result = std::get<hlsl_intellisense::json_rpc::Response>(preview).result;
+    CHECK(preview_result["preview"]["valid"] == true);
+    CHECK(Json::parse(preview_result["preview"]["content"]
+                          .get<std::string>())["unknown.extra"]["retained"] == true);
+    client.disconnect();
+    (void)call(8, "hlsl/capture/stop", {{"protocolVersion", 1}, {"token", credentials["token"]}});
+    CHECK_FALSE(std::filesystem::exists(directory.path() / "shadertoolsconfig.json"));
+#ifndef _WIN32
+    if (had_runtime) {
+        REQUIRE(setenv("XDG_RUNTIME_DIR", prior_runtime.c_str(), 1) == 0);
+    } else {
+        REQUIRE(unsetenv("XDG_RUNTIME_DIR") == 0);
+    }
+#endif
+}
+
+TEST_CASE("Capture preview merges selected variants and host pipeline without writing",
+          "[lsp][capture-preview]") {
+    TestDirectory directory;
+    const auto vertex = directory.path() / "Shaders" / "vs.hlsl";
+    const auto pixel = directory.path() / "Shaders" / "ps.hlsl";
+    std::filesystem::create_directories(vertex.parent_path());
+    {
+        std::ofstream output{vertex};
+        output << "float4 MainVS() : SV_Position { return 0; }\n";
+    }
+    {
+        std::ofstream output{pixel};
+        output << "float4 MainPS() : SV_Target { return 1; }\n";
+    }
+#ifndef _WIN32
+    TestDirectory runtime;
+    const std::string prior_runtime =
+        std::getenv("XDG_RUNTIME_DIR") ? std::getenv("XDG_RUNTIME_DIR") : "";
+    const bool had_runtime = std::getenv("XDG_RUNTIME_DIR") != nullptr;
+    REQUIRE(chmod(runtime.path().c_str(), 0700) == 0);
+    REQUIRE(setenv("XDG_RUNTIME_DIR", runtime.path().string().c_str(), 1) == 0);
+#endif
+    const auto folder_uri =
+        hlsl_intellisense::workspace::DocumentUri::from_path(directory.path().string()).uri();
+    hlsl_intellisense::lsp::Server server{[](const auto&) {}};
+    const auto call = [&server](std::int64_t id, std::string method, Json params) {
+        const auto response = server.handle(hlsl_intellisense::json_rpc::Request{
+            .id = id, .method = std::move(method), .params = std::move(params)});
+        REQUIRE(response.has_value());
+        return *response;
+    };
+    (void)call(1, "initialize",
+               {{"workspaceFolders", Json::array({{{"uri", folder_uri}, {"name", "test"}}})}});
+    (void)server.handle(hlsl_intellisense::json_rpc::Notification{.method = "initialized",
+                                                                  .params = Json::object()});
+    const auto started = call(2, "hlsl/capture/start", {{"protocolVersion", 1}});
+    const auto& credentials = std::get<hlsl_intellisense::json_rpc::Response>(started).result;
+    const std::string session_id = credentials["sessionId"];
+    CHECK(session_id.starts_with("sha256:"));
+    hlsl_intellisense::capture::Client client;
+    REQUIRE(client.connect(credentials["endpoint"], credentials["token"]));
+    hlsl_intellisense::capture::Invocation vs;
+    vs.source = vertex.string();
+    vs.entry_point = "MainVS";
+    vs.target_profile = "vs_6_6";
+    vs.pipeline = "Forward";
+    vs.stage = "vertex";
+    auto ps = vs;
+    ps.source = pixel.string();
+    ps.entry_point = "MainPS";
+    ps.target_profile = "ps_6_6";
+    ps.stage = "pixel";
+    ps.defines = {{"QUALITY", "HIGH"}};
+    for (const auto& event : {vs, ps, ps}) {
+        bool queued = false;
+        for (int attempt = 0; attempt < 100 && !queued; ++attempt) {
+            queued = client.report(event);
+            if (!queued) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        }
+        REQUIRE(queued);
+    }
+    bool received = false;
+    for (int attempt = 0; attempt < 200; ++attempt) {
+        const auto status = call(3, "hlsl/capture/status", {{"protocolVersion", 1}});
+        if (std::get<hlsl_intellisense::json_rpc::Response>(status).result["accepted"] == 3) {
+            received = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    REQUIRE(received);
+    const auto snapshot =
+        call(4, "hlsl/capture/snapshot",
+             {{"protocolVersion", 1}, {"workspaceFolder", {{"uri", folder_uri}}}});
+    const auto& captured = std::get<hlsl_intellisense::json_rpc::Response>(snapshot).result;
+    CHECK(captured["sessionId"] == session_id);
+    REQUIRE(captured["entries"].size() == 2);
+    std::string vs_id;
+    std::string ps_id;
+    for (const auto& entry : captured["entries"]) {
+        if (entry["invocation"]["stage"] == "vertex") {
+            vs_id = entry["id"];
+        } else {
+            ps_id = entry["id"];
+            CHECK(entry["count"] == 2);
+        }
+    }
+    REQUIRE(!vs_id.empty());
+    REQUIRE(!ps_id.empty());
+    const std::string existing = R"({"unknown.capture":{"retain":true}})";
+    const Json params = {
+        {"protocolVersion", 1},
+        {"sessionId", session_id},
+        {"workspaceFolder", {{"uri", folder_uri}}},
+        {"selectedEntryIds", Json::array({vs_id, ps_id})},
+        {"existingConfiguration",
+         {{"content", existing},
+          {"version", 7},
+          {"contentHash", hlsl_intellisense::workspace::configuration_content_hash(existing)}}},
+        {"variants", Json::array({{{"entryId", ps_id}, {"name", "Pixel High"}}})},
+        {"pipelines", Json::array({{{"name", "Forward"},
+                                    {"source", "host"},
+                                    {"stages", {{"vertex", vs_id}, {"pixel", ps_id}}}}})}};
+    const auto merged = call(5, "hlsl/capture/preview", params);
+    REQUIRE(std::holds_alternative<hlsl_intellisense::json_rpc::Response>(merged));
+    const auto& result = std::get<hlsl_intellisense::json_rpc::Response>(merged).result;
+    CHECK(result["protocolVersion"] == 1);
+    CHECK(result["sessionId"] == session_id);
+    CHECK(result["configuration"]["expectedContentVersion"] == 7);
+    CHECK(result["configuration"]["expectedContentHash"] ==
+          hlsl_intellisense::workspace::configuration_content_hash(existing));
+    CHECK(result["preview"]["valid"] == true);
+    const auto merged_json = Json::parse(result["preview"]["content"].get<std::string>());
+    CHECK(merged_json["unknown.capture"]["retain"] == true);
+    CHECK(merged_json["hlsl.variants"][0]["name"] == "Pixel High");
+    CHECK(merged_json["hlsl.pipelines"][0]["stages"]["pixel"]["variant"] == "Pixel High");
+    CHECK_FALSE(std::filesystem::exists(directory.path() / "shadertoolsconfig.json"));
+    auto invalid = params;
+    invalid["selectedEntryIds"] = Json::array({vs_id, vs_id});
+    CHECK(std::holds_alternative<hlsl_intellisense::json_rpc::ErrorResponse>(
+        call(6, "hlsl/capture/preview", invalid)));
+    invalid = params;
+    invalid["pipelines"][0]["source"] = "host";
+    invalid["pipelines"][0]["name"] = "Other";
+    CHECK(std::holds_alternative<hlsl_intellisense::json_rpc::ErrorResponse>(
+        call(7, "hlsl/capture/preview", invalid)));
+    invalid = params;
+    invalid["existingConfiguration"]["contentHash"] = "sha256:stale";
+    CHECK(std::holds_alternative<hlsl_intellisense::json_rpc::ErrorResponse>(
+        call(8, "hlsl/capture/preview", invalid)));
+    auto low = ps;
+    low.defines = {{"QUALITY", "LOW"}};
+    low.pipeline = "Other";
+    bool queued = false;
+    for (int attempt = 0; attempt < 100 && !queued; ++attempt) {
+        queued = client.report(low);
+        if (!queued) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+    REQUIRE(queued);
+    received = false;
+    for (int attempt = 0; attempt < 200; ++attempt) {
+        const auto state = call(9, "hlsl/capture/status", {{"protocolVersion", 1}});
+        if (std::get<hlsl_intellisense::json_rpc::Response>(state).result["accepted"] == 4) {
+            received = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    REQUIRE(received);
+    const auto more = call(10, "hlsl/capture/snapshot", {{"protocolVersion", 1}});
+    const auto& more_entries =
+        std::get<hlsl_intellisense::json_rpc::Response>(more).result["entries"];
+    CHECK(
+        std::ranges::any_of(more_entries, [&](const auto& entry) { return entry["id"] == ps_id; }));
+    const auto match = std::ranges::find_if(
+        more_entries, [](const auto& entry) { return entry["invocation"]["pipeline"] == "Other"; });
+    REQUIRE(match != more_entries.end());
+    const std::string low_id = (*match)["id"];
+    auto expanded = params;
+    expanded["selectedEntryIds"].push_back(low_id);
+    CHECK(std::holds_alternative<hlsl_intellisense::json_rpc::ErrorResponse>(
+        call(11, "hlsl/capture/preview", expanded)));
+    expanded["variants"].push_back({{"entryId", low_id}, {"name", "Pixel Low"}});
+    expanded["pipelines"][0]["name"] = "Explicit Group";
+    expanded["pipelines"][0]["source"] = "user";
+    expanded["pipelines"][0]["stages"]["pixel"] = low_id;
+    const auto explicit_group = call(12, "hlsl/capture/preview", expanded);
+    REQUIRE(std::holds_alternative<hlsl_intellisense::json_rpc::Response>(explicit_group));
+    const auto& grouped = std::get<hlsl_intellisense::json_rpc::Response>(explicit_group).result;
+    CHECK(grouped["preview"]["valid"] == true);
+    const auto grouped_json = Json::parse(grouped["preview"]["content"].get<std::string>());
+    CHECK(grouped_json["hlsl.variants"].size() == 2);
+    CHECK(grouped_json["hlsl.pipelines"][0]["stages"]["pixel"]["variant"] == "Pixel Low");
+    expanded["pipelines"][0]["stages"]["vertex"] = low_id;
+    CHECK(std::holds_alternative<hlsl_intellisense::json_rpc::ErrorResponse>(
+        call(13, "hlsl/capture/preview", expanded)));
+    expanded = params;
+    expanded["selectedEntryIds"].push_back(low_id);
+    expanded["variants"].push_back({{"entryId", low_id}, {"name", "Pixel High"}});
+    CHECK(std::holds_alternative<hlsl_intellisense::json_rpc::ErrorResponse>(
+        call(14, "hlsl/capture/preview", expanded)));
+    invalid = params;
+    invalid["selectedEntryIds"] = Json::array();
+    for (int index = 0; index < 65; ++index) {
+        invalid["selectedEntryIds"].push_back(vs_id);
+    }
+    CHECK(std::holds_alternative<hlsl_intellisense::json_rpc::ErrorResponse>(
+        call(15, "hlsl/capture/preview", invalid)));
+    invalid = params;
+    invalid["selectedEntryIds"] = Json::array({"sha256:" + std::string(64, '0')});
+    CHECK(std::holds_alternative<hlsl_intellisense::json_rpc::ErrorResponse>(
+        call(16, "hlsl/capture/preview", invalid)));
+    invalid = params;
+    invalid["existingConfiguration"]["content"] = "{";
+    invalid["existingConfiguration"]["contentHash"] =
+        hlsl_intellisense::workspace::configuration_content_hash("{");
+    const auto malformed = call(17, "hlsl/capture/preview", invalid);
+    REQUIRE(std::holds_alternative<hlsl_intellisense::json_rpc::Response>(malformed));
+    const auto& broken = std::get<hlsl_intellisense::json_rpc::Response>(malformed).result;
+    CHECK(broken["preview"]["valid"] == false);
+    CHECK(broken["preview"]["errors"][0]["field"] == "$");
+    CHECK(broken["preview"]["content"] == "{");
+    invalid = params;
+    invalid["existingConfiguration"]["content"] = std::string(2U * 1024U * 1024U + 1U, ' ');
+    invalid["existingConfiguration"].erase("contentHash");
+    CHECK(std::holds_alternative<hlsl_intellisense::json_rpc::ErrorResponse>(
+        call(18, "hlsl/capture/preview", invalid)));
+    auto generated = ps;
+    generated.source = "virtual:/generated/ps.hlsl";
+    queued = false;
+    for (int attempt = 0; attempt < 100 && !queued; ++attempt) {
+        queued = client.report(generated);
+        if (!queued) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+    REQUIRE(queued);
+    received = false;
+    for (int attempt = 0; attempt < 200; ++attempt) {
+        const auto state = call(19, "hlsl/capture/status", {{"protocolVersion", 1}});
+        if (std::get<hlsl_intellisense::json_rpc::Response>(state).result["accepted"] == 5) {
+            received = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    REQUIRE(received);
+    const auto with_virtual = call(20, "hlsl/capture/snapshot", {{"protocolVersion", 1}});
+    const auto& virtual_entries =
+        std::get<hlsl_intellisense::json_rpc::Response>(with_virtual).result["entries"];
+    const auto virtual_match = std::ranges::find_if(virtual_entries, [](const auto& entry) {
+        return entry["invocation"]["source"] == "virtual:/generated/ps.hlsl";
+    });
+    REQUIRE(virtual_match != virtual_entries.end());
+    invalid = params;
+    invalid["selectedEntryIds"] = Json::array({(*virtual_match)["id"]});
+    invalid.erase("variants");
+    invalid.erase("pipelines");
+    CHECK(std::holds_alternative<hlsl_intellisense::json_rpc::ErrorResponse>(
+        call(21, "hlsl/capture/preview", invalid)));
+    client.disconnect();
+    (void)call(22, "hlsl/capture/stop", {{"protocolVersion", 1}, {"token", credentials["token"]}});
+    CHECK(std::holds_alternative<hlsl_intellisense::json_rpc::ErrorResponse>(
+        call(23, "hlsl/capture/preview", params)));
+#ifndef _WIN32
+    if (had_runtime) {
+        REQUIRE(setenv("XDG_RUNTIME_DIR", prior_runtime.c_str(), 1) == 0);
+    } else {
+        REQUIRE(unsetenv("XDG_RUNTIME_DIR") == 0);
+    }
+#endif
+}
+
+TEST_CASE("Configuration authoring protocol discovers DXC entry points without writing files",
+          "[lsp][configuration-authoring][integration]") {
+    TestDirectory directory;
+    const auto shader = directory.path() / "Shaders" / "compute.hlsl";
+    std::filesystem::create_directories(shader.parent_path());
+    {
+        std::ofstream stream{shader};
+        REQUIRE(stream);
+        stream << "[numthreads(1, 1, 1)]\n"
+                  "void Main(uint3 id : SV_DispatchThreadID) { uint sink = id.x; }\n";
+    }
+    const auto folder_uri =
+        hlsl_intellisense::workspace::DocumentUri::from_path(directory.path().string()).uri();
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    hlsl_intellisense::lsp::Server server{[&notifications](const auto& notification_value) {
+        notifications.push_back(notification_value);
+    }};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1},
+        .method = "initialize",
+        .params = Json{{"workspaceFolders",
+                        Json::array({Json{{"uri", folder_uri}, {"name", "workspace"}}})}}}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+
+    const auto response = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{2},
+        .method = "hlsl/configurationAuthoring",
+        .params = Json{{"protocolVersion", 1}, {"workspaceFolder", {{"uri", folder_uri}}}}});
+    REQUIRE(response.has_value());
+    const auto* result = std::get_if<hlsl_intellisense::json_rpc::Response>(&*response);
+    if (const auto* error = std::get_if<hlsl_intellisense::json_rpc::ErrorResponse>(&*response)) {
+        FAIL(error->error.message);
+    }
+    REQUIRE(result != nullptr);
+    CHECK(result->result["protocolVersion"] == 1);
+    CHECK(result->result["configuration"]["exists"] == false);
+    CHECK(result->result["configuration"]["expectedContentHash"].is_null());
+    REQUIRE(result->result["discovery"]["files"].size() == 1);
+    const auto& file = result->result["discovery"]["files"][0];
+    CHECK(file["relativePath"] == "Shaders/compute.hlsl");
+    REQUIRE(file["entryPoints"].size() == 1);
+    CHECK(file["entryPoints"][0]["name"] == "Main");
+    CHECK(file["entryPoints"][0]["targetProfiles"] == Json::array({"cs_6_6"}));
+    CHECK(file["entryPoints"][0]["state"] == "resolved");
+    CHECK(result->result["preview"]["valid"] == true);
+    CHECK(result->result["preview"]["changed"] == true);
+    CHECK_FALSE(std::filesystem::exists(directory.path() / "shadertoolsconfig.json"));
+    const auto preview = Json::parse(result->result["preview"]["content"].get<std::string>());
+    CHECK(preview["hlsl.fileGroups"][0]["hlsl.entryPoint"] == "Main");
+    CHECK(preview["hlsl.fileGroups"][0]["hlsl.targetProfile"] == "cs_6_6");
+}
+
+TEST_CASE("Configuration authoring protocol rejects stale hashes and reports malformed content",
+          "[lsp][configuration-authoring]") {
+    TestDirectory directory;
+    const auto folder_uri =
+        hlsl_intellisense::workspace::DocumentUri::from_path(directory.path().string()).uri();
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    hlsl_intellisense::lsp::Server server{[&notifications](const auto& notification_value) {
+        notifications.push_back(notification_value);
+    }};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1},
+        .method = "initialize",
+        .params = Json{{"workspaceFolders",
+                        Json::array({Json{{"uri", folder_uri}, {"name", "workspace"}}})}}}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+
+    const auto stale = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{2},
+        .method = "hlsl/configurationAuthoring",
+        .params = Json{{"protocolVersion", 1},
+                       {"workspaceFolder", {{"uri", folder_uri}}},
+                       {"existingConfiguration",
+                        {{"content", "{}"}, {"version", 7}, {"contentHash", "sha256:stale"}}}}});
+    REQUIRE(stale.has_value());
+    const auto* stale_error = std::get_if<hlsl_intellisense::json_rpc::ErrorResponse>(&*stale);
+    REQUIRE(stale_error != nullptr);
+    CHECK(stale_error->error.code == hlsl_intellisense::json_rpc::invalid_params_code);
+
+    const std::string malformed = R"({"hlsl.variants":[)";
+    const auto malformed_response = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{3},
+        .method = "hlsl/configurationAuthoring",
+        .params = Json{{"protocolVersion", 1},
+                       {"workspaceFolder", {{"uri", folder_uri}}},
+                       {"existingConfiguration", {{"content", malformed}, {"version", 8}}}}});
+    REQUIRE(malformed_response.has_value());
+    const auto* malformed_result =
+        std::get_if<hlsl_intellisense::json_rpc::Response>(&*malformed_response);
+    REQUIRE(malformed_result != nullptr);
+    CHECK(malformed_result->result["configuration"]["exists"] == false);
+    CHECK(malformed_result->result["configuration"]["expectedContentVersion"] == 8);
+    CHECK(malformed_result->result["preview"]["valid"] == false);
+    CHECK(malformed_result->result["preview"]["content"] == malformed);
+    CHECK(malformed_result->result["preview"]["errors"][0]["field"] == "$");
+
+    const auto repaired = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{5},
+        .method = "hlsl/configurationAuthoring",
+        .params = Json{{"protocolVersion", 1},
+                       {"workspaceFolder", {{"uri", folder_uri}}},
+                       {"existingConfiguration", {{"content", malformed}, {"version", 8}}},
+                       {"draftContent", R"({"root":true,"hlsl.languageVersion":"2021"})"}}});
+    REQUIRE(repaired.has_value());
+    const auto* repaired_result = std::get_if<hlsl_intellisense::json_rpc::Response>(&*repaired);
+    REQUIRE(repaired_result != nullptr);
+    CHECK(repaired_result->result["preview"]["valid"] == true);
+    CHECK(repaired_result->result["configuration"]["expectedContentVersion"] == 8);
+    CHECK(repaired_result->result["configuration"]["expectedContentHash"] ==
+          hlsl_intellisense::workspace::configuration_content_hash(malformed));
+
+    hlsl_intellisense::json_rpc::CancellationToken cancellation;
+    cancellation.cancel();
+    const auto cancelled = server.handle(
+        hlsl_intellisense::json_rpc::Request{
+            .id = std::int64_t{4},
+            .method = "hlsl/configurationAuthoring",
+            .params = Json{{"protocolVersion", 1}, {"workspaceFolder", {{"uri", folder_uri}}}}},
+        cancellation);
+    const auto* cancelled_error =
+        std::get_if<hlsl_intellisense::json_rpc::ErrorResponse>(&cancelled);
+    REQUIRE(cancelled_error != nullptr);
+    CHECK(cancelled_error->error.code == hlsl_intellisense::json_rpc::request_cancelled_code);
 }
 
 TEST_CASE("Server exposes memory layouts through hover and the custom protocol",
@@ -2317,6 +2915,31 @@ TEST_CASE("Protocol tracing redacts source text by default", "[lsp][protocol][tr
     CHECK(error_stream.str().find("trace receive") != std::string::npos);
     CHECK(error_stream.str().find("trace send") != std::string::npos);
     CHECK_FALSE(read_frames(output_stream.str()).empty());
+}
+
+TEST_CASE("Capture tokens remain redacted even in explicit source traces",
+          "[lsp][capture][protocol][trace]") {
+    const std::string token(64, 'a');
+    std::string input;
+    input += frame(request(1, "initialize"));
+    input += frame(notification("initialized"));
+    input += frame(request(2, "hlsl/capture/stop", {{"protocolVersion", 1}, {"token", token}}));
+    input += frame(request_without_params(3, "shutdown"));
+    input += frame(notification_without_params("exit"));
+    std::istringstream input_stream{input};
+    std::ostringstream output_stream;
+    std::ostringstream error_stream;
+    hlsl_intellisense::lsp::ServerOptions options;
+    options.protocol_trace = true;
+    options.trace_source = true;
+    REQUIRE(hlsl_intellisense::lsp::run(input_stream, output_stream, error_stream, options) == 0);
+    const auto messages = read_frames(output_stream.str());
+    const auto stopped = std::ranges::find_if(
+        messages, [](const auto& value) { return value.value("id", Json{}) == 2; });
+    REQUIRE(stopped != messages.end());
+    CHECK(error_stream.str().find(token) == std::string::npos);
+    CHECK(error_stream.str().find("<redacted>") != std::string::npos);
+    CHECK(error_stream.str().find("trace receive") != std::string::npos);
 }
 
 TEST_CASE("Server applies workspace configuration to DXC analysis",

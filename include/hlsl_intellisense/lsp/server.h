@@ -2,8 +2,10 @@
 
 #include <hlsl_intellisense/analysis/manager.h>
 #include <hlsl_intellisense/analysis/pipeline_validation.h>
+#include <hlsl_intellisense/capture/session.h>
 #include <hlsl_intellisense/json_rpc/dispatcher.h>
 #include <hlsl_intellisense/workspace/configuration.h>
+#include <hlsl_intellisense/workspace/configuration_authoring.h>
 #include <hlsl_intellisense/workspace/document_store.h>
 
 #include <atomic>
@@ -195,6 +197,10 @@ class Server final {
     enum class State { uninitialized, awaiting_initialized, running, shutdown };
 
     void register_handlers();
+    [[nodiscard]] json_rpc::Json capture_session(std::string_view action,
+                                                 const std::optional<json_rpc::Json>& params);
+    [[nodiscard]] json_rpc::Json capture_preview(const std::optional<json_rpc::Json>& params,
+                                                 const json_rpc::RequestContext& context);
     [[nodiscard]] json_rpc::Json initialize(const std::optional<json_rpc::Json>& params);
     [[nodiscard]] json_rpc::Json shutdown(const std::optional<json_rpc::Json>& params);
     [[nodiscard]] json_rpc::Json completion(const std::optional<json_rpc::Json>& params,
@@ -247,6 +253,9 @@ class Server final {
     [[nodiscard]] json_rpc::Json semantic_tokens(const std::optional<json_rpc::Json>& params,
                                                  const json_rpc::RequestContext& context);
     [[nodiscard]] json_rpc::Json dxc_runtime(const std::optional<json_rpc::Json>& params);
+    [[nodiscard]] json_rpc::Json
+    configuration_authoring(const std::optional<json_rpc::Json>& params,
+                            const json_rpc::RequestContext& context);
     [[nodiscard]] json_rpc::Json variants(const std::optional<json_rpc::Json>& params);
     [[nodiscard]] json_rpc::Json code_action(const std::optional<json_rpc::Json>& params,
                                              const json_rpc::RequestContext& context);
@@ -405,6 +414,8 @@ class Server final {
     Logger logger_;
     ServerOptions options_;
     analysis::Manager analysis_;
+    capture::Session capture_;
+    std::mutex capture_mutex_;
     std::mutex analysis_submission_mutex_;
     mutable std::mutex state_mutex_;
     std::unordered_map<std::string, std::string> configuration_watch_states_;
@@ -435,6 +446,7 @@ class Server final {
     // repeatedly on every reanalysis or configuration event.
     std::optional<std::string> reported_variant_issue_key_;
     std::atomic_bool exit_requested_{};
+    std::atomic_uint64_t configuration_authoring_sequence_{};
     bool clean_shutdown_{};
 };
 

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
@@ -254,6 +255,224 @@ internal sealed class HlslLanguageClient :
                 "hlsl/variants",
                 parameters,
                 cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    internal async Task<ConfigurationAuthoringResultModel> GetConfigurationAuthoringAsync(
+        ConfigurationAuthoringRequestModel request,
+        CancellationToken cancellationToken)
+    {
+        if (request?.ProtocolVersion != 1 ||
+            string.IsNullOrWhiteSpace(request.WorkspaceFolder?.Uri))
+        {
+            throw new ArgumentException(
+                "Configuration authoring requires protocol version 1 and a workspace URI.",
+                nameof(request));
+        }
+        var currentRpc = Volatile.Read(ref rpc);
+        if (currentRpc == null)
+        {
+            await rpcAttached.WaitAsync(cancellationToken).ConfigureAwait(false);
+            currentRpc = Volatile.Read(ref rpc);
+            if (currentRpc == null)
+            {
+                throw new InvalidOperationException(
+                    "The HLSL language server connection is unavailable.");
+            }
+        }
+        var parameters = new Dictionary<string, object>
+        {
+            ["protocolVersion"] = request.ProtocolVersion,
+            ["workspaceFolder"] = new { uri = request.WorkspaceFolder.Uri },
+        };
+        if (request.ExistingConfiguration != null)
+        {
+            parameters["existingConfiguration"] = new
+            {
+                content = request.ExistingConfiguration.Content,
+                version = request.ExistingConfiguration.Version,
+                contentHash = request.ExistingConfiguration.ContentHash,
+            };
+        }
+        if (request.Selections != null)
+        {
+            parameters["selections"] = request.Selections.Select(selection => new
+            {
+                relativePath = selection.RelativePath,
+                entryPoint = selection.EntryPoint,
+                targetProfile = selection.TargetProfile,
+            }).ToArray();
+        }
+        if (request.DraftContent != null)
+        {
+            parameters["draftContent"] = request.DraftContent;
+        }
+        return await currentRpc.InvokeWithParameterObjectAsync<ConfigurationAuthoringResultModel>(
+                "hlsl/configurationAuthoring",
+                parameters,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    internal async Task<ConfigurationAuthoringModel> GetConfigurationAuthoringAsync(
+        Uri workspaceFolderUri,
+        string existingContent,
+        long? existingVersion,
+        string existingContentHash,
+        IReadOnlyList<ConfigurationSelectionModel> selections,
+        string draftContent,
+        CancellationToken cancellationToken)
+    {
+        if (workspaceFolderUri == null)
+        {
+            throw new ArgumentNullException(nameof(workspaceFolderUri));
+        }
+        return await GetConfigurationAuthoringAsync(
+                new ConfigurationAuthoringRequestModel
+                {
+                    WorkspaceFolder = new ConfigurationWorkspaceFolderModel
+                    {
+                        Uri = workspaceFolderUri.AbsoluteUri,
+                    },
+                    ExistingConfiguration =
+                        existingContent != null || existingVersion.HasValue ||
+                        existingContentHash != null
+                            ? new ConfigurationExistingModel
+                            {
+                                Content = existingContent,
+                                Version = existingVersion,
+                                ContentHash = existingContentHash,
+                            }
+                            : null,
+                    Selections = selections,
+                    DraftContent = draftContent,
+                },
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    internal Task<ConfigurationAuthoringModel> GetConfigurationAuthoringAsync(
+        Uri workspaceFolderUri,
+        string existingContent,
+        long? existingVersion,
+        string existingContentHash,
+        IReadOnlyList<ConfigurationSelectionModel> selections,
+        CancellationToken cancellationToken)
+        => GetConfigurationAuthoringAsync(
+            workspaceFolderUri, existingContent, existingVersion,
+            existingContentHash, selections, null, cancellationToken);
+
+    private async Task<JsonRpc> CaptureRpcAsync(CancellationToken cancellationToken)
+    {
+        var currentRpc = Volatile.Read(ref rpc);
+        if (currentRpc == null)
+        {
+            await rpcAttached.WaitAsync(cancellationToken).ConfigureAwait(false);
+            currentRpc = Volatile.Read(ref rpc);
+        }
+        return currentRpc ?? throw new InvalidOperationException(
+            "The HLSL language server connection is unavailable.");
+    }
+
+    internal async Task<RuntimeCaptureStartModel> StartRuntimeCaptureAsync(
+        CancellationToken cancellationToken)
+    {
+        var currentRpc = await CaptureRpcAsync(cancellationToken).ConfigureAwait(false);
+        return await currentRpc.InvokeWithParameterObjectAsync<RuntimeCaptureStartModel>(
+                "hlsl/capture/start",
+                new { protocolVersion = 1 },
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    internal async Task<RuntimeCaptureSnapshotModel> SnapshotRuntimeCaptureAsync(
+        Uri workspaceFolder,
+        CancellationToken cancellationToken)
+    {
+        var currentRpc = await CaptureRpcAsync(cancellationToken).ConfigureAwait(false);
+        return await currentRpc.InvokeWithParameterObjectAsync<RuntimeCaptureSnapshotModel>(
+                "hlsl/capture/snapshot",
+                workspaceFolder == null
+                    ? (object)new { protocolVersion = 1 }
+                    : new
+                    {
+                        protocolVersion = 1,
+                        workspaceFolder = new { uri = workspaceFolder.AbsoluteUri },
+                    },
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    internal async Task StopRuntimeCaptureAsync(
+        string token,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(token))
+        {
+            throw new ArgumentException("No capture session token is available.", nameof(token));
+        }
+        var currentRpc = await CaptureRpcAsync(cancellationToken).ConfigureAwait(false);
+        await currentRpc.InvokeWithParameterObjectAsync<JObject>(
+                "hlsl/capture/stop",
+                new { protocolVersion = 1, token },
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    internal async Task<RuntimeCapturePreviewModel> PreviewRuntimeCaptureAsync(
+        Uri workspaceFolder,
+        string sessionId,
+        IReadOnlyList<string> selectedEntryIds,
+        string existingContent,
+        long? existingVersion,
+        string existingContentHash,
+        IReadOnlyList<RuntimeCaptureVariantModel> variants,
+        IReadOnlyList<RuntimeCapturePipelineModel> pipelines,
+        CancellationToken cancellationToken)
+    {
+        if (workspaceFolder == null || string.IsNullOrWhiteSpace(sessionId) ||
+            selectedEntryIds == null || selectedEntryIds.Count == 0)
+        {
+            throw new ArgumentException(
+                "Capture preview requires a workspace, session, and selected entries.");
+        }
+        var parameters = new Dictionary<string, object>
+        {
+            ["protocolVersion"] = 1,
+            ["workspaceFolder"] = new { uri = workspaceFolder.AbsoluteUri },
+            ["sessionId"] = sessionId,
+            ["selectedEntryIds"] = selectedEntryIds,
+        };
+        if (existingContent != null || existingVersion.HasValue ||
+            existingContentHash != null)
+        {
+            parameters["existingConfiguration"] = new
+            {
+                content = existingContent,
+                version = existingVersion,
+                contentHash = existingContentHash,
+            };
+        }
+        if (variants != null && variants.Count > 0)
+        {
+            parameters["variants"] = variants.Select(variant => new
+            {
+                entryId = variant.EntryId,
+                name = variant.Name,
+            }).ToArray();
+        }
+        if (pipelines != null && pipelines.Count > 0)
+        {
+            parameters["pipelines"] = pipelines.Select(pipeline => new
+            {
+                name = pipeline.Name,
+                source = pipeline.Source,
+                stages = pipeline.Stages,
+            }).ToArray();
+        }
+        var currentRpc = await CaptureRpcAsync(cancellationToken).ConfigureAwait(false);
+        return await currentRpc.InvokeWithParameterObjectAsync<RuntimeCapturePreviewModel>(
+                "hlsl/capture/preview", parameters, cancellationToken)
             .ConfigureAwait(false);
     }
 

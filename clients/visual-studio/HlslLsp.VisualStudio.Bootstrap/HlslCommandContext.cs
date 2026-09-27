@@ -59,6 +59,10 @@ internal static class HlslCommandIds
     internal const int OpenEffectiveConfiguration = 0x0108;
     internal const int MacroExpansion = 0x0109;
     internal const int Status = 0x010a;
+    internal const int AuthorConfiguration = 0x010b;
+    internal const int StartRuntimeCapture = 0x010c;
+    internal const int ReviewRuntimeCapture = 0x010d;
+    internal const int StopRuntimeCapture = 0x010e;
 
     internal static HlslCommandKind CommandKind(int commandId)
     {

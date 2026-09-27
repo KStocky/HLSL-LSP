@@ -104,9 +104,28 @@ public sealed class CommandTablePackagingTests
             "ShowComputeVisualization",
             "HlslContextInspectionGroup",
             "Compute Visualization");
-        Assert.DoesNotContain(
-            commandTable.Descendants(ns + "Parent"),
-            element => (string)element.Attribute("id") == "IDM_VS_MENU_TOOLS");
+        var author = Assert.Single(
+            commandTable.Descendants(ns + "Button"),
+            element => (string)element.Attribute("id") == "AuthorConfiguration");
+        Assert.Equal(
+            "HlslToolsGroup",
+            (string)author.Element(ns + "Parent")?.Attribute("id"));
+        Assert.Contains(
+            commandTable.Descendants(ns + "CommandPlacement"),
+            element => (string)element.Attribute("id") == "AuthorConfiguration" &&
+                       (string)element.Element(ns + "Parent")?.Attribute("id") ==
+                           "HlslContextGroup");
+        foreach (var id in new[]
+                 {
+                     "StartRuntimeCapture", "ReviewRuntimeCapture", "StopRuntimeCapture",
+                 })
+        {
+            Assert.Contains(
+                commandTable.Descendants(ns + "Button"),
+                element => (string)element.Attribute("id") == id &&
+                    (string)element.Element(ns + "Parent")?.Attribute("id") ==
+                        "HlslToolsGroup");
+        }
     }
 
 

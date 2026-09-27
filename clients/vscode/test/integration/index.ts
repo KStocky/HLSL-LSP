@@ -3,6 +3,7 @@ import { TextEncoder } from "node:util";
 
 import * as vscode from "vscode";
 
+import { openConfigurationDraft } from "../../src/configurationAuthoring";
 import type { HlslExtensionApi } from "../../src/extension";
 
 const timeoutMilliseconds = 30_000;
@@ -61,6 +62,21 @@ export async function run(): Promise<void> {
     vscode.extensions.getExtension<HlslExtensionApi>("KStocky.hlsl-lsp");
   assert(extension, "The HLSL-LSP extension was not found");
   const api = await extension.activate();
+  const registeredCommands = await vscode.commands.getCommands(true);
+  assert(registeredCommands.includes("hlsl.createConfiguration"));
+  assert(registeredCommands.includes("hlsl.editConfiguration"));
+  assert(registeredCommands.includes("hlsl.validateConfigurationDraft"));
+  assert(registeredCommands.includes("hlsl.cancelConfigurationDraft"));
+  for (const command of [
+    "hlsl.startCapture",
+    "hlsl.stopCapture",
+    "hlsl.captureStatus",
+    "hlsl.reviewCapture",
+    "hlsl.validateCaptureDraft",
+    "hlsl.cancelCaptureDraft",
+  ]) {
+    assert(registeredCommands.includes(command));
+  }
 
   const valid = await openFixture("valid.hlsl");
   await waitFor("server initialization", () =>
@@ -698,4 +714,36 @@ export async function run(): Promise<void> {
   await waitFor("clean language-server shutdown", () =>
     api.state === "stopped" ? true : undefined,
   );
+
+  const fixtureFolder = vscode.workspace.workspaceFolders?.[0];
+  assert(fixtureFolder);
+  const configurationUri = vscode.Uri.joinPath(
+    fixtureFolder.uri,
+    "shadertoolsconfig.json",
+  );
+  const originalContent = '{"hlsl":{}}\n';
+  await vscode.workspace.fs.writeFile(
+    configurationUri,
+    new TextEncoder().encode(originalContent),
+  );
+  try {
+    const original = await vscode.workspace.openTextDocument(configurationUri);
+    const draft = await openConfigurationDraft('{"hlsl":');
+    assert(draft.isUntitled);
+    assert.equal(draft.languageId, "json");
+    const draftEdit = new vscode.WorkspaceEdit();
+    draftEdit.insert(draft.uri, draft.positionAt(draft.getText().length), "{}");
+    assert(await vscode.workspace.applyEdit(draftEdit));
+    assert.equal(draft.getText(), '{"hlsl":{}');
+    assert.equal(original.getText(), originalContent);
+    assert.equal(original.isDirty, false);
+    assert.equal(
+      new TextDecoder().decode(
+        await vscode.workspace.fs.readFile(configurationUri),
+      ),
+      originalContent,
+    );
+  } finally {
+    await vscode.workspace.fs.delete(configurationUri);
+  }
 }

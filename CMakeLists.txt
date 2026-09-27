@@ -23,6 +23,26 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(Catch2 nlohmann_json)
 include(Dxc)
 
+add_library(hlsl_capture STATIC
+    src/capture/capture.cpp
+    src/capture/session.cpp)
+target_sources(hlsl_capture PUBLIC FILE_SET HEADERS BASE_DIRS include FILES
+    include/hlsl_intellisense/capture/capture.h
+    include/hlsl_intellisense/capture/session.h)
+target_link_libraries(hlsl_capture PUBLIC hlsl_project_options
+    PRIVATE nlohmann_json::nlohmann_json)
+if(WIN32)
+    target_link_libraries(hlsl_capture PRIVATE bcrypt advapi32)
+endif()
+hlsl_enable_clang_tidy(hlsl_capture)
+add_executable(hlsl-capture-example EXCLUDE_FROM_ALL examples/capture-client/main.cpp)
+target_link_libraries(hlsl-capture-example PRIVATE hlsl_capture)
+hlsl_enable_clang_tidy(hlsl-capture-example)
+install(TARGETS hlsl_capture
+    ARCHIVE DESTINATION lib
+    FILE_SET HEADERS DESTINATION include
+    COMPONENT SDK)
+
 add_library(hlsl_json_rpc STATIC)
 target_sources(hlsl_json_rpc
     PRIVATE
@@ -46,6 +66,7 @@ add_library(hlsl_workspace STATIC)
 target_sources(hlsl_workspace
     PRIVATE
         src/workspace/configuration.cpp
+        src/workspace/configuration_authoring.cpp
         src/workspace/document_store.cpp
         src/workspace/document_uri.cpp
         src/workspace/include_resolver.cpp
@@ -55,6 +76,7 @@ target_sources(hlsl_workspace
         BASE_DIRS include
         FILES
             include/hlsl_intellisense/workspace/configuration.h
+            include/hlsl_intellisense/workspace/configuration_authoring.h
             include/hlsl_intellisense/workspace/document_store.h
             include/hlsl_intellisense/workspace/document_uri.h
             include/hlsl_intellisense/workspace/error.h
@@ -114,6 +136,7 @@ target_sources(hlsl_lsp
             include/hlsl_intellisense/lsp/server.h)
 target_link_libraries(hlsl_lsp
     PUBLIC
+        hlsl_capture
         hlsl_dxc
         hlsl_json_rpc
         hlsl_workspace
@@ -185,6 +208,7 @@ if(BUILD_TESTING)
     hlsl_copy_dxc_runtime(hlsl-intellisense-tests)
 
     add_executable(hlsl-lsp-tests
+        tests/capture/capture_tests.cpp
         tests/analysis/manager_tests.cpp
         tests/analysis/pipeline_validation_tests.cpp
         tests/analysis/scheduler_tests.cpp
@@ -215,6 +239,7 @@ if(BUILD_TESTING)
     hlsl_enable_clang_tidy(hlsl-json-rpc-tests)
 
     add_executable(hlsl-workspace-tests
+        tests/workspace/configuration_authoring_tests.cpp
         tests/workspace/configuration_tests.cpp
         tests/workspace/document_store_tests.cpp
         tests/workspace/document_uri_tests.cpp
@@ -223,7 +248,8 @@ if(BUILD_TESTING)
     target_link_libraries(hlsl-workspace-tests PRIVATE
         Catch2::Catch2WithMain
         hlsl_workspace
-        hlsl_project_options)
+        hlsl_project_options
+        nlohmann_json::nlohmann_json)
     hlsl_enable_clang_tidy(hlsl-workspace-tests)
 
     add_executable(hlsl-analysis-benchmark

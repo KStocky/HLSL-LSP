@@ -6,6 +6,7 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.VisualStudio;
@@ -88,6 +89,7 @@ public sealed class HlslBootstrapPackage : AsyncPackage
     private readonly Guid outputPaneGuid =
         new("8d86d93c-945f-463e-b6c1-c92666261d25");
     private long statusRequestGeneration;
+    private RuntimeCaptureStartModel captureSession;
     public const string PackageGuidString = "5ac7fbe7-1b9f-45eb-bca6-ffb9ae1ab67f";
 
     private static readonly object Gate = new();
@@ -265,8 +267,9 @@ public sealed class HlslBootstrapPackage : AsyncPackage
             switch (action)
             {
                 case FirstRunInfoBar.ConfigurationAction:
-                    VsShellUtilities.OpenBrowser(
-                        "https://github.com/KStocky/HLSL-LSP/blob/main/docs/shadertoolsconfig.md");
+                    JoinableTaskFactory.RunAsync(
+                            () => AuthorConfigurationAsync(DisposalToken))
+                        .FileAndForget("HlslLsp/FirstRunAuthorConfiguration");
                     break;
                 case FirstRunInfoBar.VariantAction:
                     JoinableTaskFactory.RunAsync(
@@ -337,6 +340,26 @@ public sealed class HlslBootstrapPackage : AsyncPackage
                 new CommandID(commandSet, HlslCommandIds.OpenEffectiveConfiguration));
         openEffectiveConfiguration.BeforeQueryStatus += OnHlslContextCommandBeforeQueryStatus;
         commands.AddCommand(openEffectiveConfiguration);
+        commands.AddCommand(new OleMenuCommand(
+            (_, _) => JoinableTaskFactory.RunAsync(
+                    () => AuthorConfigurationAsync(DisposalToken))
+                .FileAndForget("HlslLsp/AuthorConfiguration"),
+            new CommandID(commandSet, HlslCommandIds.AuthorConfiguration)));
+        commands.AddCommand(new OleMenuCommand(
+            (_, _) => JoinableTaskFactory.RunAsync(
+                    () => StartRuntimeCaptureAsync(DisposalToken))
+                .FileAndForget("HlslLsp/StartRuntimeCapture"),
+            new CommandID(commandSet, HlslCommandIds.StartRuntimeCapture)));
+        commands.AddCommand(new OleMenuCommand(
+            (_, _) => JoinableTaskFactory.RunAsync(
+                    () => ReviewRuntimeCaptureAsync(DisposalToken))
+                .FileAndForget("HlslLsp/ReviewRuntimeCapture"),
+            new CommandID(commandSet, HlslCommandIds.ReviewRuntimeCapture)));
+        commands.AddCommand(new OleMenuCommand(
+            (_, _) => JoinableTaskFactory.RunAsync(
+                    () => StopRuntimeCaptureAsync(DisposalToken))
+                .FileAndForget("HlslLsp/StopRuntimeCapture"),
+            new CommandID(commandSet, HlslCommandIds.StopRuntimeCapture)));
         var compilationInfo = new OleMenuCommand(
                 (_, _) => JoinableTaskFactory.RunAsync(
                         () => ShowCompilationInfoAsync(DisposalToken))
@@ -3293,6 +3316,495 @@ public sealed class HlslBootstrapPackage : AsyncPackage
             return;
         }
         await OpenEffectiveConfigurationAsync(uri, cancellationToken);
+    }
+
+    private async Task<string> GetConfigurationWorkspaceAsync(
+        CancellationToken cancellationToken)
+    {
+        await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+        var solution = await GetServiceAsync(typeof(SVsSolution)) as IVsSolution
+            ?? throw new InvalidOperationException(
+                "Visual Studio's solution service is unavailable.");
+        ErrorHandler.ThrowOnFailure(
+            solution.GetSolutionInfo(out var directory, out _, out _));
+        if (string.IsNullOrWhiteSpace(directory) ||
+            !Directory.Exists(directory))
+        {
+            throw new InvalidOperationException(
+                "Open a solution or folder before creating shadertoolsconfig.json.");
+        }
+        return Path.GetFullPath(directory);
+    }
+
+    private async Task<ITextBuffer> OpenConfigurationBufferAsync(
+        string path,
+        CancellationToken cancellationToken)
+    {
+        await EnsureCallHierarchyEditorServicesAsync(cancellationToken);
+        await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+        if (TryGetOpenCallHierarchyBuffer(new Uri(path)) is { } openBuffer)
+        {
+            return openBuffer;
+        }
+        VsShellUtilities.OpenDocument(this, path, Guid.Empty, out _, out _, out _);
+        return TryGetOpenCallHierarchyBuffer(new Uri(path))
+            ?? throw new InvalidOperationException(
+                "Visual Studio could not open the configuration editor buffer.");
+    }
+
+    private async Task AuthorConfigurationAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            var directory = await GetConfigurationWorkspaceAsync(cancellationToken);
+            var path = Path.Combine(directory, "shadertoolsconfig.json");
+            var workspaceUri = new Uri(
+                directory.TrimEnd(Path.DirectorySeparatorChar) +
+                Path.DirectorySeparatorChar);
+            var exists = File.Exists(path);
+            var buffer = exists
+                ? await OpenConfigurationBufferAsync(path, cancellationToken)
+                : null;
+            var original = buffer?.CurrentSnapshot;
+            var content = original?.GetText();
+            var version = (long?)original?.Version.VersionNumber;
+            var hash = content == null ? null : ConfigurationEditGuard.Hash(content);
+
+            var discovery = await ConfigurationAuthoringBridge.RequestAsync(
+                workspaceUri, content, version, hash, null, cancellationToken);
+            if (discovery == null)
+            {
+                await ShowInformationAsync(
+                    "Open an HLSL document to start the language server before authoring configuration.",
+                    cancellationToken);
+                return;
+            }
+            await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+            var selectionDialog = new ConfigurationSelectionDialog(discovery);
+            if (selectionDialog.ShowModal() != true)
+            {
+                return;
+            }
+            var result = await ConfigurationAuthoringBridge.RequestAsync(
+                workspaceUri,
+                content,
+                version,
+                hash,
+                selectionDialog.SelectedSelections,
+                cancellationToken);
+            if (result?.Configuration == null || result.Preview == null)
+            {
+                throw new InvalidOperationException(
+                    "The configuration authoring response is incomplete.");
+            }
+            if (!Uri.TryCreate(result.Configuration.Uri, UriKind.Absolute, out var resultUri) ||
+                !resultUri.IsFile ||
+                !string.Equals(
+                    Path.GetFullPath(resultUri.LocalPath),
+                    path,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(
+                    "The configuration authoring response targeted an unexpected file.");
+            }
+            await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+            while (true)
+            {
+                var draftDialog = new ConfigurationDraftDialog(result);
+                if (draftDialog.ShowModal() != true)
+                {
+                    return;
+                }
+                if (Encoding.UTF8.GetByteCount(draftDialog.DraftContent) > 2 * 1024 * 1024)
+                {
+                    await ShowInformationAsync(
+                        "Configuration drafts must be smaller than 2 MiB.",
+                        cancellationToken);
+                    continue;
+                }
+                if (result.Preview.Valid &&
+                    string.Equals(
+                        draftDialog.DraftContent,
+                        result.Preview.Content,
+                        StringComparison.Ordinal))
+                {
+                    break;
+                }
+                result = await ConfigurationAuthoringBridge.RequestDraftAsync(
+                    workspaceUri,
+                    content,
+                    version,
+                    hash,
+                    selectionDialog.SelectedSelections,
+                    draftDialog.DraftContent,
+                    cancellationToken);
+                if (result?.Configuration == null || result.Preview == null ||
+                    !Uri.TryCreate(result.Configuration.Uri, UriKind.Absolute, out resultUri) ||
+                    !resultUri.IsFile ||
+                    !string.Equals(
+                        Path.GetFullPath(resultUri.LocalPath),
+                        path,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidOperationException(
+                        "The draft validation response targeted an unexpected file.");
+                }
+                await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+                if (result.Preview.Valid)
+                {
+                    break;
+                }
+            }
+            if (new ConfigurationPreviewDialog(result).ShowModal() != true)
+            {
+                return;
+            }
+            await ApplyConfigurationPreviewAsync(result, directory, path, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception error)
+        {
+            ActivityLog.LogError(nameof(HlslBootstrapPackage), error.ToString());
+            await ShowInformationAsync(
+                "Could not author HLSL project configuration: " + error.Message,
+                cancellationToken);
+        }
+    }
+
+    private async Task<bool> ApplyConfigurationPreviewAsync(
+        ConfigurationAuthoringModel result,
+        string directory,
+        string path,
+        CancellationToken cancellationToken)
+    {
+        if (result?.Preview?.Valid != true || !result.Preview.Changed ||
+            result.Configuration == null ||
+            !Uri.TryCreate(result.Configuration.Uri, UriKind.Absolute, out var resultUri) ||
+            !resultUri.IsFile ||
+            !string.Equals(
+                Path.GetFullPath(resultUri.LocalPath), path,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                "The configuration preview is invalid or targets an unexpected file.");
+        }
+        var stillExists = File.Exists(path);
+        var currentBuffer = stillExists
+            ? await OpenConfigurationBufferAsync(path, cancellationToken)
+            : null;
+        var current = currentBuffer?.CurrentSnapshot;
+        if (ConfigurationEditGuard.IsStale(
+                result.Configuration.Exists,
+                result.Configuration.ExpectedContentVersion,
+                result.Configuration.ExpectedContentHash,
+                stillExists,
+                current == null ? null : (long?)current.Version.VersionNumber,
+                current?.GetText() ?? string.Empty))
+        {
+            await ShowInformationAsync(
+                "shadertoolsconfig.json changed after the preview. No changes were applied; run the command again.",
+                cancellationToken);
+            return false;
+        }
+        await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+        if (currentBuffer != null)
+        {
+            using var edit = currentBuffer.CreateEdit();
+            edit.Replace(0, current.Length, result.Preview.Content);
+            edit.Apply();
+        }
+        else
+        {
+            var temporaryPath = Path.Combine(
+                directory,
+                ".shadertoolsconfig-" + Guid.NewGuid().ToString("N") + ".tmp");
+            try
+            {
+                using (var stream = new FileStream(
+                           temporaryPath, FileMode.CreateNew, FileAccess.Write,
+                           FileShare.None, 4096, true))
+                using (var writer = new StreamWriter(stream, new UTF8Encoding(false)))
+                {
+                    await writer.WriteAsync(result.Preview.Content);
+                    await writer.FlushAsync();
+                }
+                File.Move(temporaryPath, path);
+            }
+            finally
+            {
+                if (File.Exists(temporaryPath))
+                {
+                    File.Delete(temporaryPath);
+                }
+            }
+        }
+        await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+        VsShellUtilities.OpenDocument(this, path, Guid.Empty, out _, out _, out _);
+        return true;
+    }
+
+    private async Task StartRuntimeCaptureAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (!RuntimeCaptureBridge.IsAvailable)
+            {
+                await ShowInformationAsync(
+                    "Open an HLSL document to start the language server before starting capture.",
+                    cancellationToken);
+                return;
+            }
+            var current = await RuntimeCaptureBridge.SnapshotAsync(
+                null, cancellationToken);
+            if (current.Active)
+            {
+                if (captureSession == null ||
+                    !string.Equals(
+                        captureSession.SessionId, current.SessionId,
+                        StringComparison.Ordinal))
+                {
+                    captureSession = null;
+                    await ShowInformationAsync(
+                        "Another capture session is already active. Review it from the " +
+                        "window that started it rather than replacing its private token.",
+                        cancellationToken);
+                    return;
+                }
+                await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+                new RuntimeCaptureCredentialsDialog(captureSession).ShowModal();
+                return;
+            }
+            captureSession = null;
+            captureSession = await RuntimeCaptureBridge.StartAsync(cancellationToken);
+            if (string.IsNullOrWhiteSpace(captureSession?.Endpoint) ||
+                string.IsNullOrWhiteSpace(captureSession.Token))
+            {
+                throw new InvalidOperationException(
+                    "The capture server did not provide a local endpoint and session token.");
+            }
+            await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+            new RuntimeCaptureCredentialsDialog(captureSession).ShowModal();
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception error)
+        {
+            await ShowInformationAsync(
+                "Could not start HLSL compilation capture: " + error.Message,
+                cancellationToken);
+        }
+    }
+
+    private async Task StopRuntimeCaptureAsync(CancellationToken cancellationToken)
+    {
+        if (captureSession == null)
+        {
+            await ShowInformationAsync(
+                "No capture session started by this Visual Studio window is available.",
+                cancellationToken);
+            return;
+        }
+        try
+        {
+            await RuntimeCaptureBridge.StopAsync(
+                captureSession.Token, cancellationToken);
+            captureSession = null;
+            await ShowInformationAsync(
+                "Compilation capture stopped; the in-memory snapshot has been discarded.",
+                cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception error)
+        {
+            await ShowInformationAsync(
+                "Could not stop HLSL compilation capture: " + error.Message,
+                cancellationToken);
+        }
+    }
+
+    private async Task ReviewRuntimeCaptureAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            var directory = await GetConfigurationWorkspaceAsync(cancellationToken);
+            var path = Path.Combine(directory, "shadertoolsconfig.json");
+            var workspaceUri = new Uri(
+                directory.TrimEnd(Path.DirectorySeparatorChar) +
+                Path.DirectorySeparatorChar);
+            var snapshot = await RuntimeCaptureBridge.SnapshotAsync(
+                workspaceUri, cancellationToken);
+            if (!snapshot.Active || string.IsNullOrWhiteSpace(snapshot.SessionId))
+            {
+                captureSession = null;
+                await ShowInformationAsync(
+                    "No active compilation capture session exists. Start Capture first.",
+                    cancellationToken);
+                return;
+            }
+            if (snapshot.Entries == null || snapshot.Entries.Count == 0)
+            {
+                await ShowInformationAsync(
+                    "No compilations have been captured yet. Run the project with the " +
+                    "opt-in capture SDK connected, then review again.",
+                    cancellationToken);
+                return;
+            }
+            await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+            var reviewDialog = new RuntimeCaptureReviewDialog(snapshot);
+            if (reviewDialog.ShowModal() != true)
+            {
+                return;
+            }
+            var selected = reviewDialog.SelectedEntries;
+            var variants = new List<RuntimeCaptureVariantModel>();
+            var named = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var choice in reviewDialog.VariantNames)
+            {
+                if (!named.Add(choice.Value))
+                {
+                    await ShowInformationAsync(
+                        "Variant names must be unique. Review the capture again.",
+                        cancellationToken);
+                    return;
+                }
+                variants.Add(new RuntimeCaptureVariantModel
+                {
+                    EntryId = choice.Key,
+                    Name = choice.Value,
+                });
+            }
+            var duplicatedFiles = new HashSet<string>(
+                selected.GroupBy(
+                        entry => entry.Review.Selection.RelativePath,
+                        StringComparer.OrdinalIgnoreCase)
+                    .Where(group => group.Count() > 1)
+                    .Select(group => group.Key),
+                StringComparer.OrdinalIgnoreCase);
+            foreach (var entry in selected)
+            {
+                if (!duplicatedFiles.Contains(entry.Review.Selection.RelativePath) ||
+                    reviewDialog.VariantNames.ContainsKey(entry.Id))
+                {
+                    continue;
+                }
+                while (true)
+                {
+                    var dialog = new RuntimeCaptureVariantDialog(entry);
+                    if (dialog.ShowModal() != true)
+                    {
+                        return;
+                    }
+                    if (named.Add(dialog.VariantName))
+                    {
+                        variants.Add(new RuntimeCaptureVariantModel
+                        {
+                            EntryId = entry.Id,
+                            Name = dialog.VariantName,
+                        });
+                        break;
+                    }
+                    await ShowInformationAsync(
+                        "Variant names must be unique. Choose another name.",
+                        cancellationToken);
+                }
+            }
+            var exists = File.Exists(path);
+            var buffer = exists
+                ? await OpenConfigurationBufferAsync(path, cancellationToken)
+                : null;
+            var original = buffer?.CurrentSnapshot;
+            var content = original?.GetText();
+            var version = (long?)original?.Version.VersionNumber;
+            var hash = content == null ? null : ConfigurationEditGuard.Hash(content);
+            var proposal = await RuntimeCaptureBridge.PreviewAsync(
+                workspaceUri, snapshot.SessionId,
+                selected.Select(entry => entry.Id).ToArray(),
+                content, version, hash, variants, reviewDialog.Pipelines,
+                cancellationToken);
+            if (proposal?.Preview == null || proposal.Configuration == null)
+            {
+                throw new InvalidOperationException(
+                    "The capture preview response is incomplete.");
+            }
+            if (!proposal.Preview.Valid)
+            {
+                await ShowInformationAsync(
+                    "Captured configuration cannot be merged yet:\n" +
+                    ConfigurationPreviewValidation.FormatErrors(proposal) +
+                    "\nCorrect the reported fields and review this capture again.",
+                    cancellationToken);
+                return;
+            }
+            ConfigurationAuthoringModel validated = proposal;
+            await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+            while (true)
+            {
+                var dialog = new ConfigurationDraftDialog(validated);
+                if (dialog.ShowModal() != true)
+                {
+                    return;
+                }
+                if (Encoding.UTF8.GetByteCount(dialog.DraftContent) > 2 * 1024 * 1024)
+                {
+                    await ShowInformationAsync(
+                        "Configuration drafts must be smaller than 2 MiB.",
+                        cancellationToken);
+                    continue;
+                }
+                if (validated.Preview.Valid &&
+                    string.Equals(
+                        dialog.DraftContent,
+                        validated.Preview.Content,
+                        StringComparison.Ordinal))
+                {
+                    break;
+                }
+                validated = await ConfigurationAuthoringBridge.RequestDraftAsync(
+                    workspaceUri, content, version, hash,
+                    Array.Empty<ConfigurationSelectionModel>(),
+                    dialog.DraftContent, cancellationToken);
+                if (validated?.Preview == null || validated.Configuration == null)
+                {
+                    throw new InvalidOperationException(
+                        "The capture draft validation response is incomplete.");
+                }
+                await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+                if (validated.Preview.Valid)
+                {
+                    break;
+                }
+            }
+            if (new ConfigurationPreviewDialog(validated).ShowModal() != true)
+            {
+                return;
+            }
+            var latest = await RuntimeCaptureBridge.SnapshotAsync(
+                workspaceUri, cancellationToken);
+            if (!latest.Active ||
+                !string.Equals(latest.SessionId, snapshot.SessionId, StringComparison.Ordinal))
+            {
+                await ShowInformationAsync(
+                    "The capture session changed after preview. No configuration was applied.",
+                    cancellationToken);
+                return;
+            }
+            await ApplyConfigurationPreviewAsync(
+                validated, directory, path, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception error)
+        {
+            await ShowInformationAsync(
+                "Could not review HLSL compilation capture: " + error.Message,
+                cancellationToken);
+        }
     }
 
     private async Task OpenEffectiveConfigurationAsync(
