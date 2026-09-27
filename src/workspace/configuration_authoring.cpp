@@ -361,6 +361,64 @@ generate_capture_configuration_preview(const std::filesystem::path& workspace,
                                        const std::optional<std::string>& existing_content,
                                        const std::vector<CapturedConfigurationEntry>& entries,
                                        const std::vector<CapturedPipeline>& pipelines) {
+    if (existing_content) {
+        if (existing_content->size() > 2U * 1024U * 1024U) {
+            return {.content = *existing_content,
+                    .valid = false,
+                    .changed = false,
+                    .errors = {{.code = "capture-limit",
+                                .field = "$",
+                                .message = "Configuration exceeds the 2 MiB limit"}}};
+        }
+        enum class LexicalState { text, string, line_comment, block_comment };
+        LexicalState state = LexicalState::text;
+        bool escaped = false;
+        unsigned depth = 0;
+        for (std::size_t index = 0; index < existing_content->size(); ++index) {
+            const char character = (*existing_content)[index];
+            const char next =
+                index + 1 < existing_content->size() ? (*existing_content)[index + 1] : '\0';
+            if (state == LexicalState::line_comment) {
+                if (character == '\n' || character == '\r') {
+                    state = LexicalState::text;
+                }
+            } else if (state == LexicalState::block_comment) {
+                if (character == '*' && next == '/') {
+                    state = LexicalState::text;
+                    ++index;
+                }
+            } else if (state == LexicalState::string) {
+                if (escaped) {
+                    escaped = false;
+                } else if (character == '\\') {
+                    escaped = true;
+                } else if (character == '"') {
+                    state = LexicalState::text;
+                }
+            } else if (character == '"') {
+                state = LexicalState::string;
+            } else if (character == '/' && next == '/') {
+                state = LexicalState::line_comment;
+                ++index;
+            } else if (character == '/' && next == '*') {
+                state = LexicalState::block_comment;
+                ++index;
+            } else if (character == '{' || character == '[') {
+                if (++depth > 64) {
+                    return {.content = *existing_content,
+                            .valid = false,
+                            .changed = false,
+                            .errors = {{.code = "capture-limit",
+                                        .field = "$",
+                                        .message = "Configuration nesting exceeds 64 levels"}}};
+                }
+            } else if (character == '}' || character == ']') {
+                if (depth != 0) {
+                    --depth;
+                }
+            }
+        }
+    }
     auto base = generate_configuration_preview(workspace, existing_content, {});
     if (!base.valid) {
         return base;

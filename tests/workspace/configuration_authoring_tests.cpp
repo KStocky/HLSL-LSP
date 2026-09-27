@@ -205,6 +205,32 @@ TEST_CASE("Captured preview refuses conflicting groups and reports production va
     CHECK(invalid.errors.front().field == "hlsl.fileGroups[0].hlsl.virtualDirectoryMappings");
 }
 
+TEST_CASE("Capture merge bounds configuration nesting without mistaking comments for structure",
+          "[workspace][capture-preview]") {
+    TestTree tree;
+    tree.file("Shaders/main.hlsl");
+    const std::vector entries{workspace::CapturedConfigurationEntry{
+        .file = tree.path("Shaders/main.hlsl"),
+        .entry_point = "Main",
+        .target_profile = "ps_6_6",
+        .settings_json = R"({"hlsl.entryPoint":"Main","hlsl.targetProfile":"ps_6_6"})",
+        .variant_name = std::nullopt}};
+    const std::string nested = std::string(65, '[') + "0" + std::string(65, ']');
+    const auto rejected = workspace::generate_capture_configuration_preview(
+        tree.path(), std::string{"{\"custom\":"} + nested + "}", entries, {});
+    CHECK_FALSE(rejected.valid);
+    REQUIRE(rejected.errors.size() == 1);
+    CHECK(rejected.errors[0].code == "capture-limit");
+    CHECK(rejected.errors[0].field == "$");
+
+    const std::string commented =
+        "{\"root\":true, // " + std::string(100, '[') + "\n\"custom\":true}";
+    const auto allowed =
+        workspace::generate_capture_configuration_preview(tree.path(), commented, entries, {});
+    REQUIRE(allowed.valid);
+    CHECK(nlohmann::json::parse(allowed.content)["custom"] == true);
+}
+
 TEST_CASE("Configuration preview validation reports production parser fields",
           "[workspace][configuration-authoring]") {
     TestTree tree;

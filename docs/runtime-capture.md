@@ -214,7 +214,8 @@ Existing content and final preview are each limited to 2 MiB. A valid request
 whose existing JSON is malformed, whose existing explicit group/name conflicts
 with the capture, or whose merged content fails the production parser returns
 `preview.valid:false` with field-addressed `{code,field,message}` errors and
-does not overwrite existing content. Unknown properties are retained.
+does not overwrite existing content. Existing JSON nesting beyond 64 levels
+also returns a `capture-limit` preview error. Unknown properties are retained.
 Applying the preview remains an **editor decision**: compare expected version
 and hash with the current buffer, show the entire diff and warnings, obtain
 confirmation, then apply an editor workspace edit. For repairs or further
