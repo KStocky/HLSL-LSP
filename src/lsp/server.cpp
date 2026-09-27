@@ -2651,6 +2651,135 @@ Json Server::shutdown(const std::optional<Json>& params) {
     return nullptr;
 }
 
+namespace {
+Json capture_review(const capture::Invocation& invocation,
+                    const std::optional<std::filesystem::path>& workspace_path) {
+    Json review = {{"eligible", false},
+                   {"requiresConfirmation", true},
+                   {"selection", nullptr},
+                   {"settings", Json::object()},
+                   {"fileGroup", nullptr},
+                   {"warnings", Json::array()},
+                   {"warningCodes", Json::array()}};
+    auto& settings = review["settings"];
+    const auto warn = [&](std::string_view code, std::string_view message) {
+        review["warningCodes"].push_back(code);
+        review["warnings"].push_back(message);
+    };
+    if (!invocation.entry_point.empty()) {
+        settings["hlsl.entryPoint"] = invocation.entry_point;
+    }
+    settings["hlsl.targetProfile"] = invocation.target_profile;
+    if (!invocation.language_version.empty()) {
+        settings["hlsl.languageVersion"] = invocation.language_version;
+    }
+    if (!invocation.include_directories.empty()) {
+        settings["hlsl.additionalIncludeDirectories"] = invocation.include_directories;
+        warn("includeDirectories", "Review include directories relative to the configuration.");
+    }
+    if (!invocation.arguments.empty()) {
+        settings["hlsl.additionalArguments"] = invocation.arguments;
+        warn("arguments", "Review compiler arguments for transient paths and secrets.");
+    }
+    if (!invocation.output_mode.empty()) {
+        warn("outputMode",
+             "Output mode has no configuration field; review compiler arguments manually.");
+    }
+
+    bool conflicting = false;
+    const auto insert_pairs = [&](const auto& pairs, std::string_view key) {
+        if (pairs.empty()) {
+            return;
+        }
+        Json values = Json::object();
+        for (const auto& [name, value] : pairs) {
+            if (name.empty() || (values.contains(name) && values[name] != value)) {
+                conflicting = true;
+            } else {
+                values[name] = value;
+            }
+        }
+        settings[std::string(key)] = std::move(values);
+    };
+    insert_pairs(invocation.defines, "hlsl.preprocessorDefinitions");
+    insert_pairs(invocation.virtual_mappings, "hlsl.virtualDirectoryMappings");
+    if (!invocation.virtual_mappings.empty()) {
+        warn("virtualMappings", "Review virtual mapping targets relative to the configuration.");
+    }
+    if (conflicting) {
+        warn("conflictingKeys",
+             "Conflicting or empty definition/mapping keys require manual resolution.");
+    }
+
+    if (!workspace_path) {
+        warn("workspaceRequired", "Specify workspaceFolder to resolve a disk-backed source.");
+        return review;
+    }
+    if (invocation.source.find("://") != std::string::npos ||
+        invocation.source.starts_with("virtual:")) {
+        warn("logicalIdentity",
+             "Host logical identity is not a verified disk path; select a file manually.");
+        return review;
+    }
+    const auto source = std::filesystem::path{invocation.source};
+    const auto file = (source.is_absolute() ? source : *workspace_path / source).lexically_normal();
+    if (file.generic_string().starts_with("//") ||
+        workspace_path->generic_string().starts_with("//")
+#ifdef _WIN32
+        || GetDriveTypeW(file.root_path().c_str()) == DRIVE_REMOTE ||
+        GetDriveTypeW(workspace_path->root_path().c_str()) == DRIVE_REMOTE
+#endif
+    ) {
+        warn("networkPath", "Network-backed paths are not probed by capture review.");
+        return review;
+    }
+    const auto relative = file.lexically_relative(*workspace_path);
+    if (relative.empty() || relative == "." || relative.is_absolute() ||
+        std::ranges::any_of(relative, [](const auto& component) { return component == ".."; }) ||
+        relative.generic_string().find_first_of("*?[]") != std::string::npos) {
+        warn("outsideWorkspace", "Source is outside the workspace or contains a glob.");
+        return review;
+    }
+    std::error_code error;
+    if (!std::filesystem::is_regular_file(file, error)) {
+        warn("missingFile", "Source is not a verified disk file; select a file manually.");
+        return review;
+    }
+    const auto canonical_file = std::filesystem::canonical(file, error);
+    const auto canonical_workspace = std::filesystem::canonical(*workspace_path, error);
+    const auto resolved = canonical_file.lexically_relative(canonical_workspace);
+    if (error || resolved.empty() || resolved.is_absolute() ||
+        std::ranges::any_of(resolved, [](const auto& component) { return component == ".."; })) {
+        warn("resolvedOutsideWorkspace", "Source resolves outside the workspace.");
+        return review;
+    }
+    for (auto directory = file.parent_path(); directory != *workspace_path;
+         directory = directory.parent_path()) {
+        if (std::filesystem::exists(directory / "shadertoolsconfig.json", error) || error) {
+            warn("nestedConfiguration",
+                 "Source belongs to a nested configuration; choose its workspace explicitly.");
+            return review;
+        }
+        if (directory == directory.parent_path()) {
+            break;
+        }
+    }
+    const auto relative_path = relative.generic_string();
+    review["selection"] = {{"relativePath", relative_path},
+                           {"entryPoint", invocation.entry_point},
+                           {"targetProfile", invocation.target_profile}};
+    if (conflicting || invocation.entry_point.empty()) {
+        warn("entryPointOrSettings",
+             "A file group requires a resolved entry point and unambiguous settings.");
+        return review;
+    }
+    review["fileGroup"] = settings;
+    review["fileGroup"]["files"] = Json::array({relative_path});
+    review["eligible"] = true;
+    return review;
+}
+} // namespace
+
 Json Server::capture_session(std::string_view action, const std::optional<Json>& params) {
     std::scoped_lock capture_lock{capture_mutex_};
     require_running();
@@ -2678,8 +2807,26 @@ Json Server::capture_session(std::string_view action, const std::optional<Json>&
         capture_.stop();
         return {{"protocolVersion", 1}, {"active", false}};
     }
-    if (request.size() != 1) {
-        invalid_params("Capture status/snapshot accepts only protocolVersion");
+    std::optional<std::filesystem::path> review_workspace;
+    if (action == "snapshot" && request.contains("workspaceFolder")) {
+        const auto& folder_value = object_member(request, "workspaceFolder");
+        workspace::DocumentUri folder_uri = [&] {
+            try {
+                return workspace::DocumentUri::from_uri(string_member(folder_value, "uri"));
+            } catch (const workspace::DocumentError& error) {
+                invalid_params(error.what());
+            }
+        }();
+        {
+            std::scoped_lock state_lock{state_mutex_};
+            if (!workspace_folders_.contains(folder_uri.identity())) {
+                invalid_params("workspaceFolder.uri is not an initialized workspace folder");
+            }
+        }
+        review_workspace = std::filesystem::path{folder_uri.path()}.lexically_normal();
+    }
+    if (request.size() != (review_workspace ? 2U : 1U)) {
+        invalid_params("Capture status/snapshot accepts only protocolVersion and workspaceFolder");
     }
     const auto state = capture_.snapshot();
     Json result = {{"protocolVersion", 1},
@@ -2690,8 +2837,10 @@ Json Server::capture_session(std::string_view action, const std::optional<Json>&
     if (action == "snapshot") {
         result["entries"] = Json::array();
         for (const auto& entry : state.entries) {
-            result["entries"].push_back({{"invocation", capture::detail::encode(entry.invocation)},
-                                         {"count", entry.count}});
+            result["entries"].push_back(
+                {{"invocation", capture::detail::encode(entry.invocation)},
+                 {"count", entry.count},
+                 {"review", capture_review(entry.invocation, review_workspace)}});
         }
     }
     return result;

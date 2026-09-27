@@ -22,6 +22,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -285,6 +286,164 @@ TEST_CASE("Capture LSP session methods require explicit start and never edit fil
     const auto stop = call(6, "hlsl/capture/stop", {{"protocolVersion", 1}, {"token", token}});
     REQUIRE(stop.has_value());
     CHECK(std::get<hlsl_intellisense::json_rpc::Response>(*stop).result["active"] == false);
+#ifndef _WIN32
+    if (had_runtime) {
+        REQUIRE(setenv("XDG_RUNTIME_DIR", prior_runtime.c_str(), 1) == 0);
+    } else {
+        REQUIRE(unsetenv("XDG_RUNTIME_DIR") == 0);
+    }
+#endif
+}
+
+TEST_CASE("Capture snapshot projects verified files into review-only configuration fragments",
+          "[lsp][capture]") {
+    TestDirectory directory;
+    const auto shader = directory.path() / "Shaders" / "main.hlsl";
+    std::filesystem::create_directories(shader.parent_path());
+    {
+        std::ofstream output{shader};
+        REQUIRE(output);
+        output << "float4 Main() : SV_Target { return 1; }\n";
+    }
+    TestDirectory outside;
+    const auto external = outside.path() / "other.hlsl";
+    {
+        std::ofstream output{external};
+        REQUIRE(output);
+        output << "float4 Main() : SV_Target { return 1; }\n";
+    }
+#ifndef _WIN32
+    TestDirectory runtime;
+    const std::string prior_runtime =
+        std::getenv("XDG_RUNTIME_DIR") ? std::getenv("XDG_RUNTIME_DIR") : "";
+    const bool had_runtime = std::getenv("XDG_RUNTIME_DIR") != nullptr;
+    REQUIRE(chmod(runtime.path().c_str(), 0700) == 0);
+    REQUIRE(setenv("XDG_RUNTIME_DIR", runtime.path().string().c_str(), 1) == 0);
+#endif
+    const auto folder_uri =
+        hlsl_intellisense::workspace::DocumentUri::from_path(directory.path().string()).uri();
+    hlsl_intellisense::lsp::Server server{[](const auto&) {}};
+    const auto call = [&server](std::int64_t id, std::string method, Json params) {
+        const auto response = server.handle(hlsl_intellisense::json_rpc::Request{
+            .id = id, .method = std::move(method), .params = std::move(params)});
+        REQUIRE(response.has_value());
+        return *response;
+    };
+    (void)call(1, "initialize",
+               {{"workspaceFolders", Json::array({{{"uri", folder_uri}, {"name", "test"}}})}});
+    (void)server.handle(hlsl_intellisense::json_rpc::Notification{.method = "initialized",
+                                                                  .params = Json::object()});
+    const auto started = call(2, "hlsl/capture/start", {{"protocolVersion", 1}});
+    const auto& credentials = std::get<hlsl_intellisense::json_rpc::Response>(started).result;
+    hlsl_intellisense::capture::Client client;
+    REQUIRE(client.connect(credentials["endpoint"], credentials["token"]));
+    const auto enqueue = [&client](const auto& event) {
+        for (int attempt = 0; attempt < 100; ++attempt) {
+            if (client.report(event)) {
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return false;
+    };
+    hlsl_intellisense::capture::Invocation file_event;
+    file_event.source = shader.string();
+    file_event.entry_point = "Main";
+    file_event.target_profile = "ps_6_7";
+    file_event.language_version = "2021";
+    file_event.defines = {{"QUALITY", "high"}};
+    file_event.include_directories = {"Shaders"};
+    file_event.arguments = {"-Zi"};
+    file_event.output_mode = "dxil";
+    REQUIRE(enqueue(file_event));
+    auto virtual_event = file_event;
+    virtual_event.source = "virtual:/generated/main.hlsl";
+    virtual_event.virtual_mappings = {{"/Project", "Shaders"}};
+    REQUIRE(enqueue(virtual_event));
+    auto conflicting_event = file_event;
+    conflicting_event.defines = {{"QUALITY", "high"}, {"QUALITY", "low"}};
+    REQUIRE(enqueue(conflicting_event));
+    auto outside_event = file_event;
+    outside_event.source = external.string();
+    REQUIRE(enqueue(outside_event));
+    bool received = false;
+    for (int attempt = 0; attempt < 200; ++attempt) {
+        const auto state = call(3, "hlsl/capture/status", {{"protocolVersion", 1}});
+        if (std::get<hlsl_intellisense::json_rpc::Response>(state).result["accepted"] == 4) {
+            received = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    REQUIRE(received);
+    const auto unscoped = call(4, "hlsl/capture/snapshot", {{"protocolVersion", 1}});
+    const auto& unscoped_entries =
+        std::get<hlsl_intellisense::json_rpc::Response>(unscoped).result["entries"];
+    REQUIRE(unscoped_entries.size() == 4);
+    for (const auto& entry : unscoped_entries) {
+        CHECK(entry["review"]["eligible"] == false);
+        CHECK(entry["review"]["fileGroup"].is_null());
+        CHECK(entry["review"]["settings"]["hlsl.targetProfile"] == "ps_6_7");
+    }
+    const auto snapshot =
+        call(5, "hlsl/capture/snapshot",
+             {{"protocolVersion", 1}, {"workspaceFolder", {{"uri", folder_uri}}}});
+    const auto& entries =
+        std::get<hlsl_intellisense::json_rpc::Response>(snapshot).result["entries"];
+    REQUIRE(entries.size() == 4);
+    Json selected_file_group;
+    for (const auto& entry : entries) {
+        const auto& review = entry["review"];
+        CHECK(review["requiresConfirmation"] == true);
+        if (entry["invocation"]["source"] == "virtual:/generated/main.hlsl") {
+            CHECK_FALSE(review["eligible"].get<bool>());
+            CHECK(review["selection"].is_null());
+            CHECK(review["fileGroup"].is_null());
+            CHECK(std::ranges::find(review["warningCodes"], "logicalIdentity") !=
+                  review["warningCodes"].end());
+        } else if (entry["invocation"]["source"] == external.string()) {
+            CHECK_FALSE(review["eligible"].get<bool>());
+            CHECK(review["fileGroup"].is_null());
+            CHECK(std::ranges::find(review["warningCodes"], "outsideWorkspace") !=
+                  review["warningCodes"].end());
+        } else if (entry["invocation"]["defines"].size() == 2) {
+            CHECK_FALSE(review["eligible"].get<bool>());
+            CHECK(review["fileGroup"].is_null());
+            CHECK(std::ranges::find(review["warningCodes"], "conflictingKeys") !=
+                  review["warningCodes"].end());
+        } else {
+            CHECK(review["eligible"] == true);
+            CHECK(review["selection"] == Json{{"relativePath", "Shaders/main.hlsl"},
+                                              {"entryPoint", "Main"},
+                                              {"targetProfile", "ps_6_7"}});
+            CHECK(review["fileGroup"]["files"] == Json::array({"Shaders/main.hlsl"}));
+            CHECK(review["fileGroup"]["hlsl.preprocessorDefinitions"]["QUALITY"] == "high");
+            CHECK(review["fileGroup"]["hlsl.additionalArguments"] == Json::array({"-Zi"}));
+            CHECK_FALSE(review["warnings"].empty());
+            CHECK(std::ranges::find(review["warningCodes"], "arguments") !=
+                  review["warningCodes"].end());
+            selected_file_group = review["fileGroup"];
+        }
+    }
+    const auto rejected =
+        call(6, "hlsl/capture/snapshot",
+             {{"protocolVersion", 1}, {"workspaceFolder", {{"uri", "file:///unregistered"}}}});
+    CHECK(std::holds_alternative<hlsl_intellisense::json_rpc::ErrorResponse>(rejected));
+    REQUIRE(selected_file_group.is_object());
+    const Json draft = {{"root", true},
+                        {"unknown.extra", {{"retained", true}}},
+                        {"hlsl.fileGroups", Json::array({selected_file_group})}};
+    const auto preview = call(7, "hlsl/configurationAuthoring",
+                              {{"protocolVersion", 1},
+                               {"workspaceFolder", {{"uri", folder_uri}}},
+                               {"draftContent", draft.dump()}});
+    const auto& preview_result = std::get<hlsl_intellisense::json_rpc::Response>(preview).result;
+    CHECK(preview_result["preview"]["valid"] == true);
+    CHECK(Json::parse(preview_result["preview"]["content"]
+                          .get<std::string>())["unknown.extra"]["retained"] == true);
+    client.disconnect();
+    (void)call(8, "hlsl/capture/stop", {{"protocolVersion", 1}, {"token", credentials["token"]}});
+    CHECK_FALSE(std::filesystem::exists(directory.path() / "shadertoolsconfig.json"));
 #ifndef _WIN32
     if (had_runtime) {
         REQUIRE(setenv("XDG_RUNTIME_DIR", prior_runtime.c_str(), 1) == 0);

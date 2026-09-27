@@ -56,7 +56,7 @@ All methods require an initialized server and `{"protocolVersion":1}`.
 | --- | --- | --- |
 | `hlsl/capture/start` | none | `{protocolVersion, endpoint, token}` |
 | `hlsl/capture/status` | none | `{protocolVersion, active, accepted, rejected, overflow}` |
-| `hlsl/capture/snapshot` | none | status plus `entries: [{invocation, count}]` |
+| `hlsl/capture/snapshot` | optional `workspaceFolder: {uri}` (initialized folder) | status plus `entries: [{invocation, count, review}]` |
 | `hlsl/capture/stop` | `token` returned by start | `{protocolVersion:1, active:false}` |
 
 Starting again revokes the previous token and clears the snapshot. Stop,
@@ -67,8 +67,73 @@ Snapshot results may themselves contain sensitive paths, defines, or arguments:
 do not forward them to telemetry or untrusted extensions. The editor should
 filter transient/generated values and require explicit user selection, naming,
 preview, and confirmation before requesting edits from the shared
-configuration-authoring API. **The backend does not yet merge captured
-selections into configuration previews**; these must be reviewed separately.
+configuration-authoring API.
+
+For each entry, `review` contains a bounded, read-only projection:
+
+```json
+{
+  "eligible": true,
+  "requiresConfirmation": true,
+  "selection": {
+    "relativePath": "Shaders/Materials/wood.hlsl",
+    "entryPoint": "MainPS",
+    "targetProfile": "ps_6_7"
+  },
+  "settings": {
+    "hlsl.entryPoint": "MainPS",
+    "hlsl.targetProfile": "ps_6_7",
+    "hlsl.languageVersion": "2021",
+    "hlsl.preprocessorDefinitions": {"QUALITY": "HIGH"},
+    "hlsl.additionalIncludeDirectories": ["Shaders/Includes"],
+    "hlsl.virtualDirectoryMappings": {"/Project": "Shaders"},
+    "hlsl.additionalArguments": ["-Zi"]
+  },
+  "fileGroup": {
+    "files": ["Shaders/Materials/wood.hlsl"],
+    "hlsl.entryPoint": "MainPS",
+    "hlsl.targetProfile": "ps_6_7",
+    "hlsl.languageVersion": "2021",
+    "hlsl.preprocessorDefinitions": {"QUALITY": "HIGH"},
+    "hlsl.additionalIncludeDirectories": ["Shaders/Includes"],
+    "hlsl.virtualDirectoryMappings": {"/Project": "Shaders"},
+    "hlsl.additionalArguments": ["-Zi"]
+  },
+  "warningCodes": ["includeDirectories", "arguments", "virtualMappings"],
+  "warnings": [
+    "Review include directories relative to the configuration.",
+    "Review compiler arguments for transient paths and secrets.",
+    "Review virtual mapping targets relative to the configuration."
+  ]
+}
+```
+
+Without `workspaceFolder`, `settings` is still populated, but `eligible` is
+false and `selection`/`fileGroup` are null. A file group is offered only for
+an existing regular source file lexically *and canonically* inside the selected
+workspace, not in a nested configuration, with nonempty entry point and no
+conflicting/empty definition or mapping keys. Logical/in-memory identities,
+missing files, paths outside the workspace, network-backed paths, and ambiguous keys remain raw
+entries with warnings; the server never guesses a disk location. Definitions
+are strings as captured. `outputMode` and pipeline/stage correlation remain
+only on the raw invocation: the configuration schema has no output-mode field,
+and pipeline relationships/names must be chosen by the user.
+`warningCodes` is stable for client decisions; `warnings` is display text in
+the same order. Possible codes are `includeDirectories`, `arguments`,
+`outputMode`, `virtualMappings`, `conflictingKeys`, `workspaceRequired`,
+`logicalIdentity`, `networkPath`, `outsideWorkspace`, `missingFile`,
+`resolvedOutsideWorkspace`, `nestedConfiguration`, and `entryPointOrSettings`.
+
+`eligible` does **not** mean the settings were validated for a particular
+workspace. A client should fetch `hlsl/configurationAuthoring`'s preview,
+show/filter/select the captured `fileGroup` fragments, merge selected fragments
+into the preview JSON while retaining existing/unknown properties, and pass
+the edited JSON as `draftContent` to `hlsl/configurationAuthoring` for production
+validation. The response's `preview.valid`, `configuration.expectedContentHash`,
+and editor document version must be checked before explicitly applying the
+preview. A `review.selection` is advisory: do not put it in discovery
+`selections` unless DXC discovery also returned that exact candidate.
+**No automatic captured-selection merge or configuration write occurs.**
 
 ## Local wire protocol and limits
 
