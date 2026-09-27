@@ -1,5 +1,6 @@
 #include <hlsl_intellisense/lsp/server.h>
 
+#include "../capture/wire.h"
 #include <hlsl_intellisense/json_rpc/framing.h>
 #include <hlsl_intellisense/workspace/configuration.h>
 #include <hlsl_intellisense/workspace/configuration_authoring.h>
@@ -2312,6 +2313,10 @@ Server::Server(NotificationSender sender, Logger logger, ServerOptions options,
 Server::~Server() {
     cancel_all_requests();
     {
+        std::scoped_lock capture_lock{capture_mutex_};
+        capture_.stop();
+    }
+    {
         std::scoped_lock state_lock{state_mutex_};
         state_ = State::shutdown;
     }
@@ -2406,6 +2411,11 @@ void Server::register_handlers() {
                                          [this](const auto& params, const auto& context) {
                                              return configuration_authoring(params, context);
                                          });
+    for (const std::string_view action : {"start", "stop", "status", "snapshot"}) {
+        dispatcher_.register_request_handler(
+            "hlsl/capture/" + std::string(action),
+            [this, action](const auto& params) { return capture_session(action, params); });
+    }
     dispatcher_.register_request_handler("hlsl/variants",
                                          [this](const auto& params) { return variants(params); });
     dispatcher_.register_request_handler(
@@ -2634,7 +2644,57 @@ Json Server::shutdown(const std::optional<Json>& params) {
         clean_shutdown_ = true;
     }
     analysis_.shutdown();
+    {
+        std::scoped_lock capture_lock{capture_mutex_};
+        capture_.stop();
+    }
     return nullptr;
+}
+
+Json Server::capture_session(std::string_view action, const std::optional<Json>& params) {
+    std::scoped_lock capture_lock{capture_mutex_};
+    require_running();
+    const auto& request = object_params(params);
+    if (!request.contains("protocolVersion") || !request["protocolVersion"].is_number_integer() ||
+        request["protocolVersion"] != capture::protocol_version) {
+        invalid_params("Unsupported capture protocolVersion");
+    }
+    if (action == "start") {
+        if (request.size() != 1) {
+            invalid_params("Capture start accepts only protocolVersion");
+        }
+        if (!capture_.start()) {
+            throw HandlerError{json_rpc::internal_error_code,
+                               "Private capture endpoint unavailable"};
+        }
+        const auto state = capture_.snapshot();
+        return {{"protocolVersion", 1}, {"endpoint", state.endpoint}, {"token", capture_.token()}};
+    }
+    if (action == "stop") {
+        if (request.size() != 2 || !request.contains("token") || !request["token"].is_string() ||
+            request["token"] != capture_.token() || capture_.token().empty()) {
+            invalid_params("Stale capture session");
+        }
+        capture_.stop();
+        return {{"protocolVersion", 1}, {"active", false}};
+    }
+    if (request.size() != 1) {
+        invalid_params("Capture status/snapshot accepts only protocolVersion");
+    }
+    const auto state = capture_.snapshot();
+    Json result = {{"protocolVersion", 1},
+                   {"active", state.active},
+                   {"accepted", state.accepted},
+                   {"rejected", state.rejected},
+                   {"overflow", state.overflow}};
+    if (action == "snapshot") {
+        result["entries"] = Json::array();
+        for (const auto& entry : state.entries) {
+            result["entries"].push_back({{"invocation", capture::detail::encode(entry.invocation)},
+                                         {"count", entry.count}});
+        }
+    }
+    return result;
 }
 
 Json Server::completion(const std::optional<Json>& params,
@@ -7363,6 +7423,24 @@ void trace_payload(std::ostream& errors, std::mutex& mutex, std::string_view dir
     }
     if (!include_source) {
         value = summarize_protocol_payload(value, payload.size());
+    } else {
+        const auto redact_tokens = [&](const auto& self, Json& node) -> void {
+            if (node.is_object()) {
+                if (node.contains("token")) {
+                    node["token"] = "<redacted>";
+                }
+                for (auto& [key, child] : node.items()) {
+                    if (key != "token") {
+                        self(self, child);
+                    }
+                }
+            } else if (node.is_array()) {
+                for (auto& child : node) {
+                    self(self, child);
+                }
+            }
+        };
+        redact_tokens(redact_tokens, value);
     }
     errors << "HLSL-LSP trace " << direction << ": " << value.dump() << '\n';
 }

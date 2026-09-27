@@ -23,6 +23,23 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(Catch2 nlohmann_json)
 include(Dxc)
 
+add_library(hlsl_capture STATIC
+    src/capture/capture.cpp
+    src/capture/session.cpp)
+target_sources(hlsl_capture PUBLIC FILE_SET HEADERS BASE_DIRS include FILES
+    include/hlsl_intellisense/capture/capture.h
+    include/hlsl_intellisense/capture/session.h)
+target_link_libraries(hlsl_capture PUBLIC hlsl_project_options
+    PRIVATE nlohmann_json::nlohmann_json)
+if(WIN32)
+    target_link_libraries(hlsl_capture PRIVATE bcrypt advapi32)
+endif()
+hlsl_enable_clang_tidy(hlsl_capture)
+install(TARGETS hlsl_capture
+    ARCHIVE DESTINATION lib
+    FILE_SET HEADERS DESTINATION include
+    COMPONENT SDK)
+
 add_library(hlsl_json_rpc STATIC)
 target_sources(hlsl_json_rpc
     PRIVATE
@@ -116,6 +133,7 @@ target_sources(hlsl_lsp
             include/hlsl_intellisense/lsp/server.h)
 target_link_libraries(hlsl_lsp
     PUBLIC
+        hlsl_capture
         hlsl_dxc
         hlsl_json_rpc
         hlsl_workspace
@@ -187,6 +205,7 @@ if(BUILD_TESTING)
     hlsl_copy_dxc_runtime(hlsl-intellisense-tests)
 
     add_executable(hlsl-lsp-tests
+        tests/capture/capture_tests.cpp
         tests/analysis/manager_tests.cpp
         tests/analysis/pipeline_validation_tests.cpp
         tests/analysis/scheduler_tests.cpp

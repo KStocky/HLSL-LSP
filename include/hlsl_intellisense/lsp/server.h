@@ -2,6 +2,7 @@
 
 #include <hlsl_intellisense/analysis/manager.h>
 #include <hlsl_intellisense/analysis/pipeline_validation.h>
+#include <hlsl_intellisense/capture/session.h>
 #include <hlsl_intellisense/json_rpc/dispatcher.h>
 #include <hlsl_intellisense/workspace/configuration.h>
 #include <hlsl_intellisense/workspace/configuration_authoring.h>
@@ -196,6 +197,8 @@ class Server final {
     enum class State { uninitialized, awaiting_initialized, running, shutdown };
 
     void register_handlers();
+    [[nodiscard]] json_rpc::Json capture_session(std::string_view action,
+                                                 const std::optional<json_rpc::Json>& params);
     [[nodiscard]] json_rpc::Json initialize(const std::optional<json_rpc::Json>& params);
     [[nodiscard]] json_rpc::Json shutdown(const std::optional<json_rpc::Json>& params);
     [[nodiscard]] json_rpc::Json completion(const std::optional<json_rpc::Json>& params,
@@ -409,6 +412,8 @@ class Server final {
     Logger logger_;
     ServerOptions options_;
     analysis::Manager analysis_;
+    capture::Session capture_;
+    std::mutex capture_mutex_;
     std::mutex analysis_submission_mutex_;
     mutable std::mutex state_mutex_;
     std::unordered_map<std::string, std::string> configuration_watch_states_;

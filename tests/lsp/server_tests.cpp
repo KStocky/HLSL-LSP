@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -23,6 +24,10 @@
 #include <string_view>
 #include <unordered_map>
 #include <vector>
+
+#ifndef _WIN32
+#include <sys/stat.h>
+#endif
 
 namespace {
 
@@ -238,6 +243,55 @@ TEST_CASE("LSP handler enforces lifecycle and invalid parameters", "[lsp][handle
         hlsl_intellisense::json_rpc::Notification{.method = "exit", .params = std::nullopt}));
     CHECK(server.exit_requested());
     CHECK(server.exit_code() == 1);
+}
+
+TEST_CASE("Capture LSP session methods require explicit start and never edit files",
+          "[lsp][capture]") {
+#ifndef _WIN32
+    TestDirectory runtime;
+    const std::string prior_runtime =
+        std::getenv("XDG_RUNTIME_DIR") ? std::getenv("XDG_RUNTIME_DIR") : "";
+    const bool had_runtime = std::getenv("XDG_RUNTIME_DIR") != nullptr;
+    REQUIRE(chmod(runtime.path().c_str(), 0700) == 0);
+    REQUIRE(setenv("XDG_RUNTIME_DIR", runtime.path().string().c_str(), 1) == 0);
+#endif
+    hlsl_intellisense::lsp::Server server{[](const auto&) {}};
+    const auto call = [&server](std::int64_t id, std::string method, Json params) {
+        return server.handle(hlsl_intellisense::json_rpc::Request{
+            .id = id, .method = std::move(method), .params = std::move(params)});
+    };
+    REQUIRE(call(1, "initialize", Json::object()).has_value());
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    const auto status = call(2, "hlsl/capture/status", {{"protocolVersion", 1}});
+    REQUIRE(status.has_value());
+    CHECK(std::get<hlsl_intellisense::json_rpc::Response>(*status).result["active"] == false);
+    const auto start = call(3, "hlsl/capture/start", {{"protocolVersion", 1}});
+    REQUIRE(start.has_value());
+    const auto& result = std::get<hlsl_intellisense::json_rpc::Response>(*start).result;
+    CHECK(result["endpoint"].is_string());
+    const std::string token = result["token"];
+    CHECK(token.size() == 64);
+    const auto snapshot = call(4, "hlsl/capture/snapshot", {{"protocolVersion", 1}});
+    REQUIRE(snapshot.has_value());
+    const auto& captured = std::get<hlsl_intellisense::json_rpc::Response>(*snapshot).result;
+    CHECK(captured["active"] == true);
+    CHECK(captured["entries"].empty());
+    CHECK_FALSE(captured.contains("token"));
+    const auto stale =
+        call(5, "hlsl/capture/stop", {{"protocolVersion", 1}, {"token", std::string(64, '0')}});
+    REQUIRE(stale.has_value());
+    CHECK(std::holds_alternative<hlsl_intellisense::json_rpc::ErrorResponse>(*stale));
+    const auto stop = call(6, "hlsl/capture/stop", {{"protocolVersion", 1}, {"token", token}});
+    REQUIRE(stop.has_value());
+    CHECK(std::get<hlsl_intellisense::json_rpc::Response>(*stop).result["active"] == false);
+#ifndef _WIN32
+    if (had_runtime) {
+        REQUIRE(setenv("XDG_RUNTIME_DIR", prior_runtime.c_str(), 1) == 0);
+    } else {
+        REQUIRE(unsetenv("XDG_RUNTIME_DIR") == 0);
+    }
+#endif
 }
 
 TEST_CASE("Configuration authoring protocol discovers DXC entry points without writing files",
@@ -2445,6 +2499,46 @@ TEST_CASE("Protocol tracing redacts source text by default", "[lsp][protocol][tr
     CHECK(error_stream.str().find("trace receive") != std::string::npos);
     CHECK(error_stream.str().find("trace send") != std::string::npos);
     CHECK_FALSE(read_frames(output_stream.str()).empty());
+}
+
+TEST_CASE("Capture tokens remain redacted even in explicit source traces",
+          "[lsp][capture][protocol][trace]") {
+#ifndef _WIN32
+    TestDirectory runtime;
+    const std::string prior_runtime =
+        std::getenv("XDG_RUNTIME_DIR") ? std::getenv("XDG_RUNTIME_DIR") : "";
+    const bool had_runtime = std::getenv("XDG_RUNTIME_DIR") != nullptr;
+    REQUIRE(chmod(runtime.path().c_str(), 0700) == 0);
+    REQUIRE(setenv("XDG_RUNTIME_DIR", runtime.path().string().c_str(), 1) == 0);
+#endif
+    std::string input;
+    input += frame(request(1, "initialize"));
+    input += frame(notification("initialized"));
+    input += frame(request(2, "hlsl/capture/start", {{"protocolVersion", 1}}));
+    input += frame(request_without_params(3, "shutdown"));
+    input += frame(notification_without_params("exit"));
+    std::istringstream input_stream{input};
+    std::ostringstream output_stream;
+    std::ostringstream error_stream;
+    hlsl_intellisense::lsp::ServerOptions options;
+    options.protocol_trace = true;
+    options.trace_source = true;
+    REQUIRE(hlsl_intellisense::lsp::run(input_stream, output_stream, error_stream, options) == 0);
+    const auto messages = read_frames(output_stream.str());
+    const auto started = std::ranges::find_if(
+        messages, [](const auto& value) { return value.value("id", Json{}) == 2; });
+    REQUIRE(started != messages.end());
+    const std::string token = (*started)["result"]["token"];
+    CHECK(token.size() == 64);
+    CHECK(error_stream.str().find(token) == std::string::npos);
+    CHECK(error_stream.str().find("<redacted>") != std::string::npos);
+#ifndef _WIN32
+    if (had_runtime) {
+        REQUIRE(setenv("XDG_RUNTIME_DIR", prior_runtime.c_str(), 1) == 0);
+    } else {
+        REQUIRE(unsetenv("XDG_RUNTIME_DIR") == 0);
+    }
+#endif
 }
 
 TEST_CASE("Server applies workspace configuration to DXC analysis",
