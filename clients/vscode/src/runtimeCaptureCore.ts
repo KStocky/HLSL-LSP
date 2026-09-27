@@ -93,11 +93,42 @@ export function capturePreviewMatches(
   result: CapturePreview,
 ): boolean {
   const selected = new Set(entries.map((entry) => entry.id));
+  if (
+    !URL.canParse(configurationUri) ||
+    !URL.canParse(result.configuration.uri)
+  ) {
+    return false;
+  }
+  const expectedUri = new URL(configurationUri);
+  const returnedUri = new URL(result.configuration.uri);
+  let expectedPath: string;
+  let returnedPath: string;
+  try {
+    expectedPath = decodeURIComponent(expectedUri.pathname);
+    returnedPath = decodeURIComponent(returnedUri.pathname);
+  } catch (error) {
+    if (error instanceof URIError) {
+      return false;
+    }
+    throw error;
+  }
+  // The server uppercases Windows drives, while VS Code may keep the workspace's casing.
+  const sameConfiguration =
+    expectedUri.protocol === "file:" &&
+    returnedUri.protocol === "file:" &&
+    expectedUri.host === returnedUri.host &&
+    !expectedUri.search &&
+    !returnedUri.search &&
+    !expectedUri.hash &&
+    !returnedUri.hash &&
+    (process.platform === "win32"
+      ? expectedPath.toLowerCase() === returnedPath.toLowerCase()
+      : expectedPath === returnedPath);
   return (
     snapshot.active &&
     snapshot.sessionId !== null &&
     result.sessionId === snapshot.sessionId &&
-    result.configuration.uri === configurationUri &&
+    sameConfiguration &&
     selected.size === entries.length &&
     result.selectedEntryIds.length === entries.length &&
     result.selectedEntryIds.every((id) => selected.has(id))
