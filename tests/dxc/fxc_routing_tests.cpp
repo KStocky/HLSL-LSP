@@ -117,6 +117,27 @@ TEST_CASE("FXC routing preserves native legacy syntax and explicit strictness po
         return diagnostic.source == "fxc" && diagnostic.message.find("X3086") != std::string::npos;
     }));
 }
+
+TEST_CASE("FXC routing reports unsupported profiles through the selected compiler",
+          "[dxc][fxc][routing]") {
+    dxc::Intellisense intellisense;
+    for (const auto* profile : {"ps_6_6", "lib_6_6", "ms_6_5"}) {
+        CAPTURE(profile);
+        dxc::CompilerOptions options;
+        options.backend = dxc::CompilerBackend::fxc;
+        options.target_profile = profile;
+        options.entry_point = "main";
+        auto unit = intellisense.parse(
+            "fxc-profile.hlsl", {{"fxc-profile.hlsl", "float4 main() : SV_Target { return 1; }\n"}},
+            options);
+        const auto info = unit.compilation_info();
+        CHECK_FALSE(info.success);
+        CHECK(info.compiler_backend == "fxc");
+        CHECK_FALSE(info.output);
+        REQUIRE_FALSE(info.diagnostics.empty());
+        CHECK(info.diagnostics.front().source == "fxc");
+    }
+}
 #else
 TEST_CASE("FXC routing never silently falls back to DXC outside Windows", "[dxc][fxc][routing]") {
     dxc::CompilerOptions options;
