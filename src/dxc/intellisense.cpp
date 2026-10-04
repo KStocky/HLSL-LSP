@@ -2616,11 +2616,12 @@ std::string_view runtime_library_name() noexcept {
 #endif
 }
 
-bool supports_skipped_ranges_for_rewritten_sources() noexcept {
+bool supports_skipped_ranges_for_rewritten_sources(
+    [[maybe_unused]] std::string_view runtime_version) noexcept {
 #ifdef _WIN32
     return true;
 #else
-    return false;
+    return runtime_version.ends_with(" (97d967e0)");
 #endif
 }
 
@@ -3911,10 +3912,11 @@ auto TranslationUnit::skipped_ranges() const -> std::vector<SourceRange> {
     }
     const auto has_rewritten_sources = std::ranges::any_of(
         implementation_->sources, [](const auto& source) { return source.rewritten; });
-    if (has_rewritten_sources && !supports_skipped_ranges_for_rewritten_sources()) {
+    if (has_rewritten_sources &&
+        !supports_skipped_ranges_for_rewritten_sources(implementation_->owner->version)) {
         throw RuntimeError{
             "DXC skipped-range analysis is unavailable for rewritten source buffers on this "
-            "platform"};
+            "runtime"};
     }
 
     std::vector<SourceRange> result;
@@ -4161,10 +4163,11 @@ auto TranslationUnit::entry_point_data_flow(
     ComPtr<IDxcCursor> root;
     const auto has_rewritten_sources = std::ranges::any_of(
         implementation_->sources, [](const auto& source) { return source.rewritten; });
-    if (has_rewritten_sources && !supports_skipped_ranges_for_rewritten_sources()) {
+    if (has_rewritten_sources &&
+        !supports_skipped_ranges_for_rewritten_sources(implementation_->owner->version)) {
         result.explanation =
             "Entry-point data flow is unavailable because DXC skipped-range analysis is unsafe "
-            "for rewritten source buffers on this platform";
+            "for rewritten source buffers on this runtime";
         return result;
     }
     check(implementation_->translation_unit->GetCursor(root.put()), "GetCursor");

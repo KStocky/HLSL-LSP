@@ -543,17 +543,59 @@ TEST_CASE("DXC exposes rewritten-source skipped-range capability",
                                "#endif\n";
     auto translation_unit = intellisense.parse(
         shader_path, {{.path = shader_path, .text = source, .rewritten = true}}, options);
-#ifdef _WIN32
-    CHECK(hlsl_intellisense::dxc::supports_skipped_ranges_for_rewritten_sources());
-    CHECK_FALSE(translation_unit.skipped_ranges().empty());
-    CHECK(translation_unit.entry_point_data_flow().found);
-#else
-    CHECK_FALSE(hlsl_intellisense::dxc::supports_skipped_ranges_for_rewritten_sources());
-    CHECK_THROWS_AS(translation_unit.skipped_ranges(), hlsl_intellisense::dxc::RuntimeError);
-    const auto flow = translation_unit.entry_point_data_flow();
-    CHECK_FALSE(flow.found);
-    CHECK(flow.explanation.find("unavailable") != std::string::npos);
+    if (hlsl_intellisense::dxc::supports_skipped_ranges_for_rewritten_sources(
+            intellisense.runtime_info().version)) {
+        CHECK_FALSE(translation_unit.skipped_ranges().empty());
+        CHECK(translation_unit.entry_point_data_flow().found);
+    } else {
+        CHECK_THROWS_AS(translation_unit.skipped_ranges(), hlsl_intellisense::dxc::RuntimeError);
+        const auto flow = translation_unit.entry_point_data_flow();
+        CHECK_FALSE(flow.found);
+        CHECK(flow.explanation.find("unavailable") != std::string::npos);
+    }
+}
+
+TEST_CASE("DXC rewritten-source capability retains older Linux runtime fallback",
+          "[dxc][preprocessor][platform]") {
+    using hlsl_intellisense::dxc::supports_skipped_ranges_for_rewritten_sources;
+    CHECK(supports_skipped_ranges_for_rewritten_sources("1.11.1 (97d967e0)"));
+#ifndef _WIN32
+    CHECK_FALSE(supports_skipped_ranges_for_rewritten_sources("unknown"));
+    CHECK_FALSE(supports_skipped_ranges_for_rewritten_sources("1.9"));
+    CHECK_FALSE(supports_skipped_ranges_for_rewritten_sources("1.11.0 (older)"));
+    CHECK_FALSE(supports_skipped_ranges_for_rewritten_sources("1.12.1 (unverified)"));
 #endif
+}
+
+TEST_CASE("DXC skipped ranges handle rewritten includes and an unused virtual alias",
+          "[dxc][preprocessor][includes][platform]") {
+    hlsl_intellisense::dxc::Intellisense intellisense;
+    if (!hlsl_intellisense::dxc::supports_skipped_ranges_for_rewritten_sources(
+            intellisense.runtime_info().version)) {
+        SKIP("Selected Linux runtime has not been verified safe for rewritten sources");
+    }
+    const auto directory = std::filesystem::current_path() / "skipped-range-repro";
+    const auto root = (directory / "main.hlsl").generic_string();
+    const auto physical = (directory / "include.hlsli").generic_string();
+    const auto logical = (directory / "virtual" / "include.hlsli").generic_string();
+    const std::string source = "#include \"" + physical +
+                               "\"\n"
+                               "#if 0\nfloat skippedValue;\n#endif\n"
+                               "float4 main() : SV_Target { return includedValue.xxxx; }\n";
+    const std::string include = "static const float includedValue = 1.0;\n";
+    hlsl_intellisense::dxc::CompilerOptions options;
+    options.entry_point = "main";
+    auto translation_unit = intellisense.parse(root,
+                                               {{.path = root, .text = source, .rewritten = true},
+                                                {.path = logical, .text = include},
+                                                {.path = physical, .text = include}},
+                                               options);
+    const auto ranges = translation_unit.skipped_ranges();
+    REQUIRE(ranges.size() == 1);
+    CHECK(ranges.front().start.path == root);
+    CHECK(ranges.front().start.line <= 3);
+    CHECK(ranges.front().end.line >= 3);
+    CHECK(translation_unit.entry_point_data_flow().found);
 }
 
 TEST_CASE("DXC IntelliSense reports preprocessing records from unsaved includes",

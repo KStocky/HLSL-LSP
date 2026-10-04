@@ -35,20 +35,23 @@ macro includes dynamic. DXC remains authoritative for replacement values and
 preprocessing, and receives rewritten source only when a safely resolved
 virtual macro include must be mapped to its physical file.
 
-The bundled Windows and Linux DXC `2609-kstocky.2` release initializes the legacy
+The bundled Windows and Linux DXC `2609-kstocky.3` release initializes the legacy
 IntelliSense index's token-pasting option and accepts valid GNU-style
 `, ##__VA_ARGS__` comma elision. Older or custom runtimes may still report a
 false invalid-token diagnostic. For compatibility with those runtimes,
 HLSL-LSP checks that specific diagnostic against DXC's compiler preprocessor
 before publishing it. Genuine invalid token pastes remain diagnostics.
 
-DXC 1.9's Linux `GetSkippedRanges` API is unsafe when IntelliSense receives
-source buffers with virtual include directives rewritten to physical paths.
-For those snapshots only, HLSL-LSP does not call that API. The response marks
-the skipped-region section unavailable and explains why, while retaining the
-resolver include graph, expanded configured path and provenance, compiler
-source macros, effective settings, and normal compiler diagnostics. Windows
-continues to report skipped regions for the same source.
+The bundled Linux runtime fixes `GetSkippedRanges` on virtual unsaved files,
+so skipped regions and entry-point data flow are available when virtual include
+directives are rewritten to physical paths. HLSL-LSP identifies this verified
+build by its reported commit `97d967e0`; a newer version number alone does not
+prove the fix is present. Older or unidentified Linux runtimes retain the
+fallback: for rewritten snapshots only, the skipped-region section reports
+unavailable with a reason, while keeping resolver include metadata, configured
+macro provenance, compiler source macros, effective settings, and normal
+diagnostics. Windows continues to report skipped regions for the same source.
+See [the standalone reproduction and regression coverage](dxc-skipped-ranges.md).
 
 ## Protocol
 

@@ -4528,11 +4528,13 @@ Json Server::preprocessor_explorer(const std::optional<Json>& params,
     }
     bool skipped_regions_available = true;
     std::string skipped_regions_unavailable_reason;
-    if (resolution.has_rewritten_sources && !dxc::supports_skipped_ranges_for_rewritten_sources()) {
+    if (resolution.has_rewritten_sources &&
+        !dxc::supports_skipped_ranges_for_rewritten_sources(analysis_.dxc_runtime_info().version)) {
         skipped_regions_available = false;
         skipped_regions_unavailable_reason =
-            "Compiler skipped-region analysis is unavailable because DXC 1.9's Linux "
-            "GetSkippedRanges API is unsafe for source buffers whose virtual includes were "
+            "Compiler skipped-region analysis is unavailable because this Linux DXC runtime "
+            "has not been verified safe for GetSkippedRanges on source buffers whose virtual "
+            "includes were "
             "rewritten to physical paths. Resolver include metadata, configured macro "
             "provenance, compiler-reported source macros, and effective settings remain "
             "available.";

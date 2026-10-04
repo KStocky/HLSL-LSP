@@ -3210,21 +3210,23 @@ TEST_CASE("Configured macro includes resolve through virtual mappings end to end
     CHECK(include["configurationOrigin"] == config_path.generic_string());
     CHECK(include["configurationOriginUri"] ==
           hlsl_intellisense::workspace::DocumentUri::from_path(config_path.string()).uri());
-#ifdef _WIN32
-    CHECK(explorer_response->result["compilerAnalysis"]["skippedRegions"]["available"] == true);
-    CHECK_FALSE(explorer_response->result["skippedRegions"].empty());
-    CHECK(explorer_response->result["diagnostics"].empty());
-#else
-    CHECK(explorer_response->result["compilerAnalysis"]["skippedRegions"]["available"] == false);
-    CHECK(explorer_response->result["skippedRegions"].empty());
-    REQUIRE(explorer_response->result["compilerAnalysis"]["skippedRegions"].contains("reason"));
-    CHECK(explorer_response->result["compilerAnalysis"]["skippedRegions"]["reason"]
-              .template get<std::string>()
-              .find("DXC 1.9") != std::string::npos);
-    CHECK(std::ranges::any_of(explorer_response->result["diagnostics"], [](const auto& diagnostic) {
-        return diagnostic.template get<std::string>().find("GetSkippedRanges") != std::string::npos;
-    }));
-#endif
+    hlsl_intellisense::dxc::Intellisense runtime;
+    if (hlsl_intellisense::dxc::supports_skipped_ranges_for_rewritten_sources(
+            runtime.runtime_info().version)) {
+        CHECK(explorer_response->result["compilerAnalysis"]["skippedRegions"]["available"] == true);
+        CHECK_FALSE(explorer_response->result["skippedRegions"].empty());
+        CHECK(explorer_response->result["diagnostics"].empty());
+    } else {
+        CHECK(explorer_response->result["compilerAnalysis"]["skippedRegions"]["available"] ==
+              false);
+        CHECK(explorer_response->result["skippedRegions"].empty());
+        REQUIRE(explorer_response->result["compilerAnalysis"]["skippedRegions"].contains("reason"));
+        CHECK(std::ranges::any_of(
+            explorer_response->result["diagnostics"], [](const auto& diagnostic) {
+                return diagnostic.template get<std::string>().find("GetSkippedRanges") !=
+                       std::string::npos;
+            }));
+    }
     CHECK(explorer_response->result["compilerAnalysis"]["compilerMacros"]["available"] == true);
     CHECK(std::ranges::any_of(explorer_response->result["macros"], [](const auto& macro) {
         return macro["name"] == "LOCAL_FEATURE" && macro["source"] == "compiler";
