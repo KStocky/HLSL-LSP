@@ -63,6 +63,8 @@ struct VariantSettings {
     std::optional<std::string> entry_point;
     std::optional<std::vector<std::string>> additional_arguments;
     std::optional<std::filesystem::path> dxc_runtime_directory;
+    std::optional<dxc::CompilerBackend> compiler_backend;
+    std::optional<std::filesystem::path> fxc_runtime_path;
 };
 
 // A named compilation variant resolved for a specific shader. `applicable` is
@@ -112,6 +114,8 @@ struct WorkspaceConfiguration {
     // bundled default. Conflicting nested selections are reported rather than
     // silently switched.
     std::optional<std::filesystem::path> dxc_runtime_directory;
+    std::optional<dxc::CompilerBackend> compiler_backend;
+    std::optional<std::filesystem::path> fxc_runtime_path;
     // Named compilation variants resolved for the shader this configuration was
     // loaded for, in declaration order (outermost configuration first). Each
     // variant already has inheritance applied; `applicable` reflects whether the
@@ -141,6 +145,8 @@ struct ConfigurationOverrides {
     std::optional<std::optional<std::string>> entry_point;
     std::optional<std::vector<std::string>> additional_arguments;
     std::optional<std::optional<std::filesystem::path>> dxc_runtime_directory;
+    std::optional<std::optional<dxc::CompilerBackend>> compiler_backend;
+    std::optional<std::optional<std::filesystem::path>> fxc_runtime_path;
 
     bool operator==(const ConfigurationOverrides&) const = default;
 };

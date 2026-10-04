@@ -354,6 +354,22 @@
           "scope": "machine-overridable",
           "description": "Path to an external hlsl-lsp executable. The first workspace folder selects this setting for the window and resolves a relative path. When empty, the platform-specific bundled server is required."
         },
+        "hlsl.compilerBackend": {
+          "type": "string",
+          "enum": [
+            "dxc",
+            "fxc"
+          ],
+          "default": "dxc",
+          "scope": "resource",
+          "description": "Compiler used for diagnostics and reflection. FXC uses Windows D3DCompiler and supports legacy shader profiles. An explicit editor setting overrides shadertoolsconfig.json; the default does not."
+        },
+        "hlsl.fxcRuntimePath": {
+          "type": "string",
+          "default": "",
+          "scope": "resource",
+          "description": "Optional path to a compatible D3DCompiler DLL. Relative paths resolve from the workspace folder. Empty uses Windows system D3DCompiler_47.dll."
+        },
         "hlsl.dxcRuntimeDirectory": {
           "type": "string",
           "default": "",
@@ -414,12 +430,12 @@
         "hlsl.targetProfile": {
           "type": "string",
           "scope": "window",
-          "description": "Optional DXC target profile, such as ps_6_6 or lib_6_8. When explicitly configured, this overrides shadertoolsconfig.json."
+          "description": "Optional compiler target profile, such as ps_6_6 for DXC or ps_5_0 for FXC. When explicitly configured, this overrides shadertoolsconfig.json."
         },
         "hlsl.entryPoint": {
           "type": "string",
           "scope": "window",
-          "description": "Optional shader entry point supplied to DXC. When explicitly configured, this overrides shadertoolsconfig.json."
+          "description": "Optional shader entry point supplied to the selected compiler. When explicitly configured, this overrides shadertoolsconfig.json."
         },
         "hlsl.additionalArguments": {
           "type": "array",
@@ -427,7 +443,7 @@
           "items": {
             "type": "string"
           },
-          "description": "Additional DXC arguments, for example -enable-16bit-types. An explicitly configured array replaces file-derived arguments."
+          "description": "Additional arguments for the selected compiler, for example -enable-16bit-types for DXC or /WX for FXC. Unsupported FXC switches are reported, not silently ignored. An explicitly configured array replaces file-derived arguments."
         },
         "hlsl.activeVariant": {
           "type": "string",

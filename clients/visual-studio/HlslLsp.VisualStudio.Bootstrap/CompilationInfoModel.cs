@@ -8,6 +8,8 @@ namespace HlslLsp.VisualStudio.Bootstrap;
 
 public sealed class CompilationInfoModel
 {
+    public string CompilerBackend { get; set; } = "dxc";
+    public string CompilerRuntimePath { get; set; }
     public EffectiveShaderContextModel Context { get; set; }
 
     public string EntryPoint { get; set; }
@@ -155,7 +157,7 @@ public sealed class CompilationResourceBindingModel
 
     public long RawFlags { get; set; }
 
-    public long RangeId { get; set; }
+    public long? RangeId { get; set; }
 
     // Reused by the compiler for structured-buffer byte stride on
     // SIT_STRUCTURED/SIT_UAV_RWSTRUCTURED* resources; 0xFFFFFFFF ("not

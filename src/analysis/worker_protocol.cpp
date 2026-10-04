@@ -102,6 +102,7 @@ void decode_enum(const Json& input, Enum& value, Enum maximum, std::string_view 
     void from_json(const Json& input, Type& value) { decode_enum(input, value, Maximum, #Type); }
 
 HLSL_WORKER_ENUM(DiagnosticSeverity, DiagnosticSeverity::fatal)
+HLSL_WORKER_ENUM(CompilerBackend, CompilerBackend::fxc)
 HLSL_WORKER_ENUM(MemoryLayoutKind, MemoryLayoutKind::constant_buffer)
 HLSL_WORKER_ENUM(MemoryLayoutElementKind, MemoryLayoutElementKind::record)
 HLSL_WORKER_ENUM(ResourceRegisterClass, ResourceRegisterClass::unknown)
@@ -138,7 +139,9 @@ void to_json(Json& output, const CompilerOptions& value) {
                   {"entryPoint", value.entry_point},
                   {"defines", value.defines},
                   {"includeDirectories", value.include_directories},
-                  {"additionalArguments", value.additional_arguments}};
+                  {"additionalArguments", value.additional_arguments},
+                  {"backend", value.backend},
+                  {"fxcRuntimePath", value.fxc_runtime_path}};
 }
 
 void from_json(const Json& input, CompilerOptions& value) {
@@ -148,6 +151,8 @@ void from_json(const Json& input, CompilerOptions& value) {
     input.at("defines").get_to(value.defines);
     input.at("includeDirectories").get_to(value.include_directories);
     input.at("additionalArguments").get_to(value.additional_arguments);
+    input.at("backend").get_to(value.backend);
+    input.at("fxcRuntimePath").get_to(value.fxc_runtime_path);
 }
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(SourceLocation, path, line, column, offset)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(SourceRange, start, end)
@@ -155,7 +160,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(MacroDefinition, name, value, location)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(MacroExpansion, name, invocation, range, expanded_text,
                                    definition_location)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(FixIt, range, replacement_text)
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Diagnostic, severity, message, location, fix_its)
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Diagnostic, severity, message, location, fix_its, source)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Completion, label, detail, cursor_kind)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Definition, name, location)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Reference, location, start_offset, end_offset)
@@ -169,11 +174,12 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(MemoryLayout, name, type, kind, size, allocat
                                    selected_alignment, supported, explanation, members)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(CompilationSignatureParameter, semantic_name, semantic_index,
                                    register_index, system_value, component_type, mask,
-                                   read_write_mask, stream, interpolation, source_location)
+                                   read_write_mask, stream, interpolation, source_location,
+                                   interpolation_available)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(CompilationResourceBinding, name, type, bind_point, bind_count,
                                    space, dimension, return_type, register_class, raw_flags,
                                    range_id, sample_count, unbounded, system_reserved_space, usage,
-                                   source_location)
+                                   source_location, range_id_available)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(ResourceBindingRange, resource_name, base_register, unbounded,
                                    end_register)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(ResourceBindingCollision, first_resource, second_resource,
@@ -240,7 +246,8 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(CompilationInfo, entry_point, stage, target_p
                                    language_version, defines, compiler_arguments,
                                    include_directories, resolved_include_paths, success,
                                    diagnostics, output, disassembly, reflection, root_signature,
-                                   compatibility, psv_wave_size, compute_metadata)
+                                   compatibility, psv_wave_size, compute_metadata, compiler_backend,
+                                   compiler_runtime_path)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(SignatureParameter, label, name, type)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Signature, label, qualified_name, cursor_kind, parameters)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Symbol, name, cursor_kind, location, start_offset, end_offset,

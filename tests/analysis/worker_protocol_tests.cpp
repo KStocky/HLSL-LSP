@@ -43,7 +43,9 @@ void write_request(std::stringstream& input, std::uint64_t id, std::string metho
                                          {"entryPoint", ""},
                                          {"defines", Json::array()},
                                          {"includeDirectories", Json::array()},
-                                         {"additionalArguments", Json::array()}}}};
+                                         {"additionalArguments", Json::array()},
+                                         {"backend", 0U},
+                                         {"fxcRuntimePath", ""}}}};
 }
 
 } // namespace

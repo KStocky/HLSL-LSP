@@ -242,6 +242,12 @@ internal sealed class CompilationInfoControl : UserControl
 
     private void AddConfiguration(CompilationInfoModel info)
     {
+        AddKeyValue("Compiler backend",
+            info.CompilerBackend == "fxc" ? "FXC / D3DCompiler" : "DXC");
+        AddKeyValue("Compiler runtime",
+            string.IsNullOrEmpty(info.CompilerRuntimePath)
+                ? info.CompilerBackend == "fxc" ? "Unavailable" : "Selected DXC runtime"
+                : info.CompilerRuntimePath);
         AddKeyValue("Compiler arguments", JoinOrNone(info.CompilerArguments));
         AddKeyValue("Preprocessor defines", JoinOrNone(info.Defines));
         AddKeyValue("Include directories", JoinOrNone(info.IncludeDirectories));
@@ -268,7 +274,7 @@ internal sealed class CompilationInfoControl : UserControl
                     ? "Compiler statistics are unavailable because compilation " +
                       "did not produce output."
                     : string.IsNullOrEmpty(reflection.UnavailableReason)
-                        ? "DXC reflection did not provide shader statistics for this output."
+                        ? "Compiler reflection did not provide shader statistics for this output."
                         : reflection.UnavailableReason,
                 TextWrapping = TextWrapping.Wrap,
                 Foreground = reflection == null ? null : Brushes.Goldenrod,
@@ -279,7 +285,7 @@ internal sealed class CompilationInfoControl : UserControl
 
         content.Children.Add(new TextBlock
         {
-            Text = "Exact counts reported by DXC reflection. These are not GPU " +
+            Text = "Exact counts reported by compiler reflection. These are not GPU " +
                    "timing, occupancy, latency, or hardware-performance estimates.",
             TextWrapping = TextWrapping.Wrap,
             Opacity = 0.75,

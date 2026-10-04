@@ -43,6 +43,15 @@ void test("effective context tooltip includes useful compilation context", () =>
   assert.match(tooltip, /Click to select a shader variant/);
 });
 
+void test("effective context identifies the configured FXC compiler", () => {
+  const fxc = { ...context, compilerBackend: "fxc" as const };
+  assert.match(
+    effectiveContextHeaderHtml(fxc),
+    /<strong>Compiler:<\/strong> FXC/,
+  );
+  assert.match(effectiveContextTooltip(fxc), /Compiler: FXC/);
+});
+
 void test("effective configuration origin prefers the active variant when file-backed", () => {
   assert.equal(
     effectiveConfigurationOriginUri(context),

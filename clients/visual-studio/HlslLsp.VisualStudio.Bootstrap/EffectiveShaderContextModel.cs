@@ -27,6 +27,7 @@ public sealed class EffectiveContextOriginsModel
 
 public sealed class EffectiveShaderContextModel
 {
+    public string CompilerBackend { get; set; } = "dxc";
     public string DocumentUri { get; set; }
 
     public string File { get; set; }
@@ -60,7 +61,8 @@ internal static class EffectiveShaderContextDisplay
               $"Entry point: {NotConfigured} · Target profile: {NotConfigured}"
             : $"File: {Value(context.File)} · Variant: {Variant(context.ActiveVariant)} · " +
               $"Entry point: {Value(context.EntryPoint)} · " +
-              $"Target profile: {Value(context.TargetProfile)}";
+              $"Target profile: {Value(context.TargetProfile)} · " +
+              $"Compiler: {(context.CompilerBackend == "fxc" ? "FXC" : "DXC")}";
 
     internal static string OriginSummary(EffectiveShaderContextModel context)
     {

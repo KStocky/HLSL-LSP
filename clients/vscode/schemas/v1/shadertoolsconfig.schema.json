@@ -56,6 +56,13 @@
       "type": "string",
       "description": "Directory containing a compatible DXC runtime to load instead of the bundled one."
     },
+    "hlsl.compilerBackend": {
+      "$ref": "#/$defs/compilerBackend"
+    },
+    "hlsl.fxcRuntimePath": {
+      "type": "string",
+      "description": "Optional D3DCompiler DLL path, relative to this configuration file. Empty uses Windows system D3DCompiler_47.dll."
+    },
     "hlsl.fileGroups": {
       "$ref": "#/$defs/fileGroups"
     },
@@ -145,12 +152,19 @@
         "hlsl.languageVersion": { "$ref": "#/$defs/languageVersion" },
         "hlsl.targetProfile": { "$ref": "#/$defs/stringSetting" },
         "hlsl.entryPoint": { "$ref": "#/$defs/stringSetting" },
-        "hlsl.additionalArguments": { "$ref": "#/$defs/argumentList" }
+        "hlsl.additionalArguments": { "$ref": "#/$defs/argumentList" },
+        "hlsl.compilerBackend": { "$ref": "#/$defs/compilerBackend" },
+        "hlsl.fxcRuntimePath": { "type": "string" }
       },
       "required": ["files"],
       "additionalProperties": false
     },
     "stringSetting": { "type": "string" },
+    "compilerBackend": {
+      "type": "string",
+      "enum": ["dxc", "fxc"],
+      "description": "Compilation and reflection authority. FXC is Windows-only; DXC remains the default."
+    },
     "languageVersion": {
       "type": "string",
       "enum": ["2016", "2017", "2018", "2021", "202x"]
@@ -188,7 +202,9 @@
         "hlsl.targetProfile": { "$ref": "#/$defs/stringSetting" },
         "hlsl.entryPoint": { "$ref": "#/$defs/stringSetting" },
         "hlsl.additionalArguments": { "$ref": "#/$defs/argumentList" },
-        "hlsl.dxcRuntimeDirectory": { "type": "string" }
+        "hlsl.dxcRuntimeDirectory": { "type": "string" },
+        "hlsl.compilerBackend": { "$ref": "#/$defs/compilerBackend" },
+        "hlsl.fxcRuntimePath": { "type": "string" }
       },
       "required": ["name"],
       "additionalProperties": false

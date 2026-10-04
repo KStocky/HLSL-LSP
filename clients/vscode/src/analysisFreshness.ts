@@ -53,6 +53,8 @@ const compilationAffectingSettings = [
   "hlsl.preprocessorDefinitions",
   "hlsl.additionalArguments",
   "hlsl.languageVersion",
+  "hlsl.compilerBackend",
+  "hlsl.fxcRuntimePath",
   "hlsl.activeVariant",
 ] as const;
 

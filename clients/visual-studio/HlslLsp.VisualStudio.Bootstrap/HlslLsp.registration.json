@@ -28,6 +28,21 @@
       ],
       "allowsFreeformInput": true
     },
+    "hlslLsp.general.compilerBackend": {
+      "type": "string",
+      "title": "Compiler backend",
+      "description": "Compilation and reflection authority. Empty follows shadertoolsconfig.json; FXC is Windows-only.",
+      "default": "",
+      "enum": ["", "dxc", "fxc"],
+      "enumItemLabels": ["Project configuration", "DXC", "FXC / D3DCompiler"],
+      "allowsFreeformInput": false
+    },
+    "hlslLsp.general.fxcRuntimePath": {
+      "type": "string",
+      "title": "FXC runtime DLL",
+      "description": "Optional D3DCompiler DLL path. Empty follows project configuration or uses Windows system D3DCompiler_47.dll.",
+      "default": ""
+    },
     "hlslLsp.general.dxcRuntimeDirectory": {
       "type": "string",
       "title": "DXC runtime directory",

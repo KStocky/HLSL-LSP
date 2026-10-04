@@ -21,6 +21,7 @@ internal sealed class HlslLanguageClient :
     private Process serverProcess;
     private string languageVersion;
     private string dxcRuntimeDirectory;
+    private CompilerSettings compilerSettings;
     private string activeVariant;
     private InlayHintOptionsSnapshot inlayHints;
     private JsonRpc rpc;
@@ -35,7 +36,9 @@ internal sealed class HlslLanguageClient :
         Func<string, string, Task> onRuntimeRestartRequested,
         Func<string, Task> onActiveVariantChangedFromServer,
         Func<Task> onConfigurationChangedFromServer = null,
-        Action<bool> onConnectionStateChanged = null)
+        Action<bool> onConnectionStateChanged = null,
+        string compilerBackend = "",
+        string fxcRuntimePath = "")
         : this(
             languageVersion,
             dxcRuntimeDirectory,
@@ -44,7 +47,9 @@ internal sealed class HlslLanguageClient :
             onRuntimeRestartRequested,
             onActiveVariantChangedFromServer,
             onConfigurationChangedFromServer,
-            onConnectionStateChanged)
+            onConnectionStateChanged,
+            compilerBackend,
+            fxcRuntimePath)
     {
     }
 
@@ -56,10 +61,13 @@ internal sealed class HlslLanguageClient :
         Func<string, string, Task> onRuntimeRestartRequested,
         Func<string, Task> onActiveVariantChangedFromServer,
         Func<Task> onConfigurationChangedFromServer = null,
-        Action<bool> onConnectionStateChanged = null)
+        Action<bool> onConnectionStateChanged = null,
+        string compilerBackend = "",
+        string fxcRuntimePath = "")
     {
         this.languageVersion = languageVersion;
         this.dxcRuntimeDirectory = dxcRuntimeDirectory ?? string.Empty;
+        compilerSettings = new CompilerSettings(compilerBackend, fxcRuntimePath);
         this.activeVariant = activeVariant ?? string.Empty;
         this.inlayHints = inlayHints ?? throw new ArgumentNullException(nameof(inlayHints));
         this.onConnectionStateChanged = onConnectionStateChanged;
@@ -92,15 +100,14 @@ internal sealed class HlslLanguageClient :
         {
             var variant = Volatile.Read(ref activeVariant);
             var hints = Volatile.Read(ref inlayHints);
+            var settings = CompilerSettingsJson();
+            settings["languageVersion"] = Volatile.Read(ref languageVersion);
+            settings["dxcRuntimeDirectory"] = Volatile.Read(ref dxcRuntimeDirectory);
+            settings["activeVariant"] = string.IsNullOrEmpty(variant) ? null : variant;
+            settings["inlayHints"] = JObject.FromObject(HintSettings(hints));
             return new
             {
-                hlsl = new
-                {
-                    languageVersion = Volatile.Read(ref languageVersion),
-                    dxcRuntimeDirectory = Volatile.Read(ref dxcRuntimeDirectory),
-                    activeVariant = string.IsNullOrEmpty(variant) ? null : variant,
-                    inlayHints = HintSettings(hints),
-                },
+                hlsl = settings,
             };
         }
     }
@@ -149,6 +156,19 @@ internal sealed class HlslLanguageClient :
         Volatile.Write(
             ref inlayHints,
             value ?? throw new ArgumentNullException(nameof(value)));
+        return SendCompilerConfigurationAsync();
+    }
+
+    internal Task UpdateCompilerSettingsAsync(string backend, string runtimePath)
+    {
+        Volatile.Write(ref compilerSettings, new CompilerSettings(backend, runtimePath));
+        return SendCompilerConfigurationAsync();
+    }
+
+    private Task SendCompilerConfigurationAsync()
+    {
+        var settings = CompilerSettingsJson();
+        settings["inlayHints"] = JObject.FromObject(HintSettings(Volatile.Read(ref inlayHints)));
         var currentRpc = Volatile.Read(ref rpc);
         return currentRpc == null
             ? Task.CompletedTask
@@ -158,12 +178,32 @@ internal sealed class HlslLanguageClient :
                 {
                     settings = new
                     {
-                        hlsl = new
-                        {
-                            inlayHints = HintSettings(value),
-                        },
+                        hlsl = settings,
                     },
                 });
+    }
+
+    private JObject CompilerSettingsJson()
+    {
+        var snapshot = Volatile.Read(ref compilerSettings);
+        var result = new JObject();
+        if (!string.IsNullOrWhiteSpace(snapshot.Backend))
+            result["compilerBackend"] = snapshot.Backend.Trim();
+        if (!string.IsNullOrWhiteSpace(snapshot.RuntimePath))
+            result["fxcRuntimePath"] = snapshot.RuntimePath.Trim();
+        return result;
+    }
+
+    private sealed class CompilerSettings
+    {
+        internal CompilerSettings(string backend, string runtimePath)
+        {
+            Backend = backend ?? string.Empty;
+            RuntimePath = runtimePath ?? string.Empty;
+        }
+
+        internal string Backend { get; }
+        internal string RuntimePath { get; }
     }
 
     private static object HintSettings(InlayHintOptionsSnapshot value)

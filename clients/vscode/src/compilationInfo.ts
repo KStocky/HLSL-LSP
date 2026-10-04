@@ -86,7 +86,7 @@ export interface CompilationResourceBinding {
   // Raw D3D_SHADER_INPUT_FLAGS bitmask exactly as reported by the compiler;
   // not interpreted beyond the derived `usage` field.
   readonly rawFlags: number;
-  readonly rangeId: number;
+  readonly rangeId: number | null;
   // Raw NumSamples as reported by the compiler. For structured/RWStructured
   // buffers the compiler reuses this field to store the byte stride rather
   // than a sample count (an empirically confirmed reflection ABI quirk);
@@ -338,6 +338,8 @@ export interface CompilationCompatibility {
 }
 
 export interface CompilationInfo {
+  readonly compilerBackend?: "dxc" | "fxc";
+  readonly compilerRuntimePath?: string;
   readonly context?: EffectiveShaderContext;
   readonly entryPoint: string;
   readonly stage: string;
@@ -436,6 +438,17 @@ function listOrNone(values: readonly string[]): string {
 
 function configurationSection(info: CompilationInfo): string {
   const rows: [string, string][] = [
+    [
+      "Compiler backend",
+      info.compilerBackend === "fxc" ? "FXC / D3DCompiler" : "DXC",
+    ],
+    [
+      "Compiler runtime",
+      info.compilerRuntimePath ??
+        (info.compilerBackend === "fxc"
+          ? "Unavailable"
+          : "Selected DXC runtime"),
+    ],
     ["Entry point", contextValue(info.context?.entryPoint ?? info.entryPoint)],
     ["Stage", contextValue(info.stage)],
     [
@@ -530,7 +543,7 @@ function compilerStatisticsSection(info: CompilationInfo): string {
   if (!reflection.available || reflection.statistics == null) {
     return `<section>
 <h2>Compiler statistics</h2>
-<p class="unavailable">Compiler statistics are unavailable: ${escapeHtml(reflection.unavailableReason || "DXC reflection did not provide shader statistics for this output.")}</p>
+<p class="unavailable">Compiler statistics are unavailable: ${escapeHtml(reflection.unavailableReason || "Compiler reflection did not provide shader statistics for this output.")}</p>
 </section>`;
   }
 
@@ -558,7 +571,7 @@ function compilerStatisticsSection(info: CompilationInfo): string {
 
   return `<section>
 <h2>Compiler statistics</h2>
-<p class="muted">Exact counts reported by DXC reflection. These are not GPU timing, occupancy, latency, or hardware-performance estimates.</p>
+<p class="muted">Exact counts reported by ${info.compilerBackend === "fxc" ? "FXC" : "DXC"} reflection. These are not GPU timing, occupancy, latency, or hardware-performance estimates.</p>
 ${statisticsTable("Overview", [
   ["Instructions", statistics.instructionCount],
   ["Temporary registers", statistics.tempRegisterCount],

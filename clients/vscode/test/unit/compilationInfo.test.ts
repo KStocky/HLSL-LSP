@@ -46,6 +46,20 @@ function baseStatistics(
   };
 }
 
+void test("compilation view identifies native FXC authority", () => {
+  const html = compilationInfoHtml(
+    baseInfo({
+      compilerBackend: "fxc",
+      compilerRuntimePath: "C:\\Windows\\System32\\D3DCompiler_47.dll",
+      targetProfile: "ps_5_0",
+      output: { type: "dxbc", size: 1024 },
+    }),
+  );
+  assert.match(html, /FXC \/ D3DCompiler/);
+  assert.match(html, /D3DCompiler_47\.dll/);
+  assert.match(html, /Exact counts reported by FXC reflection/);
+});
+
 function baseInfo(overrides: Partial<CompilationInfo> = {}): CompilationInfo {
   return {
     entryPoint: "PSMain",

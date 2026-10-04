@@ -32,6 +32,8 @@ void test("schema defaults are client defaults, not editor overrides", () => {
   reader.values.set("languageVersion", "2021");
   reader.inspections.set("languageVersion", {});
   reader.inspections.set("additionalIncludeDirectories", {});
+  reader.values.set("compilerBackend", "dxc");
+  reader.inspections.set("compilerBackend", {});
 
   assert.equal(readDefaultLanguageVersion(reader), "2021");
   assert.deepEqual(readServerSettings(reader), {
@@ -45,6 +47,14 @@ void test("schema defaults are client defaults, not editor overrides", () => {
       activeVariant: false,
     },
   });
+});
+
+void test("compiler selection and FXC paths preserve explicit overrides", () => {
+  const reader = new FakeConfiguration();
+  reader.inspections.set("compilerBackend", { workspaceValue: "fxc" });
+  reader.inspections.set("fxcRuntimePath", { workspaceFolderValue: "" });
+  assert.equal(readServerSettings(reader).compilerBackend, "fxc");
+  assert.equal(readServerSettings(reader).fxcRuntimePath, "");
 });
 
 void test("explicit empty editor values are preserved to clear inherited settings", () => {

@@ -85,6 +85,21 @@ TEST_CASE("Pipeline validation accepts compatible interfaces and shared resource
     CHECK(analysis::validate_pipeline(pipeline(), stages).empty());
 }
 
+TEST_CASE("Pipeline validation reports unavailable FXC interpolation while checking masks",
+          "[analysis][pipeline][fxc]") {
+    auto output = signature("TEXCOORD", 0, "float32", 0x3);
+    auto input = signature("TEXCOORD", 0, "float32", 0xf);
+    output.interpolation_available = false;
+    input.interpolation_available = false;
+    const std::vector stages{stage(workspace::PipelineStageKind::vertex, {}, {output}),
+                             stage(workspace::PipelineStageKind::pixel, {input}, {})};
+    const auto issues = analysis::validate_pipeline(pipeline(), stages);
+    REQUIRE(issues.size() == 2);
+    CHECK(issues[0].code == analysis::PipelineIssueCode::analysis_unavailable);
+    CHECK(issues[0].message.find("interpolation") != std::string::npos);
+    CHECK(issues[1].code == analysis::PipelineIssueCode::component_mask_mismatch);
+}
+
 TEST_CASE("Pipeline validation reports every interface mismatch deterministically",
           "[analysis][pipeline]") {
     const std::vector stages{

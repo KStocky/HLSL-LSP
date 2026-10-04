@@ -38,6 +38,8 @@ struct ConfigurationSettings {
     std::optional<std::string> entry_point;
     std::optional<std::vector<std::string>> additional_arguments;
     std::optional<std::filesystem::path> dxc_runtime_directory;
+    std::optional<dxc::CompilerBackend> compiler_backend;
+    std::optional<std::filesystem::path> fxc_runtime_path;
 };
 
 struct GlobPattern {
@@ -178,6 +180,27 @@ resolve_runtime_directory(const std::filesystem::path& config_path, const std::s
     return iterator->get<std::string>();
 }
 
+[[nodiscard]] std::filesystem::path
+resolve_fxc_runtime(const std::filesystem::path& config_path, const std::string& value,
+                    std::string_view key = "hlsl.fxcRuntimePath") {
+    if (value.empty()) {
+        return {};
+    }
+    auto path = std::filesystem::path{value};
+    if (path.is_relative()) {
+        path = config_path.parent_path() / path;
+    }
+    path = std::filesystem::absolute(path).lexically_normal();
+    std::error_code error;
+    if (!std::filesystem::is_regular_file(path, error)) {
+        throw ConfigurationError{ConfigurationErrorCode::missing_path, config_path,
+                                 std::string{key},
+                                 "FXC runtime must identify an existing DLL file: '" +
+                                     path.string() + "'" + (error ? ": " + error.message() : "")};
+    }
+    return path;
+}
+
 [[nodiscard]] ConfigurationSettings
 parse_settings(const Json& json, const std::filesystem::path& path, std::string_view context) {
     ConfigurationSettings result;
@@ -241,6 +264,18 @@ parse_settings(const Json& json, const std::filesystem::path& path, std::string_
     result.language_version = optional_string(json, path, "hlsl.languageVersion", context);
     result.target_profile = optional_string(json, path, "hlsl.targetProfile", context);
     result.entry_point = optional_string(json, path, "hlsl.entryPoint", context);
+    if (const auto backend = optional_string(json, path, "hlsl.compilerBackend", context)) {
+        if (*backend != "dxc" && *backend != "fxc") {
+            throw_type_error(path, contextual_key(context, "hlsl.compilerBackend"),
+                             "'dxc' or 'fxc'");
+        }
+        result.compiler_backend =
+            *backend == "fxc" ? dxc::CompilerBackend::fxc : dxc::CompilerBackend::dxc;
+    }
+    if (const auto runtime = optional_string(json, path, "hlsl.fxcRuntimePath", context)) {
+        result.fxc_runtime_path =
+            resolve_fxc_runtime(path, *runtime, contextual_key(context, "hlsl.fxcRuntimePath"));
+    }
 
     constexpr std::string_view arguments_key = "hlsl.additionalArguments";
     if (const auto arguments = json.find(arguments_key); arguments != json.end()) {
@@ -344,6 +379,8 @@ parse_settings(const Json& json, const std::filesystem::path& path, std::string_
         std::string_view{"hlsl.targetProfile"},
         std::string_view{"hlsl.entryPoint"},
         std::string_view{"hlsl.additionalArguments"},
+        std::string_view{"hlsl.compilerBackend"},
+        std::string_view{"hlsl.fxcRuntimePath"},
     };
     return std::ranges::find(keys, key) != keys.end();
 }
@@ -423,6 +460,8 @@ parse_settings(const Json& json, const std::filesystem::path& path, std::string_
         std::string_view{"hlsl.entryPoint"},
         std::string_view{"hlsl.additionalArguments"},
         std::string_view{"hlsl.dxcRuntimeDirectory"},
+        std::string_view{"hlsl.compilerBackend"},
+        std::string_view{"hlsl.fxcRuntimePath"},
     };
     return std::ranges::find(keys, key) != keys.end();
 }
@@ -1077,6 +1116,12 @@ void merge_settings(ConfigurationSettings& target, const ConfigurationSettings& 
     if (higher_precedence.dxc_runtime_directory) {
         target.dxc_runtime_directory = higher_precedence.dxc_runtime_directory;
     }
+    if (higher_precedence.compiler_backend) {
+        target.compiler_backend = higher_precedence.compiler_backend;
+    }
+    if (higher_precedence.fxc_runtime_path) {
+        target.fxc_runtime_path = higher_precedence.fxc_runtime_path;
+    }
 }
 
 [[nodiscard]] VariantSettings to_variant_settings(const ConfigurationSettings& settings) {
@@ -1087,7 +1132,9 @@ void merge_settings(ConfigurationSettings& target, const ConfigurationSettings& 
                            .target_profile = settings.target_profile,
                            .entry_point = settings.entry_point,
                            .additional_arguments = settings.additional_arguments,
-                           .dxc_runtime_directory = settings.dxc_runtime_directory};
+                           .dxc_runtime_directory = settings.dxc_runtime_directory,
+                           .compiler_backend = settings.compiler_backend,
+                           .fxc_runtime_path = settings.fxc_runtime_path};
 }
 
 // Resolves a variant's settings by applying its inherited variants first, then
@@ -1239,6 +1286,16 @@ void apply_settings(WorkspaceConfiguration& result, const ConfigurationSettings&
         result.setting_origins["additionalArguments"] = origin.generic_string();
         result.setting_origin_files["additionalArguments"] = origin;
     }
+    if (settings.compiler_backend) {
+        result.compiler_backend = settings.compiler_backend;
+        result.setting_origins["compilerBackend"] = origin.generic_string();
+        result.setting_origin_files["compilerBackend"] = origin;
+    }
+    if (settings.fxc_runtime_path) {
+        result.fxc_runtime_path = settings.fxc_runtime_path;
+        result.setting_origins["fxcRuntimePath"] = origin.generic_string();
+        result.setting_origin_files["fxcRuntimePath"] = origin;
+    }
 }
 
 [[nodiscard]] WorkspaceConfiguration
@@ -1359,6 +1416,8 @@ auto WorkspaceConfiguration::compiler_options() const -> dxc::CompilerOptions {
                            std::back_inserter(result.include_directories),
                            [](const auto& path) { return path.string(); });
     result.additional_arguments = additional_arguments;
+    result.backend = compiler_backend.value_or(dxc::CompilerBackend::dxc);
+    result.fxc_runtime_path = fxc_runtime_path ? fxc_runtime_path->string() : std::string{};
     return result;
 }
 
@@ -1486,6 +1545,20 @@ auto apply_configuration_overrides(WorkspaceConfiguration configuration,
         configuration.setting_origins["dxcRuntimeDirectory"] = "editor settings";
         configuration.setting_origin_files.erase("dxcRuntimeDirectory");
     }
+    if (overrides.compiler_backend) {
+        configuration.compiler_backend = *overrides.compiler_backend;
+        configuration.setting_origins["compilerBackend"] = "editor settings";
+        configuration.setting_origin_files.erase("compilerBackend");
+    }
+    if (overrides.fxc_runtime_path) {
+        configuration.fxc_runtime_path =
+            *overrides.fxc_runtime_path
+                ? std::optional{resolve_fxc_runtime(settings_path,
+                                                    (*overrides.fxc_runtime_path)->string())}
+                : std::nullopt;
+        configuration.setting_origins["fxcRuntimePath"] = "editor settings";
+        configuration.setting_origin_files.erase("fxcRuntimePath");
+    }
     return configuration;
 }
 
@@ -1545,6 +1618,16 @@ auto apply_variant(WorkspaceConfiguration& configuration, std::string_view name)
         configuration.dxc_runtime_directory = settings.dxc_runtime_directory;
         configuration.setting_origins["dxcRuntimeDirectory"] = "variant " + variant->name;
         configuration.setting_origin_files["dxcRuntimeDirectory"] = variant->declaring_file;
+    }
+    if (settings.compiler_backend) {
+        configuration.compiler_backend = settings.compiler_backend;
+        configuration.setting_origins["compilerBackend"] = "variant " + variant->name;
+        configuration.setting_origin_files["compilerBackend"] = variant->declaring_file;
+    }
+    if (settings.fxc_runtime_path) {
+        configuration.fxc_runtime_path = settings.fxc_runtime_path;
+        configuration.setting_origins["fxcRuntimePath"] = "variant " + variant->name;
+        configuration.setting_origin_files["fxcRuntimePath"] = variant->declaring_file;
     }
     return VariantSelection::applied;
 }

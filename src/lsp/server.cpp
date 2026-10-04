@@ -94,6 +94,7 @@ effective_shader_target(const workspace::WorkspaceConfiguration& configuration) 
         origins["targetProfile"] = effective_context_origin_json(*context.target_profile_origin);
     }
     return {{"documentUri", context.document_uri},
+            {"compilerBackend", context.compiler_backend},
             {"file", context.file},
             {"configurationUri", context.configuration_file.has_value()
                                      ? Json(workspace::DocumentUri::from_path(
@@ -770,6 +771,9 @@ resource_compatibility_status(dxc::ResourceCompatibilityStatus status) {
 [[nodiscard]] Json
 compilation_signature_parameter_json(const dxc::CompilationSignatureParameter& parameter) {
     const auto interpolation = [&] {
+        if (!parameter.interpolation_available) {
+            return "unavailable";
+        }
         switch (parameter.interpolation) {
         case dxc::InterpolationMode::undefined:
             return "undefined";
@@ -846,7 +850,7 @@ compilation_signature_parameter_json(const dxc::CompilationSignatureParameter& p
                 {"returnType", resource.return_type},
                 {"registerClass", resource_register_class(resource.register_class)},
                 {"rawFlags", resource.raw_flags},
-                {"rangeId", resource.range_id},
+                {"rangeId", resource.range_id_available ? Json(resource.range_id) : Json(nullptr)},
                 {"sampleCount", resource.sample_count},
                 {"unbounded", resource.unbounded},
                 {"systemReservedSpace", resource.system_reserved_space},
@@ -1087,6 +1091,8 @@ compilation_info_json(const dxc::CompilationInfo& info,
                       const std::optional<std::string>& active_variant,
                       const std::unordered_map<std::string, std::string>& resource_location_texts) {
     Json result{{"entryPoint", info.entry_point},
+                {"compilerBackend", info.compiler_backend},
+                {"compilerRuntimePath", info.compiler_runtime_path},
                 {"stage", info.stage},
                 {"targetProfile", info.target_profile},
                 {"languageVersion", info.language_version},
@@ -1875,7 +1881,7 @@ struct InlayCallSite {
                                    std::size_t index) {
     Json item = {{"range", lsp_range(diagnostic_range(snapshot, diagnostic))},
                  {"severity", diagnostic_severity(diagnostic.severity)},
-                 {"source", "dxc"},
+                 {"source", diagnostic.source},
                  {"message", diagnostic.message}};
     if (!diagnostic.fix_its.empty()) {
         item["code"] = "hlsl-lsp/dxc-fix-it";
@@ -2105,6 +2111,23 @@ optional_string_setting(const Json& settings, const Json* hlsl, std::string_view
     result.language_version = optional_string_setting(settings, hlsl, "languageVersion");
     result.target_profile = optional_string_setting(settings, hlsl, "targetProfile");
     result.entry_point = optional_string_setting(settings, hlsl, "entryPoint");
+    if (const auto backend = optional_string_setting(settings, hlsl, "compilerBackend")) {
+        if (!*backend || (*backend)->empty()) {
+            result.compiler_backend.emplace(std::nullopt);
+        } else if (**backend == "dxc" || **backend == "fxc") {
+            result.compiler_backend.emplace(**backend == "fxc" ? dxc::CompilerBackend::fxc
+                                                               : dxc::CompilerBackend::dxc);
+        } else {
+            invalid_params("hlsl.compilerBackend must be 'dxc' or 'fxc'");
+        }
+    }
+    if (const auto runtime = optional_string_setting(settings, hlsl, "fxcRuntimePath")) {
+        if (*runtime && !(*runtime)->empty()) {
+            result.fxc_runtime_path.emplace(std::filesystem::path{**runtime});
+        } else {
+            result.fxc_runtime_path.emplace(std::nullopt);
+        }
+    }
 
     if (const auto* arguments = setting(settings, hlsl, "additionalArguments")) {
         if (!arguments->is_array()) {
@@ -2535,6 +2558,7 @@ Json Server::initialize(const std::optional<Json>& params) {
     const auto& value = object_params(params);
     std::optional<std::string> client_default_language_version;
     std::optional<std::string> initial_active_variant;
+    workspace::ConfigurationOverrides initial_compiler_settings;
     InlayHintSettings initial_inlay_hints;
     bool client_command_links = false;
     bool client_inlay_hint_refresh = false;
@@ -2554,6 +2578,8 @@ Json Server::initialize(const std::optional<Json>& params) {
     if (const auto initialization_options = value.find("initializationOptions");
         initialization_options != value.end() && !initialization_options->is_null()) {
         const auto defaults = configuration_overrides(*initialization_options);
+        initial_compiler_settings.compiler_backend = defaults.compiler_backend;
+        initial_compiler_settings.fxc_runtime_path = defaults.fxc_runtime_path;
         initial_inlay_hints = inlay_hint_settings(*initialization_options);
         if (defaults.language_version) {
             client_default_language_version = *defaults.language_version;
@@ -2594,6 +2620,8 @@ Json Server::initialize(const std::optional<Json>& params) {
         }
     }
     workspace_folders_ = std::move(workspace_folders);
+    editor_settings_.compiler_backend = initial_compiler_settings.compiler_backend;
+    editor_settings_.fxc_runtime_path = initial_compiler_settings.fxc_runtime_path;
     client_default_language_version_ = std::move(client_default_language_version);
     active_variant_ = std::move(initial_active_variant);
     inlay_hint_settings_ = initial_inlay_hints;
@@ -2679,6 +2707,7 @@ Json capture_review(const capture::Invocation& invocation,
         settings["hlsl.entryPoint"] = invocation.entry_point;
     }
     settings["hlsl.targetProfile"] = invocation.target_profile;
+    settings["hlsl.compilerBackend"] = "dxc";
     if (!invocation.language_version.empty()) {
         settings["hlsl.languageVersion"] = invocation.language_version;
     }
@@ -4479,8 +4508,10 @@ Json Server::command_context(const std::optional<Json>& params,
                 {"macroName", macro_name},
                 {"callHierarchyAvailable", callable.value.has_value()},
                 {"callableName", callable_name},
-                {"entryPointDataFlowAvailable", is_entry_point},
-                {"computeVisualizationAvailable", is_compute},
+                {"entryPointDataFlowAvailable",
+                 is_entry_point && submission.context.compiler_backend != "fxc"},
+                {"computeVisualizationAvailable",
+                 is_compute && submission.context.compiler_backend != "fxc"},
                 {"entryPoint", submission.entry_point}};
 }
 
@@ -4528,8 +4559,16 @@ Json Server::preprocessor_explorer(const std::optional<Json>& params,
     }
     bool skipped_regions_available = true;
     std::string skipped_regions_unavailable_reason;
-    if (resolution.has_rewritten_sources &&
-        !dxc::supports_skipped_ranges_for_rewritten_sources(analysis_.dxc_runtime_info().version)) {
+    const bool fxc = configuration.compiler_options().backend == dxc::CompilerBackend::fxc;
+    if (fxc) {
+        skipped_regions_available = false;
+        skipped_regions_unavailable_reason =
+            "Skipped-region and source-macro enumeration are unavailable: FXC exposes no "
+            "equivalent preprocessing-record API. Configured macros and resolver metadata "
+            "remain available.";
+    } else if (resolution.has_rewritten_sources &&
+               !dxc::supports_skipped_ranges_for_rewritten_sources(
+                   analysis_.dxc_runtime_info().version)) {
         skipped_regions_available = false;
         skipped_regions_unavailable_reason =
             "Compiler skipped-region analysis is unavailable because this Linux DXC runtime "
@@ -4543,8 +4582,10 @@ Json Server::preprocessor_explorer(const std::optional<Json>& params,
                              ? analysis_.skipped_ranges(snapshot.document_uri().identity(),
                                                         snapshot.version(), context.cancellation)
                              : std::vector<dxc::SourceRange>{};
-    const auto compiler_macros = analysis_.macro_definitions(
-        snapshot.document_uri().identity(), snapshot.version(), context.cancellation);
+    const auto compiler_macros =
+        fxc ? std::vector<dxc::MacroDefinition>{}
+            : analysis_.macro_definitions(snapshot.document_uri().identity(), snapshot.version(),
+                                          context.cancellation);
 
     std::unordered_map<std::string, std::string> compiler_source_texts;
     for (const auto& source : resolution.sources) {
@@ -4681,6 +4722,12 @@ Json Server::preprocessor_explorer(const std::optional<Json>& params,
     };
     add_setting("languageVersion", configuration.language_version.value_or("2021"),
                 setting_origin("languageVersion", "built-in default"));
+    add_setting("compilerBackend", fxc ? "fxc" : "dxc",
+                setting_origin("compilerBackend", "built-in default"));
+    add_setting("fxcRuntimePath",
+                configuration.fxc_runtime_path ? configuration.fxc_runtime_path->generic_string()
+                                               : std::string{},
+                setting_origin("fxcRuntimePath", "Windows system D3DCompiler_47.dll"));
     add_setting("targetProfile", configuration.target_profile.value_or(""),
                 setting_origin("targetProfile", "not configured"));
     add_setting("entryPoint", configuration.entry_point.value_or(""),
@@ -4718,8 +4765,11 @@ Json Server::preprocessor_explorer(const std::optional<Json>& params,
     }
     Json compiler_analysis{
         {"skippedRegions", std::move(skipped_regions_capability)},
-        {"compilerMacros", {{"available", true}}},
+        {"compilerMacros", {{"available", !fxc}}},
     };
+    if (fxc) {
+        compiler_analysis["compilerMacros"]["reason"] = skipped_regions_unavailable_reason;
+    }
 
     {
         std::scoped_lock state_lock{state_mutex_};
@@ -6479,6 +6529,8 @@ Server::effective_context_for(const workspace::SourceSnapshot& snapshot,
         .variant_origin = std::nullopt,
         .entry_point_origin = std::nullopt,
         .target_profile_origin = std::nullopt,
+        .compiler_backend =
+            configuration.compiler_options().backend == dxc::CompilerBackend::fxc ? "fxc" : "dxc",
     };
     const auto shader_directory = std::filesystem::path{snapshot.path()}.parent_path();
     std::error_code directory_error;
@@ -6853,6 +6905,10 @@ Json Server::configuration_authoring(const std::optional<Json>& params,
                                   std::string_view{"cs_6_6"}, std::string_view{"gs_6_6"},
                                   std::string_view{"hs_6_6"}, std::string_view{"ds_6_6"},
                                   std::string_view{"ms_6_6"}, std::string_view{"as_6_6"}};
+    constexpr std::array fxc_profiles{std::string_view{"vs_5_0"}, std::string_view{"ps_5_0"},
+                                      std::string_view{"cs_5_0"}, std::string_view{"gs_5_0"},
+                                      std::string_view{"hs_5_0"}, std::string_view{"ds_5_0"}};
+    const auto authoring_configuration_state = snapshot_configuration_state();
 
     std::unordered_map<std::string, workspace::SourceSnapshot> open_by_identity;
     for (const auto& snapshot : open_documents) {
@@ -6890,6 +6946,18 @@ Json Server::configuration_authoring(const std::optional<Json>& params,
         try {
             workspace::WorkspaceConfiguration configuration;
             configuration.language_version = "2021";
+            const auto selected_configuration =
+                configuration_for(snapshot, authoring_configuration_state);
+            const bool fxc =
+                selected_configuration.compiler_options().backend == dxc::CompilerBackend::fxc;
+            if (fxc) {
+                configuration = selected_configuration;
+                configuration.target_profile = "ps_5_0";
+                configuration.entry_point = "main";
+            }
+            const auto compiler_name = fxc ? "FXC" : "DXC";
+            const auto selected_profiles = fxc ? std::span<const std::string_view>{fxc_profiles}
+                                               : std::span<const std::string_view>{profiles};
             if (!analysis_.analyze(analysis::AnalysisInput{.root = snapshot,
                                                            .open_documents = open_documents,
                                                            .configuration = configuration,
@@ -6919,13 +6987,13 @@ Json Server::configuration_authoring(const std::optional<Json>& params,
                     .explanation = {}};
                 if (name_counts[function.name] > 1) {
                     candidate.state = "ambiguous";
-                    candidate.explanation =
-                        "DXC reported multiple free-function definitions with this name.";
+                    candidate.explanation = "The source index reported multiple free-function "
+                                            "definitions with this name.";
                     file.entry_points.push_back(std::move(candidate));
                     continue;
                 }
                 bool all_profiles_probed = true;
-                for (const auto profile : profiles) {
+                for (const auto profile : selected_profiles) {
                     if (probes == max_compiler_probes) {
                         analysis_truncated = true;
                         analysis_truncation_reason = "compilerProbeLimit";
@@ -6960,14 +7028,17 @@ Json Server::configuration_authoring(const std::optional<Json>& params,
                 } else if (candidate.profiles.empty()) {
                     candidate.state = "unresolved";
                     candidate.explanation =
-                        "DXC did not validate this function for any probed shader profile.";
+                        std::string{compiler_name} +
+                        " did not validate this function for any probed shader profile.";
                 } else if (candidate.profiles.size() == 1) {
                     candidate.state = "resolved";
-                    candidate.explanation = "DXC validated exactly one probed shader profile.";
+                    candidate.explanation = std::string{compiler_name} +
+                                            " validated exactly one probed shader profile.";
                 } else {
                     candidate.state = "ambiguous";
                     candidate.explanation =
-                        "DXC validated multiple shader profiles; the client must choose one.";
+                        std::string{compiler_name} +
+                        " validated multiple shader profiles; the client must choose one.";
                 }
                 file.entry_points.push_back(std::move(candidate));
             }

@@ -156,7 +156,9 @@ public sealed class HlslBootstrapPackage : AsyncPackage
                 page.InlayHintRegisters,
                 page.InlayHintPackedOffsets,
                 page.InlayHintArrayStrides,
-                page.InlayHintActiveVariant));
+                page.InlayHintActiveVariant),
+            page.CompilerBackend,
+            page.FxcRuntimePath);
     }
 
     protected override async Task InitializeAsync(
@@ -4294,12 +4296,16 @@ public sealed class HlslOptionsSnapshot
         string fileExtensions,
         string languageVersion,
         string dxcRuntimeDirectory,
-        InlayHintOptionsSnapshot inlayHints)
+        InlayHintOptionsSnapshot inlayHints,
+        string compilerBackend = "",
+        string fxcRuntimePath = "")
     {
         FileExtensions = fileExtensions;
         LanguageVersion = languageVersion;
         DxcRuntimeDirectory = dxcRuntimeDirectory;
         InlayHints = inlayHints;
+        CompilerBackend = compilerBackend;
+        FxcRuntimePath = fxcRuntimePath;
     }
 
     public string FileExtensions { get; }
@@ -4309,6 +4315,8 @@ public sealed class HlslOptionsSnapshot
     public string DxcRuntimeDirectory { get; }
 
     public InlayHintOptionsSnapshot InlayHints { get; }
+    public string CompilerBackend { get; }
+    public string FxcRuntimePath { get; }
 }
 
 public sealed class InlayHintOptionsSnapshot
@@ -4346,6 +4354,8 @@ public sealed class HlslOptionsPage : DialogPage
     private string fileExtensions = ".hlsl;.hlsli;.usf";
     private string languageVersion = "2021";
     private string dxcRuntimeDirectory = "";
+    private string compilerBackend = "";
+    private string fxcRuntimePath = "";
     private bool inlayHintTypes = true;
     private bool inlayHintParameters = true;
     private bool inlayHintMatrixOrientation;
@@ -4409,6 +4419,40 @@ public sealed class HlslOptionsPage : DialogPage
                 return;
             }
             dxcRuntimeDirectory = value;
+            HlslBootstrapPackage.NotifyOptionsChanged();
+        }
+    }
+
+    [Category("Compiler")]
+    [System.ComponentModel.DisplayName("Compiler backend")]
+    [Description(
+        "Compilation and reflection authority: dxc or fxc. FXC is Windows-only. " +
+        "Leave empty to follow shadertoolsconfig.json (DXC by default).")]
+    public string CompilerBackend
+    {
+        get => compilerBackend;
+        set
+        {
+            if (string.Equals(compilerBackend, value, StringComparison.Ordinal))
+                return;
+            compilerBackend = value;
+            HlslBootstrapPackage.NotifyOptionsChanged();
+        }
+    }
+
+    [Category("Compiler")]
+    [System.ComponentModel.DisplayName("FXC runtime DLL")]
+    [Description(
+        "Optional D3DCompiler DLL path. Leave empty to follow shadertoolsconfig.json " +
+        "or use Windows system D3DCompiler_47.dll. Changing this reanalyzes shaders.")]
+    public string FxcRuntimePath
+    {
+        get => fxcRuntimePath;
+        set
+        {
+            if (string.Equals(fxcRuntimePath, value, StringComparison.Ordinal))
+                return;
+            fxcRuntimePath = value;
             HlslBootstrapPackage.NotifyOptionsChanged();
         }
     }
@@ -4558,6 +4602,10 @@ public sealed class HlslOptionsPage : DialogPage
                         return "hlslLsp.general.languageVersion";
                     case nameof(HlslOptionsPage.DxcRuntimeDirectory):
                         return "hlslLsp.general.dxcRuntimeDirectory";
+                    case nameof(HlslOptionsPage.CompilerBackend):
+                        return "hlslLsp.general.compilerBackend";
+                    case nameof(HlslOptionsPage.FxcRuntimePath):
+                        return "hlslLsp.general.fxcRuntimePath";
                     case nameof(HlslOptionsPage.InlayHintTypes):
                         return "hlslLsp.general.inlayHintTypes";
                     case nameof(HlslOptionsPage.InlayHintParameters):

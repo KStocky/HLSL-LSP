@@ -133,6 +133,17 @@ input(const workspace::DocumentUri& uri, std::int64_t version, std::string text,
 
 } // namespace
 
+TEST_CASE("Compiler backend and FXC runtime changes invalidate analysis fingerprints",
+          "[analysis][configuration][fxc]") {
+    hlsl_intellisense::workspace::WorkspaceConfiguration configuration;
+    const auto dxc = hlsl_intellisense::analysis::Manager::configuration_fingerprint(configuration);
+    configuration.compiler_backend = hlsl_intellisense::dxc::CompilerBackend::fxc;
+    const auto fxc = hlsl_intellisense::analysis::Manager::configuration_fingerprint(configuration);
+    CHECK(dxc != fxc);
+    configuration.fxc_runtime_path = std::filesystem::path{"compiler.dll"};
+    CHECK(fxc != hlsl_intellisense::analysis::Manager::configuration_fingerprint(configuration));
+}
+
 TEST_CASE("Analysis cache measures cold parse, cache hit, reparse, and completion",
           "[analysis][cache][performance]") {
     TestDirectory directory;

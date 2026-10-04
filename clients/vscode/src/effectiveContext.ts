@@ -23,6 +23,7 @@ export function effectiveConfigurationOriginUri(
 }
 
 export interface EffectiveShaderContext {
+  readonly compilerBackend?: "dxc" | "fxc";
   readonly documentUri: string;
   readonly file: string;
   readonly configurationUri?: string | null;
@@ -80,7 +81,7 @@ export function effectiveContextHeaderHtml(
   const targetProfile = contextValue(context?.targetProfile);
   const origins = context === undefined ? "" : originSummary(context);
   return `<section style="margin:.25rem 0 1rem;padding:.55rem .7rem;border:1px solid var(--vscode-panel-border);border-radius:4px;">
-<div><strong>File:</strong> ${escapeHtml(file)} · <strong>Variant:</strong> ${escapeHtml(variant)} · <strong>Entry point:</strong> ${escapeHtml(entryPoint)} · <strong>Target profile:</strong> ${escapeHtml(targetProfile)}</div>
+<div><strong>File:</strong> ${escapeHtml(file)} · <strong>Variant:</strong> ${escapeHtml(variant)} · <strong>Entry point:</strong> ${escapeHtml(entryPoint)} · <strong>Target profile:</strong> ${escapeHtml(targetProfile)} · <strong>Compiler:</strong> ${context?.compilerBackend === "fxc" ? "FXC" : "DXC"}</div>
 ${origins === "" ? "" : `<div style="color:var(--vscode-descriptionForeground);margin-top:.25rem;"><strong>Configuration origins:</strong> ${escapeHtml(origins)}</div>`}
 </section>`;
 }
@@ -95,6 +96,7 @@ export function effectiveContextTooltip(
     `Variant: ${variantLabel(context.activeVariant)}`,
     `Entry point: ${contextValue(context.entryPoint)}`,
     `Target profile: ${contextValue(context.targetProfile)}`,
+    `Compiler: ${context.compilerBackend === "fxc" ? "FXC" : "DXC"}`,
   ];
   const origins = originSummary(context);
   if (origins !== "") {
