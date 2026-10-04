@@ -1484,6 +1484,8 @@ std::string
 Manager::configuration_fingerprint(const workspace::WorkspaceConfiguration& configuration) {
     std::string result;
     const auto options = configuration.compiler_options();
+    append_component(result, options.backend == dxc::CompilerBackend::fxc ? "fxc" : "dxc");
+    append_component(result, options.fxc_runtime_path);
     for (const auto& argument : options.arguments()) {
         append_component(result, argument);
     }

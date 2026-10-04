@@ -763,6 +763,53 @@ TEST_CASE("Configuration authoring protocol discovers DXC entry points without w
     CHECK(preview["hlsl.fileGroups"][0]["hlsl.targetProfile"] == "cs_6_6");
 }
 
+#ifdef _WIN32
+TEST_CASE("FXC configuration authoring probes native SM5 profiles",
+          "[lsp][fxc][configuration-authoring]") {
+    TestDirectory directory;
+    {
+        std::ofstream config{directory.path() / "shadertoolsconfig.json"};
+        REQUIRE(config);
+        config << R"({"root":true,"hlsl.compilerBackend":"fxc"})";
+        std::ofstream shader{directory.path() / "compute.hlsl"};
+        REQUIRE(shader);
+        shader << "[numthreads(1, 1, 1)]\n"
+                  "void Main(uint3 id : SV_DispatchThreadID) { uint sink = id.x; }\n";
+    }
+    const auto uri =
+        hlsl_intellisense::workspace::DocumentUri::from_path(directory.path().string()).uri();
+    hlsl_intellisense::lsp::Server server{[](const auto&) {}};
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{1},
+        .method = "initialize",
+        .params =
+            Json{{"workspaceFolders", Json::array({{{"uri", uri}, {"name", "workspace"}}})}}}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    const auto response = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{2},
+        .method = "hlsl/configurationAuthoring",
+        .params = Json{{"protocolVersion", 1}, {"workspaceFolder", {{"uri", uri}}}}});
+    REQUIRE(response);
+    if (const auto* error = std::get_if<hlsl_intellisense::json_rpc::ErrorResponse>(&*response)) {
+        FAIL(error->error.message);
+    }
+    const auto* result = std::get_if<hlsl_intellisense::json_rpc::Response>(&*response);
+    REQUIRE(result);
+    INFO(result->result.dump());
+    REQUIRE(result->result["discovery"]["files"].size() == 1);
+    const auto& file = result->result["discovery"]["files"][0];
+    CHECK(file["analysisError"].is_null());
+    REQUIRE(file["entryPoints"].size() == 1);
+    CHECK(file["entryPoints"][0]["targetProfiles"] == Json::array({"cs_5_0"}));
+    CHECK(file["entryPoints"][0]["explanation"].get<std::string>().starts_with("FXC"));
+    CHECK(result->result["preview"]["valid"] == true);
+    const auto preview = Json::parse(result->result["preview"]["content"].get<std::string>());
+    CHECK(preview["hlsl.compilerBackend"] == "fxc");
+    CHECK(preview["hlsl.fileGroups"][0]["hlsl.targetProfile"] == "cs_5_0");
+}
+#endif
+
 TEST_CASE("Configuration authoring protocol rejects stale hashes and reports malformed content",
           "[lsp][configuration-authoring]") {
     TestDirectory directory;
@@ -1293,6 +1340,118 @@ TEST_CASE("Server exposes compiler-backed preprocessor exploration",
     CHECK((*target_profile)["origin"] == "not configured");
     CHECK_FALSE(result->result["diagnostics"].empty());
 }
+
+#ifdef _WIN32
+TEST_CASE("FXC LSP reports native diagnostics and capability limits and switches backends",
+          "[lsp][fxc][integration]") {
+    const auto uri = shader_uri();
+    const std::string source = "Texture2D image : register(t0);\n"
+                               "SamplerState samplerState : register(s0);\n"
+                               "float4 main(float2 uv : TEXCOORD0) : SV_Target {\n"
+                               "  return image.Sample(samplerState, uv);\n"
+                               "}\n";
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    hlsl_intellisense::lsp::Server server{
+        [&notifications](const auto& value) { notifications.push_back(value); }};
+    static_cast<void>(server.handle(
+        hlsl_intellisense::json_rpc::Request{.id = std::int64_t{1},
+                                             .method = "initialize",
+                                             .params = Json{{"initializationOptions",
+                                                             {{"hlsl",
+                                                               {{"compilerBackend", "fxc"},
+                                                                {"targetProfile", "ps_5_0"},
+                                                                {"entryPoint", "main"}}}}}}}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "initialized", .params = Json::object()}));
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didOpen",
+        .params =
+            Json{{"textDocument",
+                  {{"uri", uri}, {"languageId", "hlsl"}, {"version", 1}, {"text", source}}}}}));
+    const auto query = [&server, &uri](std::string method) {
+        const auto response = server.handle(
+            hlsl_intellisense::json_rpc::Request{.id = std::int64_t{2},
+                                                 .method = std::move(method),
+                                                 .params = Json{{"textDocument", {{"uri", uri}}}}});
+        REQUIRE(response);
+        if (const auto* error =
+                std::get_if<hlsl_intellisense::json_rpc::ErrorResponse>(&*response)) {
+            FAIL(error->error.message);
+        }
+        const auto* result = std::get_if<hlsl_intellisense::json_rpc::Response>(&*response);
+        REQUIRE(result);
+        return result->result;
+    };
+    const auto info = query("hlsl/compilationInfo");
+    INFO(info.dump());
+    REQUIRE(info["success"] == true);
+    CHECK(info["compilerBackend"] == "fxc");
+    CHECK_FALSE(info["compilerRuntimePath"].get<std::string>().empty());
+    CHECK(info["context"]["compilerBackend"] == "fxc");
+    CHECK(info["output"]["type"] == "dxbc");
+    CHECK(info["reflection"]["available"] == true);
+    REQUIRE_FALSE(info["reflection"]["inputSignature"].empty());
+    CHECK(info["reflection"]["inputSignature"][0]["interpolation"] == "unavailable");
+    REQUIRE_FALSE(info["reflection"]["resources"].empty());
+    CHECK(info["reflection"]["resources"][0]["rangeId"].is_null());
+    static_cast<void>(server.handle(
+        hlsl_intellisense::json_rpc::Notification{.method = "workspace/didChangeConfiguration",
+                                                  .params = Json{{"settings",
+                                                                  {{"hlsl",
+                                                                    {{"compilerBackend", "fxc"},
+                                                                     {"targetProfile", "ps_5_0"},
+                                                                     {"entryPoint", "main"}}}}}}}));
+    const auto command = server.handle(hlsl_intellisense::json_rpc::Request{
+        .id = std::int64_t{3},
+        .method = "hlsl/commandContext",
+        .params = Json{{"textDocument", {{"uri", uri}}},
+                       {"position", position_at(source, source.find("main"))}}});
+    REQUIRE(command);
+    const auto* command_result = std::get_if<hlsl_intellisense::json_rpc::Response>(&*command);
+    REQUIRE(command_result);
+    CHECK(command_result->result["callHierarchyAvailable"] == true);
+    CHECK(command_result->result["entryPointDataFlowAvailable"] == false);
+    CHECK(command_result->result["computeVisualizationAvailable"] == false);
+    const auto preprocessor = query("hlsl/preprocessorExplorer");
+    CHECK(preprocessor["compilerAnalysis"]["skippedRegions"]["available"] == false);
+    CHECK(preprocessor["compilerAnalysis"]["compilerMacros"]["available"] == false);
+    CHECK(preprocessor["compilerAnalysis"]["compilerMacros"]["reason"].get<std::string>().find(
+              "FXC") != std::string::npos);
+
+    const std::string invalid_source = "float4 main() : SV_Target { return missing; }\n";
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didChange",
+        .params = Json{{"textDocument", {{"uri", uri}, {"version", 2}}},
+                       {"contentChanges", Json::array({{{"text", invalid_source}}})}}}));
+    server.wait_for_analysis();
+    const auto diagnostics =
+        std::ranges::find_if(notifications.rbegin(), notifications.rend(), [](const auto& value) {
+            return value.method == "textDocument/publishDiagnostics";
+        });
+    REQUIRE(diagnostics != notifications.rend());
+    REQUIRE(diagnostics->params);
+    REQUIRE_FALSE((*diagnostics->params)["diagnostics"].empty());
+    CHECK((*diagnostics->params)["diagnostics"][0]["source"] == "fxc");
+    CHECK_FALSE(query("hlsl/compilationInfo")["success"].get<bool>());
+
+    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+        .method = "textDocument/didChange",
+        .params = Json{{"textDocument", {{"uri", uri}, {"version", 3}}},
+                       {"contentChanges", Json::array({{{"text", source}}})}}}));
+    static_cast<void>(server.handle(
+        hlsl_intellisense::json_rpc::Notification{.method = "workspace/didChangeConfiguration",
+                                                  .params = Json{{"settings",
+                                                                  {{"hlsl",
+                                                                    {{"compilerBackend", "dxc"},
+                                                                     {"targetProfile", "ps_6_0"},
+                                                                     {"entryPoint", "main"}}}}}}}));
+    const auto modern = query("hlsl/compilationInfo");
+    CHECK(modern["success"] == true);
+    CHECK(modern["compilerBackend"] == "dxc");
+    CHECK(modern["context"]["compilerBackend"] == "dxc");
+    CHECK(modern["output"]["type"] == "dxil");
+}
+#endif
 
 TEST_CASE("Memory layout protocol handles packoffset and conditionals via DXC",
           "[lsp][memory-layout][unsupported]") {

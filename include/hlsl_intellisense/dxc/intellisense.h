@@ -63,6 +63,8 @@ supports_skipped_ranges_for_rewritten_sources(std::string_view runtime_version) 
 // rejected; the bundled default is selected by loading without a directory.
 [[nodiscard]] std::string validate_runtime_directory(std::string_view directory);
 
+enum class CompilerBackend : std::uint8_t { dxc, fxc };
+
 struct CompilerOptions {
     std::string language_version{"2021"};
     std::string target_profile;
@@ -70,6 +72,8 @@ struct CompilerOptions {
     std::vector<std::string> defines;
     std::vector<std::string> include_directories;
     std::vector<std::string> additional_arguments;
+    CompilerBackend backend{CompilerBackend::dxc};
+    std::string fxc_runtime_path{};
 
     [[nodiscard]] std::vector<std::string> arguments() const;
 };
@@ -140,6 +144,7 @@ struct Diagnostic {
     // called and no such ranges are surfaced here; only the (separately
     // verified safe) fix-it replacement ranges below are exposed.
     std::vector<FixIt> fix_its;
+    std::string source{"dxc"};
 
     // Used to detect diagnostics that are semantically unchanged across a
     // reanalysis (e.g. a cache hit that only bumped the analysis generation)
@@ -226,8 +231,8 @@ enum class InterpolationMode : std::uint8_t {
     invalid
 };
 
-// Describes one entry of a DXIL input/output signature parameter, populated
-// from ID3D12ShaderReflection and the compiler-produced PSV0 metadata.
+// Describes a compiler-reflected input/output signature parameter.
+// Interpolation is only populated when compiler metadata exposes it.
 struct CompilationSignatureParameter {
     std::string semantic_name;
     std::uint32_t semantic_index{};
@@ -239,6 +244,7 @@ struct CompilationSignatureParameter {
     std::uint32_t stream{};
     InterpolationMode interpolation{InterpolationMode::undefined};
     std::optional<SourceLocation> source_location;
+    bool interpolation_available{true};
 };
 
 // The register class a resource binds through, derived from the raw
@@ -260,7 +266,7 @@ enum class ResourceRegisterClass : std::uint8_t { cbv, srv, uav, sampler, unknow
 enum class ResourceUsageStatus : std::uint8_t { used, unused, unknown };
 
 // Describes one bound resource, populated from
-// ID3D12ShaderReflection::GetResourceBindingDesc.
+// native shader reflection.
 struct CompilationResourceBinding {
     std::string name;
     std::string type; // e.g. "cbuffer", "texture", "uav_rwstructured"
@@ -276,7 +282,7 @@ struct CompilationResourceBinding {
     // compiler, exposed unchanged so clients can inspect bits this server
     // does not itself interpret.
     std::uint32_t raw_flags{};
-    // The raw uID (range identifier) reported by the compiler.
+    // The raw uID (range identifier), meaningful only when range_id_available.
     std::uint32_t range_id{};
     // The raw NumSamples reported by the compiler. For SIT_STRUCTURED and
     // SIT_UAV_RWSTRUCTURED* resources the compiler reuses this field to
@@ -311,6 +317,7 @@ struct CompilationResourceBinding {
     // elsewhere), so a location is only ever reported when it is
     // compiler-unambiguous.
     std::optional<SourceLocation> source_location;
+    bool range_id_available{true};
 };
 
 // One register range occupied by a single reflected resource within a
@@ -678,6 +685,8 @@ struct CompilationInfo {
     // Compiler-owned cursor metadata derived from the same serialized
     // translation-unit generation as this compilation result.
     std::optional<ComputeCompilerMetadata> compute_metadata;
+    std::string compiler_backend{"dxc"};
+    std::string compiler_runtime_path{};
 };
 
 struct SignatureParameter {
@@ -1005,8 +1014,8 @@ class TranslationUnit final {
     macro_name_at(std::string_view path, std::uint32_t line, std::uint32_t column) const;
     // Compiles the actual root source and all resolved in-memory include
     // sources with the effective compiler arguments and returns the
-    // compiler-authoritative configuration and reflection. DXC is invoked
-    // directly; there is no fallback parser for HLSL source.
+    // compiler-authoritative configuration and reflection using the selected
+    // backend. There is no fallback parser for HLSL source.
     [[nodiscard]] CompilationInfo compilation_info(const ComputeMetadataLimits& limits = {}) const;
     [[nodiscard]] std::vector<Signature> signatures_at(std::string_view path, std::uint32_t line,
                                                        std::uint32_t column) const;

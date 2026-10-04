@@ -66,11 +66,13 @@ internal sealed class HlslOptionsChange
     internal bool RuntimeChanged { get; set; }
 
     internal bool InlayHintsChanged { get; set; }
+    internal bool CompilerSettingsChanged { get; set; }
 
     internal bool AnalysisAffected =>
         FileExtensionsChanged ||
         LanguageVersionChanged ||
-        RuntimeChanged;
+        RuntimeChanged ||
+        CompilerSettingsChanged;
 }
 
 internal static class HlslOptionsAnalysisPolicy
@@ -102,6 +104,14 @@ internal static class HlslOptionsAnalysisPolicy
                 previous.DxcRuntimeDirectory?.Trim(),
                 current.DxcRuntimeDirectory?.Trim(),
                 StringComparison.OrdinalIgnoreCase),
+            CompilerSettingsChanged = !string.Equals(
+                    previous.CompilerBackend?.Trim(),
+                    current.CompilerBackend?.Trim(),
+                    StringComparison.Ordinal) ||
+                !string.Equals(
+                    previous.FxcRuntimePath?.Trim(),
+                    current.FxcRuntimePath?.Trim(),
+                    StringComparison.OrdinalIgnoreCase),
             InlayHintsChanged = !InlayHintsEqual(
                 previous.InlayHints,
                 current.InlayHints),
@@ -279,7 +289,9 @@ public sealed class HlslLspActivator :
             OnServerRuntimeRestartRequestedAsync,
             OnActiveVariantChangedFromServerAsync,
             OnConfigurationChangedFromServerAsync,
-            OnLanguageServerConnectionChanged);
+            OnLanguageServerConnectionChanged,
+            initialOptions.CompilerBackend,
+            initialOptions.FxcRuntimePath);
         MemoryLayoutBridge.Register(languageClient.GetMemoryLayoutAsync);
         MacroExpansionBridge.Register(languageClient.GetMacroExpansionAsync);
         HlslCommandContextBridge.Register(languageClient.GetCommandContextAsync);
@@ -467,6 +479,12 @@ public sealed class HlslLspActivator :
             return;
         }
 
+        if (change.CompilerSettingsChanged)
+        {
+            await languageClient.UpdateCompilerSettingsAsync(
+                options.CompilerBackend,
+                options.FxcRuntimePath);
+        }
         var effectiveRuntime = EffectiveRuntimeDirectory(options);
         if (!string.Equals(
                 effectiveRuntime,

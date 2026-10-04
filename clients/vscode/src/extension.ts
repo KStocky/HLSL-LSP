@@ -1538,6 +1538,8 @@ class VscodeLanguageClient implements ManagedClient {
         hlsl: {
           languageVersion: initialSettings.languageVersion,
           activeVariant: initialSettings.activeVariant || undefined,
+          compilerBackend: initialSettings.server.compilerBackend,
+          fxcRuntimePath: initialSettings.server.fxcRuntimePath,
         },
         commandLinks: true,
       },

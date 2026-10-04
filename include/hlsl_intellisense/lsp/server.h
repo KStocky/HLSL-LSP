@@ -63,6 +63,7 @@ struct EffectiveShaderContext {
     std::optional<EffectiveContextOrigin> variant_origin;
     std::optional<EffectiveContextOrigin> entry_point_origin;
     std::optional<EffectiveContextOrigin> target_profile_origin;
+    std::string compiler_backend{"dxc"};
 };
 
 class Server final {

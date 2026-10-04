@@ -27,6 +27,8 @@ with:
 - Named compilation variants selectable per document from either editor
 - Named graphics pipelines with cross-stage interface and shared-resource diagnostics
 - Selectable DXC runtime: the bundled default or an explicit compatible runtime
+- Windows FXC/D3DCompiler backend for legacy shader compilation, diagnostics,
+  preprocessing, and reflection, selectable per file or variant
 - Transitive, virtual, open-buffer, and dependency-aware include handling
 - Bounded, cancellable, version-coalesced background analysis
 - Visual Studio 2022 17.14+, Visual Studio 2026, and Visual Studio Code clients
@@ -37,6 +39,11 @@ The Visual Studio extension serves a similar purpose to
 DXC's IntelliSense API so it can understand modern HLSL language and shader
 model features, including HLSL 2021 and Shader Model 6.6 resource descriptor
 heap types.
+
+DXC remains the default. Windows projects targeting Shader Model 5 can select
+the native [FXC backend](docs/fxc.md); both clients expose the selection and
+identify the active compiler. FXC-only limitations are reported explicitly,
+not filled with a custom HLSL parser or silently substituted DXC compilation.
 
 > [!WARNING]
 > **HLSL Tools compatibility:** HLSL Tools and HLSL-LSP integrate with the

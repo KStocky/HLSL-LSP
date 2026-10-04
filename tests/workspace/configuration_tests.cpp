@@ -87,6 +87,63 @@ class TestTree final {
 
 } // namespace
 
+TEST_CASE("Compiler backends and FXC runtime paths follow configuration precedence",
+          "[workspace][configuration][fxc]") {
+    TestTree tree;
+    tree.file("compiler.dll", "configuration path fixture");
+    tree.file("shadertoolsconfig.json",
+              R"({
+                "root": true,
+                "hlsl.compilerBackend": "dxc",
+                "hlsl.fileGroups": [{
+                  "files": ["legacy.hlsl"],
+                  "hlsl.compilerBackend": "fxc",
+                  "hlsl.fxcRuntimePath": "compiler.dll",
+                  "hlsl.targetProfile": "ps_5_0"
+                }],
+                "hlsl.variantsVersion": 1,
+                "hlsl.variants": [{
+                  "name": "modern",
+                  "hlsl.compilerBackend": "dxc",
+                  "hlsl.targetProfile": "ps_6_6"
+                }]
+              })");
+    auto legacy = workspace::load_workspace_configuration_for_file(tree.path("legacy.hlsl"));
+    CHECK(legacy.compiler_options().backend == hlsl_intellisense::dxc::CompilerBackend::fxc);
+    CHECK(legacy.compiler_options().target_profile == "ps_5_0");
+    CHECK(legacy.compiler_options().fxc_runtime_path ==
+          std::filesystem::absolute(tree.path("compiler.dll")).lexically_normal().string());
+    CHECK(legacy.setting_origins.at("compilerBackend") ==
+          tree.path("shadertoolsconfig.json").generic_string());
+    CHECK(workspace::apply_variant(legacy, "modern") == workspace::VariantSelection::applied);
+    CHECK(legacy.compiler_options().backend == hlsl_intellisense::dxc::CompilerBackend::dxc);
+    CHECK(legacy.compiler_options().target_profile == "ps_6_6");
+
+    workspace::ConfigurationOverrides overrides;
+    overrides.compiler_backend.emplace(hlsl_intellisense::dxc::CompilerBackend::fxc);
+    overrides.fxc_runtime_path.emplace(std::nullopt);
+    auto overridden = workspace::apply_configuration_overrides(legacy, overrides, tree.path(""));
+    CHECK(overridden.compiler_options().backend == hlsl_intellisense::dxc::CompilerBackend::fxc);
+    CHECK(overridden.compiler_options().fxc_runtime_path.empty());
+    overrides.compiler_backend.emplace(std::nullopt);
+    overridden = workspace::apply_configuration_overrides(overridden, overrides, tree.path(""));
+    CHECK(overridden.compiler_options().backend == hlsl_intellisense::dxc::CompilerBackend::dxc);
+}
+
+TEST_CASE("Invalid compiler backend and FXC paths are explicit configuration errors",
+          "[workspace][configuration][fxc]") {
+    TestTree tree;
+    tree.file("shadertoolsconfig.json", R"({"root":true,"hlsl.compilerBackend":"unknown"})");
+    CHECK(configuration_failure(tree.path("shader.hlsl")).key == "hlsl.compilerBackend");
+    tree.file("shadertoolsconfig.json", R"({"root":true,"hlsl.fxcRuntimePath":"missing.dll"})");
+    CHECK(configuration_failure(tree.path("shader.hlsl")).key == "hlsl.fxcRuntimePath");
+    tree.file(
+        "shadertoolsconfig.json",
+        R"({"root":true,"hlsl.fileGroups":[{"files":["*.hlsl"],"hlsl.fxcRuntimePath":"missing.dll"}]})");
+    CHECK(configuration_failure(tree.path("shader.hlsl")).key ==
+          "hlsl.fileGroups[0].hlsl.fxcRuntimePath");
+}
+
 TEST_CASE("Configuration discovery merges toward the shader and stops at root",
           "[workspace][configuration]") {
     TestTree tree;

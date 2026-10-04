@@ -1,6 +1,7 @@
 #include <hlsl_intellisense/dxc/intellisense.h>
 
 #include "compilation_info.h"
+#include "fxc.h"
 #include "memory_layout.h"
 
 #ifdef _WIN32
@@ -628,6 +629,19 @@ class TaskRanges final {
            kind == DxcCursor_ClassDecl || kind == DxcCursor_EnumDecl ||
            kind == DxcCursor_Namespace || kind == DxcCursor_ClassTemplate ||
            kind == DxcCursor_ClassTemplatePartialSpecialization;
+}
+
+[[nodiscard]] bool cursor_from_sources(IDxcCursor& cursor, const std::vector<SourceFile>& sources) {
+    ComPtr<IDxcSourceLocation> location;
+    check(cursor.GetLocation(location.put()), "GetLocation");
+    BOOL is_null{};
+    check(location->IsNull(&is_null), "IsNull");
+    if (is_null != FALSE) {
+        return false;
+    }
+    const auto declaration = make_source_location(*location.get());
+    return std::ranges::any_of(sources,
+                               [&](const auto& source) { return source.path == declaration.path; });
 }
 
 struct MacroCursorMatch {
@@ -2698,6 +2712,16 @@ struct TranslationUnit::Impl final {
     // keeps -spirv/-fspv-* since it is used for actual compilation, not the
     // IntelliSense index parse which cannot consume them).
     std::vector<std::string> full_arguments;
+    CompilerOptions compiler_options;
+    mutable std::optional<CompilationInfo> fxc_compilation;
+
+    [[nodiscard]] const CompilationInfo& fxc_info() const {
+        if (!fxc_compilation.has_value()) {
+            fxc_compilation =
+                detail::compilation_info_from_fxc(sources, compiler_options, root_path);
+        }
+        return *fxc_compilation;
+    }
     bool descriptor_heaps_supported{};
     mutable std::optional<detail::PreprocessDiagnostics> token_paste_preprocessing;
     std::vector<ComPtr<IDxcUnsavedFile>> unsaved_files;
@@ -2778,6 +2802,9 @@ auto TranslationUnit::operator=(TranslationUnit&&) noexcept -> TranslationUnit& 
 TranslationUnit::~TranslationUnit() = default;
 
 auto TranslationUnit::diagnostics() const -> std::vector<Diagnostic> {
+    if (implementation_->compiler_options.backend == CompilerBackend::fxc) {
+        return implementation_->fxc_info().diagnostics;
+    }
     unsigned count{};
     check(implementation_->translation_unit->GetNumDiagnostics(&count), "GetNumDiagnostics");
 
@@ -2879,6 +2906,43 @@ auto TranslationUnit::complete(std::string_view path, std::uint32_t line,
             completions.push_back(std::move(completion));
         }
     }
+    if (implementation_->compiler_options.backend == CompilerBackend::fxc) {
+        std::unordered_set<std::string> names;
+        std::uint64_t visited{};
+        const auto collect = [&](const auto& self, IDxcCursor& parent, unsigned depth) -> void {
+            if (depth >= 128 || ++visited > 1000000) {
+                throw std::runtime_error{"FXC source-completion traversal limit exceeded"};
+            }
+            constexpr unsigned page_size = 256;
+            for (unsigned skip = 0;; skip += page_size) {
+                unsigned count{};
+                IDxcCursor** raw_children{};
+                check(parent.GetChildren(skip, page_size, &count, &raw_children), "GetChildren");
+                TaskCursors children{raw_children, count};
+                for (unsigned index = 0; index < count; ++index) {
+                    auto* child = children[index];
+                    const auto kind = cursor_kind(*child);
+                    if (callable_cursor(kind) || type_cursor(kind) || kind == DxcCursor_VarDecl ||
+                        kind == DxcCursor_ParmDecl || kind == DxcCursor_FieldDecl ||
+                        kind == DxcCursor_EnumConstantDecl) {
+                        if (cursor_from_sources(*child, implementation_->sources)) {
+                            names.insert(cursor_spelling(*child));
+                        }
+                    }
+                    self(self, *child, depth + 1);
+                }
+                if (count < page_size) {
+                    break;
+                }
+            }
+        };
+        ComPtr<IDxcCursor> root;
+        check(implementation_->translation_unit->GetCursor(root.put()), "GetCursor");
+        collect(collect, *root.get(), 0);
+        std::erase_if(completions, [&names](const auto& completion) {
+            return !names.contains(completion.label);
+        });
+    }
     return completions;
 }
 
@@ -2915,6 +2979,10 @@ auto TranslationUnit::definition_at(std::string_view path, std::uint32_t line,
         }
     }
 
+    if (implementation_->compiler_options.backend == CompilerBackend::fxc &&
+        !cursor_from_sources(*definition.get(), implementation_->sources)) {
+        return std::nullopt;
+    }
     char* spelling{};
     check(definition->GetSpelling(&spelling), "GetSpelling");
     TaskString owned_spelling{spelling};
@@ -3033,6 +3101,10 @@ auto TranslationUnit::hover_at(std::string_view path, std::uint32_t line,
     auto* target = is_null_cursor(referenced.get()) ? cursor.get() : referenced.get();
     auto name = cursor_spelling(*target);
     if (name.empty()) {
+        return std::nullopt;
+    }
+    if (implementation_->compiler_options.backend == CompilerBackend::fxc &&
+        !cursor_from_sources(*target, implementation_->sources)) {
         return std::nullopt;
     }
 
@@ -3260,6 +3332,11 @@ auto TranslationUnit::memory_layout_at(std::string_view path, std::uint32_t line
     }
 
     // Step 2: Call the compiler-backed probe.
+    if (implementation_->compiler_options.backend == CompilerBackend::fxc) {
+        return detail::memory_layout_from_fxc(implementation_->sources,
+                                              implementation_->compiler_options,
+                                              implementation_->root_path, probe_target);
+    }
     return detail::memory_layout_from_probe(implementation_->owner->create_instance,
                                             implementation_->sources, implementation_->arguments,
                                             implementation_->root_path, probe_target);
@@ -3331,9 +3408,13 @@ auto TranslationUnit::macro_expansion_at(std::string_view path, std::uint32_t li
     instrumented->text.insert(selected->end, " " + end_marker + " ");
     instrumented->text.insert(selected->start, begin_marker + " ");
 
-    const auto preprocessed = detail::preprocess_from_compile(
-        implementation_->owner->create_instance, instrumented_sources,
-        implementation_->full_arguments, implementation_->root_path);
+    const auto preprocessed =
+        implementation_->compiler_options.backend == CompilerBackend::fxc
+            ? detail::preprocess_from_fxc(instrumented_sources, implementation_->compiler_options,
+                                          implementation_->root_path)
+            : detail::preprocess_from_compile(implementation_->owner->create_instance,
+                                              instrumented_sources, implementation_->full_arguments,
+                                              implementation_->root_path);
     if (!preprocessed.available || preprocessed.text.empty()) {
         return std::nullopt;
     }
@@ -3376,9 +3457,14 @@ auto TranslationUnit::macro_name_at(std::string_view path, std::uint32_t line,
 
 auto TranslationUnit::compilation_info(const ComputeMetadataLimits& limits) const
     -> CompilationInfo {
-    auto info = detail::compilation_info_from_compile(
-        implementation_->owner->create_instance, implementation_->sources,
-        implementation_->full_arguments, implementation_->root_path);
+    auto info = implementation_->compiler_options.backend == CompilerBackend::fxc
+                    ? implementation_->fxc_info()
+                    : detail::compilation_info_from_compile(
+                          implementation_->owner->create_instance, implementation_->sources,
+                          implementation_->full_arguments, implementation_->root_path);
+    if (implementation_->compiler_options.backend == CompilerBackend::dxc) {
+        info.compiler_runtime_path = implementation_->owner->runtime_info().library_path;
+    }
     // Correlates reflected resources to their declaration site using the
     // same IntelliSense parse index (and therefore the same current unsaved
     // snapshot) already used for hover/go-to-definition/document symbols,
@@ -3388,7 +3474,8 @@ auto TranslationUnit::compilation_info(const ComputeMetadataLimits& limits) cons
     ComPtr<IDxcCursor> signature_root;
     check(implementation_->translation_unit->GetCursor(signature_root.put()), "GetCursor");
     attach_signature_source_locations(info, *signature_root.get());
-    if (info.stage != "compute") {
+    if (info.stage != "compute" ||
+        implementation_->compiler_options.backend == CompilerBackend::fxc) {
         return info;
     }
 
@@ -3550,6 +3637,10 @@ auto TranslationUnit::signatures_at(std::string_view path, std::uint32_t line,
     check(cursor->GetReferencedCursor(referenced.put()), "GetReferencedCursor");
     auto* target = is_null_cursor(referenced.get()) ? cursor.get() : referenced.get();
     const auto target_kind = cursor_kind(*target);
+    if (implementation_->compiler_options.backend == CompilerBackend::fxc &&
+        !cursor_from_sources(*target, implementation_->sources)) {
+        return {};
+    }
     std::vector<Signature> result;
     if (callable_cursor(target_kind)) {
         append_signature(result, *target);
@@ -3907,6 +3998,10 @@ auto TranslationUnit::tokens(std::string_view path) const -> std::vector<Token> 
 }
 
 auto TranslationUnit::skipped_ranges() const -> std::vector<SourceRange> {
+    if (implementation_ && implementation_->compiler_options.backend == CompilerBackend::fxc) {
+        throw RuntimeError{"Skipped-region extraction is unavailable: FXC exposes no "
+                           "preprocessing-record API."};
+    }
     if (!implementation_) {
         throw std::logic_error{"Translation unit is not initialized"};
     }
@@ -3941,6 +4036,10 @@ auto TranslationUnit::skipped_ranges() const -> std::vector<SourceRange> {
 auto TranslationUnit::macro_definitions() const -> std::vector<MacroDefinition> {
     if (!implementation_) {
         throw std::logic_error{"Translation unit is not initialized"};
+    }
+    if (implementation_->compiler_options.backend == CompilerBackend::fxc) {
+        throw RuntimeError{"Source-macro enumeration is unavailable: FXC exposes no "
+                           "preprocessing-record API."};
     }
 
     std::vector<MacroDefinition> result;
@@ -3995,6 +4094,10 @@ auto TranslationUnit::callable_at(std::string_view path, std::uint32_t line,
     auto cursor =
         resolve_callable_cursor(*implementation_->translation_unit.get(), path, line, column);
     if (is_null_cursor(cursor.get())) {
+        return std::nullopt;
+    }
+    if (implementation_->compiler_options.backend == CompilerBackend::fxc &&
+        !cursor_from_sources(*cursor.get(), implementation_->sources)) {
         return std::nullopt;
     }
     return make_callable_symbol(*cursor.get());
@@ -4138,6 +4241,12 @@ auto TranslationUnit::incoming_calls(std::string_view path, std::uint32_t line,
 auto TranslationUnit::entry_point_data_flow(
     const EntryPointDataFlowLimits& limits,
     const std::function<void()>& cancellation_checkpoint) const -> EntryPointDataFlow {
+    if (implementation_->compiler_options.backend == CompilerBackend::fxc) {
+        EntryPointDataFlow result;
+        result.explanation =
+            "Entry-point data-flow analysis is unavailable: FXC exposes no equivalent AST API.";
+        return result;
+    }
     // Derives the entry point exactly as compilation_info() does: parsed
     // from this translation unit's own effective compiler arguments' `-E`,
     // never accepted as a request parameter, so there is no second,
@@ -4544,12 +4653,18 @@ auto TranslationUnit::entry_point_data_flow(
 void TranslationUnit::reparse(std::vector<SourceFile> files) {
     implementation_->sources = std::move(files);
     implementation_->token_paste_preprocessing.reset();
+    implementation_->fxc_compilation.reset();
     implementation_->rebuild_unsaved_files();
 #ifdef _WIN32
-    auto pointers = implementation_->unsaved_file_pointers();
-    check(implementation_->translation_unit->Reparse(pointers.data(),
-                                                     static_cast<unsigned>(pointers.size())),
-          "Reparse");
+    if (implementation_->compiler_options.backend == CompilerBackend::fxc) {
+        // Legacy source-index Reparse crashes inside DXC on erroneous include edits.
+        implementation_->parse_translation_unit();
+    } else {
+        auto pointers = implementation_->unsaved_file_pointers();
+        check(implementation_->translation_unit->Reparse(pointers.data(),
+                                                         static_cast<unsigned>(pointers.size())),
+              "Reparse");
+    }
 #else
     // DXC 1.9.2607's native Reparse has been observed to crash on Linux. An
     // in-process crash cannot be recovered safely, so rebuild with the same
@@ -4583,11 +4698,29 @@ auto Intellisense::parse(std::string root_path, std::vector<SourceFile> files,
     implementation->owner = implementation_;
     implementation->root_path = std::move(root_path);
     implementation->sources = std::move(files);
-    implementation->descriptor_heaps_supported = supports_descriptor_heaps(options.target_profile);
+    implementation->compiler_options = options;
+    implementation->descriptor_heaps_supported = options.backend == CompilerBackend::dxc &&
+                                                 supports_descriptor_heaps(options.target_profile);
     implementation->rebuild_unsaved_files();
 
     implementation->full_arguments = options.arguments();
-    implementation->arguments = implementation->full_arguments;
+    auto parsing_options = options;
+    if (options.backend == CompilerBackend::fxc) {
+        parsing_options.language_version = "2016";
+        const auto stage_end = options.target_profile.find('_');
+        parsing_options.target_profile = stage_end != std::string::npos
+                                             ? options.target_profile.substr(0, stage_end) + "_6_0"
+                                             : std::string{};
+        parsing_options.additional_arguments.clear();
+        for (const auto& argument : options.additional_arguments) {
+            if (argument == "/Zpr" || argument == "-Zpr") {
+                parsing_options.additional_arguments.emplace_back("-Zpr");
+            } else if (argument == "/Zpc" || argument == "-Zpc") {
+                parsing_options.additional_arguments.emplace_back("-Zpc");
+            }
+        }
+    }
+    implementation->arguments = parsing_options.arguments();
     // The IntelliSense index (IDxcIndex::ParseTranslationUnit) is observed to
     // fail outright when an explicit entry point argument is present --
     // whether separated ("-E" "entry") or joined ("-Eentry") -- regardless of

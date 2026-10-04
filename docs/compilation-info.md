@@ -6,10 +6,16 @@ shared tracked-document freshness/Refresh behavior described in
 compilation failure is still a **Current** successful analysis response.
 
 HLSL-LSP can report the effective compiler configuration, diagnostics, and
-DXC reflection for the active HLSL document through the combined **Shader
+selected-compiler reflection for the active HLSL document through the combined **Shader
 Compilation** view and its cross-editor `hlsl/compilationInfo` protocol.
 For a runnable walkthrough, see the
 [Shader Compilation tutorial](tutorials/shader-compilation.md).
+
+The Windows [FXC backend](fxc.md) produces DXBC instead of DXIL. Results include
+`compilerBackend` and `compilerRuntimePath`, and the shared `context` includes
+`compilerBackend`. FXC signature interpolation is `"unavailable"`; resource
+`rangeId` is `null` when native reflection does not expose it. These are
+capability limits, not compiler-reported zeros or undefined interpolation.
 
 In Visual Studio, right-click the shader and choose
 **HLSL > Shader Compilation**. In Visual Studio Code, run

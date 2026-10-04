@@ -41,7 +41,7 @@ hlsl/configurationAuthoring
   server reads the root `shadertoolsconfig.json`, if present. A supplied hash
   must match the supplied or on-disk content.
 - `selections` is optional. Every selection must match a file, entry point, and
-  target profile returned by DXC discovery. When omitted, the preview includes
+  target profile returned by compiler discovery. When omitted, the preview includes
   only candidates for which exactly one probed profile succeeded. Ambiguous
   candidates remain in the result for the client to resolve explicitly.
 - `draftContent` is optional (maximum 2 MiB). After reviewing the generated
@@ -58,6 +58,11 @@ document version. Before applying the returned preview, compare
 `configuration.expectedContentVersion` and
 `configuration.expectedContentHash` with the current editor buffer. If either
 no longer matches, discard the preview and request a new one.
+
+Discovery uses the document's configured backend. Saved FXC configurations and
+explicit FXC editor settings probe native SM5.0 profiles, not DXC's SM6.6
+profiles. Set and save the backend before rediscovering candidates; editing a
+preview does not change the compiler used for discovery.
 
 ## Result
 

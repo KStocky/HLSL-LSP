@@ -67,6 +67,29 @@ public sealed class HlslLanguageClientCustomMessageTests : IDisposable
     }
 
     [Fact]
+    public async Task CompilerSettings_FollowProjectByDefaultAndSurviveInlayChanges()
+    {
+        var client = new HlslLanguageClient(
+            "2021", string.Empty, string.Empty,
+            (_, _) => Task.CompletedTask, _ => Task.CompletedTask);
+        var initial = JObject.FromObject(client.InitializationOptions);
+        Assert.Null(initial["hlsl"]?["compilerBackend"]);
+        Assert.Null(initial["hlsl"]?["fxcRuntimePath"]);
+
+        await client.UpdateCompilerSettingsAsync("fxc", @"C:\compiler.dll");
+        await client.UpdateInlayHintsAsync(
+            new HlslLsp.VisualStudio.Bootstrap.InlayHintOptionsSnapshot(
+                true, false, false, false, false, false, true));
+        var updated = JObject.FromObject(client.InitializationOptions);
+        Assert.Equal("fxc", updated["hlsl"]?.Value<string>("compilerBackend"));
+        Assert.Equal(@"C:\compiler.dll", updated["hlsl"]?.Value<string>("fxcRuntimePath"));
+        await client.UpdateCompilerSettingsAsync("", "");
+        var cleared = JObject.FromObject(client.InitializationOptions);
+        Assert.Null(cleared["hlsl"]?["compilerBackend"]);
+        Assert.Null(cleared["hlsl"]?["fxcRuntimePath"]);
+    }
+
+    [Fact]
     public async Task ServerActiveVariantChangedNotification_UpdatesClientStateAndInvokesCallback()
     {
         string observedVariant = null;

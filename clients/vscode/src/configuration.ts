@@ -24,6 +24,8 @@ export interface HlslServerSettings {
   entryPoint?: string;
   additionalArguments?: readonly string[];
   dxcRuntimeDirectory?: string;
+  compilerBackend?: "dxc" | "fxc";
+  fxcRuntimePath?: string;
   inlayHints?: {
     types?: boolean;
     parameters?: boolean;
@@ -57,6 +59,8 @@ export function readServerSettings(
     "entryPoint",
     "additionalArguments",
     "dxcRuntimeDirectory",
+    "compilerBackend",
+    "fxcRuntimePath",
   ] as const;
   const entries = keys
     .map((key) => [key, configuredValue(reader.inspect(key))] as const)

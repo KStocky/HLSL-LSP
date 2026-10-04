@@ -13,6 +13,12 @@ The shared fields make existing HLSL Tools configurations reusable. HLSL-LSP
 also adds DXC-oriented language-version, target, entry-point, and argument
 settings.
 
+`hlsl.compilerBackend` selects `"dxc"` (the default) or Windows-only `"fxc"`.
+`hlsl.fxcRuntimePath` optionally selects an existing D3DCompiler DLL file;
+relative paths resolve beside the declaring configuration. Both settings are
+available at root, file-group, and variant scope, with the normal inheritance
+and editor-override precedence. See [FXC configuration and capabilities](fxc.md).
+
 Both editor clients can build a guided preview through the shared, read-only
 [`hlsl/configurationAuthoring`](configuration-authoring.md) protocol. Discovery,
 compiler-authoritative entry-point/profile candidates, deterministic merging,
@@ -148,7 +154,7 @@ Across those layers:
 
 - Definition and virtual-mapping objects merge by key; a higher-precedence
   value replaces the same key.
-- `languageVersion`, `targetProfile`, `entryPoint`, and
+- `languageVersion`, `targetProfile`, `entryPoint`, `compilerBackend`, `fxcRuntimePath`, and
   `additionalArguments` are replaced as a whole when a higher-precedence layer
   declares them.
 - Include directories combine rather than replace. Higher-precedence

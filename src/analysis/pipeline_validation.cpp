@@ -78,6 +78,21 @@ void validate_interface(const workspace::ResolvedPipeline& pipeline,
         return;
     }
 
+    if (consumer.stage.kind == workspace::PipelineStageKind::pixel &&
+        (std::ranges::any_of(producer.compilation.reflection->output_signature,
+                             [](const auto& value) { return !value.interpolation_available; }) ||
+         std::ranges::any_of(consumer.compilation.reflection->input_signature,
+                             [](const auto& value) { return !value.interpolation_available; }))) {
+        issues.push_back(PipelineIssue{
+            .code = PipelineIssueCode::analysis_unavailable,
+            .pipeline_name = pipeline.name,
+            .message = "Pipeline '" + pipeline.name +
+                       "' interpolation matching is unavailable for the selected compiler.",
+            .producer_stage = producer_index,
+            .consumer_stage = consumer_index,
+            .producer_location = std::nullopt,
+            .consumer_location = std::nullopt});
+    }
     for (const auto& input : consumer.compilation.reflection->input_signature) {
         const auto* output = find_output(producer.compilation.reflection->output_signature, input);
         if (output == nullptr) {
@@ -121,6 +136,7 @@ void validate_interface(const workspace::ResolvedPipeline& pipeline,
                          "uses incompatible system-value classifications");
         }
         if (consumer.stage.kind == workspace::PipelineStageKind::pixel &&
+            output->interpolation_available && input.interpolation_available &&
             output->interpolation != dxc::InterpolationMode::undefined &&
             input.interpolation != dxc::InterpolationMode::undefined &&
             output->interpolation != input.interpolation) {

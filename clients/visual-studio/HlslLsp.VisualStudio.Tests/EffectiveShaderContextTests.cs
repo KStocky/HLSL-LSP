@@ -20,8 +20,16 @@ public sealed class EffectiveShaderContextTests
 
         Assert.Equal(
             "File: shader.hlsl · Variant: Default · Entry point: Not configured · " +
-            "Target profile: Not configured",
+            "Target profile: Not configured · Compiler: DXC",
             EffectiveShaderContextDisplay.Summary(context));
+    }
+
+    [Fact]
+    public void Display_IdentifiesFxcAuthority()
+    {
+        var context = JsonConvert.DeserializeObject<EffectiveShaderContextModel>(
+            @"{""compilerBackend"":""fxc"",""targetProfile"":""ps_5_0""}");
+        Assert.Contains("Compiler: FXC", EffectiveShaderContextDisplay.Summary(context));
     }
 
     [Fact]
