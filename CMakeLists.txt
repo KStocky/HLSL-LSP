@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.28)
 
-project(HlslLsp VERSION 0.15.0 LANGUAGES CXX)
+project(HlslLsp VERSION 0.16.0 LANGUAGES CXX)
 
 include(CTest)
 include(FetchContent)
