@@ -183,6 +183,15 @@ if(EXISTS "${nlohmann_json_SOURCE_DIR}/LICENSE.MIT")
 endif()
 
 if(BUILD_TESTING)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        add_executable(hlsl-dxc-skipped-ranges-repro EXCLUDE_FROM_ALL
+            tests/dxc/skipped_ranges_repro.cpp)
+        target_link_libraries(hlsl-dxc-skipped-ranges-repro PRIVATE
+            hlsl_project_options ${CMAKE_DL_LIBS})
+        target_include_directories(hlsl-dxc-skipped-ranges-repro SYSTEM PRIVATE
+            "${DXC_INCLUDE_DIR}")
+    endif()
+
     add_executable(hlsl-worker-test-helper
         tests/analysis/worker_process_test_helper.cpp)
     target_link_libraries(hlsl-worker-test-helper PRIVATE

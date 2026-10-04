@@ -1,6 +1,6 @@
 include_guard(GLOBAL)
 
-set(HLSL_DXC_RELEASE "2609-kstocky.2")
+set(HLSL_DXC_RELEASE "2609-kstocky.3")
 set(DXC_INCLUDE_DIR "" CACHE PATH
     "Optional directory containing dxcisense.h; requires DXC_RUNTIME_DIR")
 set(DXC_RUNTIME_DIR "" CACHE PATH
@@ -21,7 +21,7 @@ if(NOT DXC_INCLUDE_DIR)
             URL
                 "https://github.com/KStocky/DirectXShaderCompiler/releases/download/${HLSL_DXC_RELEASE}/dxc_${HLSL_DXC_RELEASE}.x64.zip"
             URL_HASH
-                SHA256=6d7bee59f6a5df64ac28badc231298a5b0c0e2ab335183a0f091685514c208ea
+                SHA256=1f4d60f2c5f0ce2a8b07049071611e5174f0bb486c792307aef32b1c50bbaeff
             DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
         FetchContent_MakeAvailable(hlsl_dxc_package)
         set(DXC_INCLUDE_DIR
@@ -39,7 +39,7 @@ if(NOT DXC_INCLUDE_DIR)
             URL
                 "https://github.com/KStocky/DirectXShaderCompiler/releases/download/${HLSL_DXC_RELEASE}/linux_dxc_${HLSL_DXC_RELEASE}.x86_x64.tar.gz"
             URL_HASH
-                SHA256=1a1417fd24dced6ae7fb32097f029546b139167149f1c1ce22aaf5d6f9cfd93b
+                SHA256=8db20e74260ffcdfe2285a7bc5ad052530505479c4c2467d1195dbf2056950d4
             DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
         FetchContent_MakeAvailable(hlsl_dxc_package)
         set(HLSL_DXC_LINUX_ROOT "${hlsl_dxc_package_SOURCE_DIR}")

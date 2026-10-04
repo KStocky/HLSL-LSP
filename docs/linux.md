@@ -1,13 +1,17 @@
 # Linux x64 runtime
 
 Linux and Windows use KStocky's
-[DXC `2609-kstocky.2` release](https://github.com/KStocky/DirectXShaderCompiler/releases/tag/2609-kstocky.2),
+[DXC `2609-kstocky.3` release](https://github.com/KStocky/DirectXShaderCompiler/releases/tag/2609-kstocky.3),
 which fixes the uninitialized `ExpandTokPastingArg` option in
-`IDxcIntelliSense`.
+`IDxcIntelliSense` and the Linux `GetSkippedRanges` crash on virtual unsaved
+files. This is the first runtime verified safe for HLSL-LSP's rewritten-source
+skipped-region and entry-point data-flow queries. Older and unidentified Linux
+runtimes retain the compatibility fallback; see the
+[regression reproduction](dxc-skipped-ranges.md).
 
 CMake downloads
-`linux_dxc_2609-kstocky.2.x86_x64.tar.gz` and requires SHA-256
-`1a1417fd24dced6ae7fb32097f029546b139167149f1c1ce22aaf5d6f9cfd93b`.
+`linux_dxc_2609-kstocky.3.x86_x64.tar.gz` and requires SHA-256
+`8db20e74260ffcdfe2285a7bc5ad052530505479c4c2467d1195dbf2056950d4`.
 The archive contains `dxcisense.h`, `WinAdapter.h`, `libdxcompiler.so`, and the
 LLVM license. The matching Windows archive is pinned independently by
 `cmake/Dxc.cmake`.
