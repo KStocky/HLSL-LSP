@@ -33,6 +33,8 @@
       must actually be copied to the test output directory.
     -->
     <PackageReference Include="Microsoft.VisualStudio.LanguageServer.Client" Version="17.14.60" />
+    <!-- The options descriptor tests need DialogPage outside the IDE as well. -->
+    <PackageReference Include="Microsoft.VisualStudio.Shell.15.0" Version="17.14.40264" />
   </ItemGroup>
 
   <ItemGroup>

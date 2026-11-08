@@ -39,8 +39,9 @@ Use the native **Tools > Options > HLSL-LSP > General** Unified Settings page
 to set:
 
 - **HLSL file extensions**: a semicolon-separated list such as
-  `.hlsl;.hlsli;.usf`. This is also the default. The built-in `.hlsl` and
-  `.hlsli` mappings are always available.
+  `.hlsl;.hlsli;.usf`. This is also the default. Use suffixes such as `.fx`,
+  not wildcard patterns such as `*.fx`. The built-in `.hlsl` and `.hlsli`
+  mappings always activate the client, even when omitted from the list.
 - **Default HLSL language version**: the default DXC `-HV` value. A
   `hlsl.languageVersion` value in `shadertoolsconfig.json` takes precedence.
 

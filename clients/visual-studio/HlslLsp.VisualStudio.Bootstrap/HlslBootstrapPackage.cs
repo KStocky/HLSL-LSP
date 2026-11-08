@@ -97,6 +97,8 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         new(StringComparer.OrdinalIgnoreCase);
     private static HlslBootstrapPackage instance;
     private bool activationStarted;
+    private Microsoft.VisualStudio.Threading.JoinableTask nativeOptionsInitialization;
+    private IDisposable nativeOptionsSubscription;
 
     public static event Action OptionsChanged;
 
@@ -165,6 +167,8 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         CancellationToken cancellationToken,
         IProgress<ServiceProgressData> progress)
     {
+        nativeOptionsInitialization = JoinableTaskFactory.RunAsync(
+            () => InitializeNativeOptionsAsync(cancellationToken));
         lock (Gate)
         {
             instance = this;
@@ -206,6 +210,56 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         await RegisterCommandsAsync(cancellationToken);
         await ShowFirstRunGuidanceAsync(cancellationToken);
         await TryActivateLanguageClientAsync(cancellationToken);
+    }
+
+    private async Task InitializeNativeOptionsAsync(CancellationToken cancellationToken)
+    {
+        var serviceType = Type.GetType(
+            "Microsoft.Internal.VisualStudio.Shell.Interop.SVsUnifiedSettingsManager, " +
+            "Microsoft.Internal.VisualStudio.Interop");
+        if (serviceType == null)
+        {
+            ActivityLog.LogWarning(nameof(HlslBootstrapPackage),
+                "The native Unified Settings service is unavailable; using DialogPage settings.");
+            return;
+        }
+        var manager = await GetServiceAsync(serviceType)
+            ?? throw new InvalidOperationException("Visual Studio's Unified Settings manager is unavailable.");
+        var managerContract = manager.GetType().GetInterfaces().First(
+            type => type.FullName == "Microsoft.VisualStudio.Utilities.UnifiedSettings.ISettingsManager");
+        var getReader = managerContract.GetMethod("GetReader");
+        var reader = new HlslNativeOptionsReader(
+            getReader.Invoke(manager, null), getReader.ReturnType);
+        await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+        var page = (HlslOptionsPage)GetDialogPage(typeof(HlslOptionsPage));
+        nativeOptionsSubscription = reader.Subscribe(page, () =>
+            JoinableTaskFactory.RunAsync(async () =>
+            {
+                try
+                {
+                    await JoinableTaskFactory.SwitchToMainThreadAsync(DisposalToken);
+                    reader.Load(page);
+                }
+                catch (OperationCanceledException) when (DisposalToken.IsCancellationRequested)
+                {
+                }
+                catch (Exception error)
+                {
+                    ActivityLog.LogError(nameof(HlslBootstrapPackage), error.ToString());
+                    HlslStatusBridge.ReportFailure(
+                        "Visual Studio could not reload HLSL-LSP settings: " + error.Message);
+                }
+            }).FileAndForget("HlslLsp/LoadNativeOptions"));
+        reader.Load(page);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            nativeOptionsSubscription?.Dispose();
+        }
+        base.Dispose(disposing);
     }
 
     private async Task ShowFirstRunGuidanceAsync(CancellationToken cancellationToken)
@@ -4196,24 +4250,25 @@ public sealed class HlslBootstrapPackage : AsyncPackage
     private async Task TryActivateLanguageClientAsync(
         CancellationToken cancellationToken)
     {
-        await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
-        var configuredExtensions = new HashSet<string>(
-            ParseExtensions(GetOptions().FileExtensions),
-            StringComparer.OrdinalIgnoreCase);
-        lock (Gate)
-        {
-            if (activationStarted ||
-                !PendingDocuments.Any(
-                    path => configuredExtensions.Contains(Path.GetExtension(path))))
-            {
-                return;
-            }
-            activationStarted = true;
-        }
-        HlslStatusBridge.ReportLifecycle(HlslLifecycleState.Activating);
-
         try
         {
+            if (nativeOptionsInitialization != null)
+            {
+                await nativeOptionsInitialization.JoinAsync(cancellationToken);
+            }
+            await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+            var configuredExtensions = GetActivationExtensions(GetOptions().FileExtensions);
+            lock (Gate)
+            {
+                if (activationStarted ||
+                    !PendingDocuments.Any(
+                        path => configuredExtensions.Contains(Path.GetExtension(path))))
+                {
+                    return;
+                }
+                activationStarted = true;
+            }
+            HlslStatusBridge.ReportLifecycle(HlslLifecycleState.Activating);
             await LoadLanguageClientAsync(cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -4263,6 +4318,16 @@ public sealed class HlslBootstrapPackage : AsyncPackage
                 "The HLSL language client did not return an activation task.");
         }
         await task;
+    }
+
+    internal static HashSet<string> GetActivationExtensions(string value)
+    {
+        var extensions = new HashSet<string>(
+            ParseExtensions(value),
+            StringComparer.OrdinalIgnoreCase);
+        extensions.Add(".hlsl");
+        extensions.Add(".hlsli");
+        return extensions;
     }
 
     public static IEnumerable<string> ParseExtensions(string value)
@@ -4535,10 +4600,17 @@ public sealed class HlslOptionsPage : DialogPage
         private const string AttributeTypeName =
             "Microsoft.VisualStudio.Shell.UnifiedSettingsMonikerAttribute, " +
             "Microsoft.VisualStudio.Shell.15.0";
+        private readonly Type monikerAttributeType;
 
         public HlslOptionsTypeDescriptionProvider()
             : base(TypeDescriptor.GetProvider(typeof(DialogPage)))
         {
+        }
+
+        internal HlslOptionsTypeDescriptionProvider(Type monikerAttributeType)
+            : this()
+        {
+            this.monikerAttributeType = monikerAttributeType;
         }
 
         public override ICustomTypeDescriptor GetTypeDescriptor(
@@ -4546,14 +4618,20 @@ public sealed class HlslOptionsPage : DialogPage
             object instance)
         {
             return new HlslOptionsTypeDescriptor(
-                base.GetTypeDescriptor(objectType, instance));
+                base.GetTypeDescriptor(objectType, instance),
+                monikerAttributeType);
         }
 
         private sealed class HlslOptionsTypeDescriptor : CustomTypeDescriptor
         {
-            public HlslOptionsTypeDescriptor(ICustomTypeDescriptor parent)
+            private readonly Type monikerAttributeType;
+
+            public HlslOptionsTypeDescriptor(
+                ICustomTypeDescriptor parent,
+                Type monikerAttributeType)
                 : base(parent)
             {
+                this.monikerAttributeType = monikerAttributeType;
             }
 
             public override PropertyDescriptorCollection GetProperties()
@@ -4567,14 +4645,15 @@ public sealed class HlslOptionsPage : DialogPage
                 return AddUnifiedSettingsMonikers(base.GetProperties(attributes));
             }
 
-            private static PropertyDescriptorCollection AddUnifiedSettingsMonikers(
+            private PropertyDescriptorCollection AddUnifiedSettingsMonikers(
                 PropertyDescriptorCollection properties)
             {
-                var attributeType = Type.GetType(AttributeTypeName, throwOnError: true);
+                var attributeType = monikerAttributeType ??
+                    Type.GetType(AttributeTypeName, throwOnError: true);
                 var result = properties.Cast<PropertyDescriptor>()
                     .Select(property =>
                     {
-                        var moniker = GetMoniker(property.Name);
+                        var moniker = GetUnifiedSettingsMoniker(property.Name);
                         if (moniker == null)
                         {
                             return property;
@@ -4583,6 +4662,8 @@ public sealed class HlslOptionsPage : DialogPage
                         var attribute = (Attribute)Activator.CreateInstance(
                             attributeType,
                             moniker);
+                        // These are native settings, not legacy values requiring migration.
+                        attributeType.GetProperty("IsLegacyValue")?.SetValue(attribute, false);
                         return TypeDescriptor.CreateProperty(
                             typeof(HlslOptionsPage),
                             property,
@@ -4591,39 +4672,39 @@ public sealed class HlslOptionsPage : DialogPage
                     .ToArray();
                 return new PropertyDescriptorCollection(result, readOnly: true);
             }
+        }
+    }
 
-            private static string GetMoniker(string propertyName)
-            {
-                switch (propertyName)
-                {
-                    case nameof(HlslOptionsPage.FileExtensions):
-                        return "hlslLsp.general.fileExtensions";
-                    case nameof(HlslOptionsPage.LanguageVersion):
-                        return "hlslLsp.general.languageVersion";
-                    case nameof(HlslOptionsPage.DxcRuntimeDirectory):
-                        return "hlslLsp.general.dxcRuntimeDirectory";
-                    case nameof(HlslOptionsPage.CompilerBackend):
-                        return "hlslLsp.general.compilerBackend";
-                    case nameof(HlslOptionsPage.FxcRuntimePath):
-                        return "hlslLsp.general.fxcRuntimePath";
-                    case nameof(HlslOptionsPage.InlayHintTypes):
-                        return "hlslLsp.general.inlayHintTypes";
-                    case nameof(HlslOptionsPage.InlayHintParameters):
-                        return "hlslLsp.general.inlayHintParameters";
-                    case nameof(HlslOptionsPage.InlayHintMatrixOrientation):
-                        return "hlslLsp.general.inlayHintMatrixOrientation";
-                    case nameof(HlslOptionsPage.InlayHintRegisters):
-                        return "hlslLsp.general.inlayHintRegisters";
-                    case nameof(HlslOptionsPage.InlayHintPackedOffsets):
-                        return "hlslLsp.general.inlayHintPackedOffsets";
-                    case nameof(HlslOptionsPage.InlayHintArrayStrides):
-                        return "hlslLsp.general.inlayHintArrayStrides";
-                    case nameof(HlslOptionsPage.InlayHintActiveVariant):
-                        return "hlslLsp.general.inlayHintActiveVariant";
-                    default:
-                        return null;
-                }
-            }
+    internal static string GetUnifiedSettingsMoniker(string propertyName)
+    {
+        switch (propertyName)
+        {
+            case nameof(FileExtensions):
+                return "hlslLsp.general.fileExtensions";
+            case nameof(LanguageVersion):
+                return "hlslLsp.general.languageVersion";
+            case nameof(DxcRuntimeDirectory):
+                return "hlslLsp.general.dxcRuntimeDirectory";
+            case nameof(CompilerBackend):
+                return "hlslLsp.general.compilerBackend";
+            case nameof(FxcRuntimePath):
+                return "hlslLsp.general.fxcRuntimePath";
+            case nameof(InlayHintTypes):
+                return "hlslLsp.general.inlayHintTypes";
+            case nameof(InlayHintParameters):
+                return "hlslLsp.general.inlayHintParameters";
+            case nameof(InlayHintMatrixOrientation):
+                return "hlslLsp.general.inlayHintMatrixOrientation";
+            case nameof(InlayHintRegisters):
+                return "hlslLsp.general.inlayHintRegisters";
+            case nameof(InlayHintPackedOffsets):
+                return "hlslLsp.general.inlayHintPackedOffsets";
+            case nameof(InlayHintArrayStrides):
+                return "hlslLsp.general.inlayHintArrayStrides";
+            case nameof(InlayHintActiveVariant):
+                return "hlslLsp.general.inlayHintActiveVariant";
+            default:
+                return null;
         }
     }
 
