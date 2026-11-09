@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.VisualStudio;
@@ -97,15 +98,70 @@ internal sealed class HlslNavigationBarClient :
     internal void Detach()
     {
         ThreadHelper.ThrowIfNotOnUIThread();
-        manager.RemoveDropdownBar();
+        RemoveOwnedDropdownBar(manager, this);
         dropdownBar = null;
+    }
+
+    internal static void RemoveOwnedDropdownBar(
+        IVsDropdownBarManager manager, HlslNavigationBarClient client)
+    {
+        ErrorHandler.ThrowOnFailure(manager.GetDropdownBar(out var currentBar));
+        if (client.OwnsDropdownBar(currentBar))
+        {
+            ErrorHandler.ThrowOnFailure(manager.RemoveDropdownBar());
+        }
     }
 
     internal void Activate(IVsDropdownBarManager candidateManager)
     {
         ThreadHelper.ThrowIfNotOnUIThread();
+        ErrorHandler.ThrowOnFailure(candidateManager.GetDropdownBar(out var currentBar));
+        if (!OwnsDropdownBar(currentBar))
+        {
+            return;
+        }
         manager = candidateManager;
+        if (dropdownBar == null)
+        {
+            SetDropdownBar(currentBar);
+            return;
+        }
         RefreshSelections();
+    }
+
+    internal bool OwnsDropdownBar(IVsDropdownBar bar)
+    {
+        if (bar == null)
+        {
+            return false;
+        }
+        ErrorHandler.ThrowOnFailure(bar.GetClient(out var owner));
+        if (ReferenceEquals(owner, this))
+        {
+            return true;
+        }
+        if (owner == null || !Marshal.IsComObject(owner))
+        {
+            return false;
+        }
+
+        var expected = Marshal.GetIUnknownForObject(this);
+        try
+        {
+            var actual = Marshal.GetIUnknownForObject(owner);
+            try
+            {
+                return expected == actual;
+            }
+            finally
+            {
+                Marshal.Release(actual);
+            }
+        }
+        finally
+        {
+            Marshal.Release(expected);
+        }
     }
 
     internal void Rebind(
@@ -422,8 +478,11 @@ internal sealed class HlslNavigationBarClient :
 
     public int SetDropdownBar(IVsDropdownBar value)
     {
-        dropdownBar = value;
-        Refresh();
+        dropdownBar = disposed ? null : value;
+        if (dropdownBar != null)
+        {
+            Refresh();
+        }
         return VSConstants.S_OK;
     }
 
@@ -477,7 +536,7 @@ internal sealed class HlslNavigationBarClient :
         view.Closed -= OnViewClosed;
         updateCancellation.Cancel();
         updateCancellation.Dispose();
-        manager.RemoveDropdownBar();
+        Detach();
     }
 
     private readonly struct TextPosition

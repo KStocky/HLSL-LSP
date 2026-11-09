@@ -250,14 +250,15 @@ public sealed class HlslLspActivator :
         fileExtensions = componentModel.GetService<IFileExtensionRegistryService>();
         textDocuments = componentModel.GetService<ITextDocumentFactoryService>();
         editorAdapters = componentModel.GetService<IVsEditorAdaptersFactoryService>();
-        runningDocuments =
+        var resolvedRunningDocuments =
             await host.GetServiceAsync(typeof(SVsRunningDocumentTable))
                 as IVsRunningDocumentTable;
-        if (runningDocuments == null)
+        if (resolvedRunningDocuments == null)
         {
             throw new InvalidOperationException(
                 "Visual Studio's running document table is unavailable.");
         }
+        runningDocuments = resolvedRunningDocuments;
         ErrorHandler.ThrowOnFailure(
             runningDocuments.AdviseRunningDocTableEvents(this, out _));
         var initialOptions = GetOptions();
@@ -382,36 +383,41 @@ public sealed class HlslLspActivator :
         while (documents.Next(1, cookies, out var fetched) == VSConstants.S_OK &&
                fetched == 1)
         {
-            ErrorHandler.ThrowOnFailure(
-                runningDocuments.GetDocumentInfo(
-                    cookies[0],
-                    out _,
-                    out _,
-                    out _,
-                    out _,
-                    out _,
-                    out _,
-                    out var documentData));
-            if (documentData == IntPtr.Zero)
+            var buffer = GetRunningDocumentBuffer(cookies[0]);
+            if (buffer != null)
             {
-                continue;
+                action(buffer);
             }
+        }
+    }
 
-            try
-            {
-                if (Marshal.GetObjectForIUnknown(documentData) is IVsTextBuffer adapter)
-                {
-                    var buffer = editorAdapters.GetDocumentBuffer(adapter);
-                    if (buffer != null)
-                    {
-                        action(buffer);
-                    }
-                }
-            }
-            finally
-            {
-                Marshal.Release(documentData);
-            }
+    private ITextBuffer GetRunningDocumentBuffer(uint docCookie)
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        ErrorHandler.ThrowOnFailure(
+            runningDocuments.GetDocumentInfo(
+                docCookie,
+                out _,
+                out _,
+                out _,
+                out _,
+                out _,
+                out _,
+                out var documentData));
+        if (documentData == IntPtr.Zero)
+        {
+            return null;
+        }
+
+        try
+        {
+            return Marshal.GetObjectForIUnknown(documentData) is IVsTextBuffer adapter
+                ? editorAdapters.GetDocumentBuffer(adapter)
+                : null;
+        }
+        finally
+        {
+            Marshal.Release(documentData);
         }
     }
 
@@ -875,7 +881,60 @@ public sealed class HlslLspActivator :
     public int OnBeforeDocumentWindowShow(
         uint docCookie,
         int firstShow,
-        IVsWindowFrame frame) => VSConstants.S_OK;
+        IVsWindowFrame frame)
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        if (!servicesReady)
+        {
+            return VSConstants.S_OK;
+        }
+
+        try
+        {
+            MapFirstShownDocument(
+                docCookie,
+                firstShow,
+                GetRunningDocumentBuffer,
+                ApplyDocumentWindowContentType);
+        }
+        catch (Exception error)
+        {
+            ActivityLog.LogError(nameof(HlslLspActivator), error.ToString());
+            HlslStatusBridge.ReportFailure(
+                "Could not configure the HLSL document: " + error.Message);
+        }
+        return VSConstants.S_OK;
+    }
+
+    internal static void MapFirstShownDocument(
+        uint docCookie,
+        int firstShow,
+        Func<uint, ITextBuffer> getBuffer,
+        Action<ITextBuffer> applyContentType)
+    {
+        if (firstShow == 0)
+        {
+            return;
+        }
+
+        // The editor can restore its native content type after TextDocumentCreated.
+        var buffer = getBuffer(docCookie);
+        if (buffer != null)
+        {
+            applyContentType(buffer);
+        }
+    }
+
+    private void ApplyDocumentWindowContentType(ITextBuffer buffer)
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        ApplyConfiguredContentType(buffer);
+        if (buffer.ContentType.IsOfType("HLSL-LSP-Colored") ||
+            buffer.ContentType.IsOfType("HLSLHeader-LSP-Colored"))
+        {
+            ScheduleNavigationBarAttachment();
+        }
+    }
 
     public int OnAfterDocumentWindowHide(uint docCookie, IVsWindowFrame frame) =>
         VSConstants.S_OK;

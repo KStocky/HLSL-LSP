@@ -41,6 +41,27 @@ public sealed class HlslLanguageClientCustomMessageTests : IDisposable
     }
 
     [Fact]
+    public async Task ClientDocumentSymbolsRequestPreservesHierarchy()
+    {
+        var client = new HlslLanguageClient(
+            "2021", string.Empty, string.Empty,
+            (_, _) => Task.CompletedTask, _ => Task.CompletedTask);
+        using var serverRpc = new JsonRpc(serverStream, serverStream, new DocumentSymbolTarget());
+        using var clientRpc = new JsonRpc(clientStream);
+        serverRpc.StartListening();
+        clientRpc.StartListening();
+        await client.AttachForCustomMessageAsync(clientRpc);
+
+        var symbols = await client.GetDocumentSymbolsAsync(
+            new Uri("file:///C:/shader.comp"),
+            CancellationToken.None);
+
+        Assert.Equal("Outer", (string)symbols[0]["name"]);
+        Assert.Equal("member", (string)symbols[0]["children"][0]["name"]);
+        Assert.Null(symbols[0]["location"]);
+    }
+
+    [Fact]
     public void InitializationOptions_IncludeEveryInlayHintCategory()
     {
         var hints = new HlslLsp.VisualStudio.Bootstrap.InlayHintOptionsSnapshot(
@@ -342,6 +363,25 @@ public sealed class HlslLanguageClientCustomMessageTests : IDisposable
         {
             received.TrySetResult(parameters?.Variant ?? string.Empty);
         }
+    }
+
+    private sealed class DocumentSymbolTarget
+    {
+        [JsonRpcMethod(
+            "textDocument/documentSymbol",
+            UseSingleObjectParameterDeserialization = true)]
+        public JArray DocumentSymbols(object parameters) => JArray.Parse(@"[
+            {
+                'name': 'Outer', 'kind': 23,
+                'range': { 'start': { 'line': 0, 'character': 0 }, 'end': { 'line': 2, 'character': 1 } },
+                'selectionRange': { 'start': { 'line': 0, 'character': 7 }, 'end': { 'line': 0, 'character': 12 } },
+                'children': [{
+                    'name': 'member', 'kind': 8,
+                    'range': { 'start': { 'line': 1, 'character': 0 }, 'end': { 'line': 1, 'character': 12 } },
+                    'selectionRange': { 'start': { 'line': 1, 'character': 6 }, 'end': { 'line': 1, 'character': 12 } }
+                }]
+            }
+        ]");
     }
 
     private sealed class DxcRuntimeTarget

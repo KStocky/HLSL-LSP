@@ -78,6 +78,10 @@ internal sealed class HlslNavigationBarManager
         if (client != null)
         {
             var activeClient = client;
+            if (!CanRebindTo(existing, activeClient))
+            {
+                return;
+            }
             client = null;
             activeClient.Detach();
             activeClient.Rebind(
@@ -89,11 +93,26 @@ internal sealed class HlslNavigationBarManager
                 dropdownManager.GetDropdownBar(out var remainingBar));
             if (remainingBar != null)
             {
-                ErrorHandler.ThrowOnFailure(
-                    dropdownManager.RemoveDropdownBar());
+                if (activeClient.OwnsDropdownBar(remainingBar))
+                {
+                    if (!activeClient.HasDropdownBar)
+                    {
+                        activeClient.SetDropdownBar(remainingBar);
+                    }
+                    client = activeClient;
+                }
+                else
+                {
+                    activeClient.Dispose();
+                }
+                return;
             }
-            ErrorHandler.ThrowOnFailure(
-                dropdownManager.AddDropdownBar(2, activeClient));
+            var rebindResult = dropdownManager.AddDropdownBar(2, activeClient);
+            if (ErrorHandler.Failed(rebindResult))
+            {
+                activeClient.Dispose();
+                ErrorHandler.ThrowOnFailure(rebindResult);
+            }
             if (!activeClient.HasDropdownBar)
             {
                 ErrorHandler.ThrowOnFailure(
@@ -143,6 +162,9 @@ internal sealed class HlslNavigationBarManager
         }
         client = addedClient;
     }
+
+    internal static bool CanRebindTo(IVsDropdownBar existing, HlslNavigationBarClient client) =>
+        existing == null || client.OwnsDropdownBar(existing);
 
     private void OnClientClosed(HlslNavigationBarClient closedClient)
     {

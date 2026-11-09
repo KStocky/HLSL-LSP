@@ -93,16 +93,22 @@ internal sealed class HlslClassifierProvider : IClassifierProvider
             return null;
         }
 
-        var extension = Path.GetExtension(document.FilePath);
-        if (!extension.Equals(".hlsl", StringComparison.OrdinalIgnoreCase) &&
-            !extension.Equals(".hlsli", StringComparison.OrdinalIgnoreCase) &&
-            !extension.Equals(".usf", StringComparison.OrdinalIgnoreCase))
+        if (!SupportsDocument(document.FilePath, textBuffer.ContentType.IsOfType("HLSL")))
         {
             return null;
         }
 
         return textBuffer.Properties.GetOrCreateSingletonProperty(
             () => new HlslClassifier(textBuffer, ClassificationRegistry));
+    }
+
+    internal static bool SupportsDocument(string filePath, bool isHlslContentType)
+    {
+        var extension = Path.GetExtension(filePath);
+        return isHlslContentType ||
+            string.Equals(extension, ".hlsl", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(extension, ".hlsli", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(extension, ".usf", StringComparison.OrdinalIgnoreCase);
     }
 }
 

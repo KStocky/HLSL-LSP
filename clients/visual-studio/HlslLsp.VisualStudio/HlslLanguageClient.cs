@@ -121,7 +121,7 @@ internal sealed class HlslLanguageClient :
 
     public event AsyncEventHandler<EventArgs> StopAsync;
 
-    public object MiddleLayer => null;
+    public object MiddleLayer { get; } = new HlslDocumentSymbolMiddleLayer();
 
     public object CustomMessageTarget => customMessageTarget;
 

@@ -4294,7 +4294,10 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         CancellationToken cancellationToken)
     {
         await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
-        var directory = Path.GetDirectoryName(GetType().Assembly.Location);
+        var bootstrapAssembly = GetType().Assembly;
+        // Visual Studio may load the package outside the client's probing path.
+        using var resolver = new HlslBootstrapAssemblyResolver(bootstrapAssembly);
+        var directory = Path.GetDirectoryName(bootstrapAssembly.Location);
         var assembly = Assembly.LoadFrom(
             Path.Combine(directory, "Client", "HlslLsp.VisualStudio.dll"));
         var activator = assembly.GetType(
