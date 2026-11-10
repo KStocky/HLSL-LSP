@@ -225,14 +225,10 @@ public sealed class HlslBootstrapPackage : AsyncPackage
         }
         var manager = await GetServiceAsync(serviceType)
             ?? throw new InvalidOperationException("Visual Studio's Unified Settings manager is unavailable.");
-        var managerContract = manager.GetType().GetInterfaces().First(
-            type => type.FullName == "Microsoft.VisualStudio.Utilities.UnifiedSettings.ISettingsManager");
-        var getReader = managerContract.GetMethod("GetReader");
-        var reader = new HlslNativeOptionsReader(
-            getReader.Invoke(manager, null), getReader.ReturnType);
+        var reader = HlslNativeOptionsReader.FromManager(manager);
         await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
         var page = (HlslOptionsPage)GetDialogPage(typeof(HlslOptionsPage));
-        nativeOptionsSubscription = reader.Subscribe(page, () =>
+        nativeOptionsSubscription = reader.Initialize(page, () =>
             JoinableTaskFactory.RunAsync(async () =>
             {
                 try
@@ -250,7 +246,6 @@ public sealed class HlslBootstrapPackage : AsyncPackage
                         "Visual Studio could not reload HLSL-LSP settings: " + error.Message);
                 }
             }).FileAndForget("HlslLsp/LoadNativeOptions"));
-        reader.Load(page);
     }
 
     protected override void Dispose(bool disposing)
@@ -4250,23 +4245,35 @@ public sealed class HlslBootstrapPackage : AsyncPackage
     private async Task TryActivateLanguageClientAsync(
         CancellationToken cancellationToken)
     {
+        await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+        lock (Gate)
+        {
+            if (activationStarted)
+            {
+                return;
+            }
+            activationStarted = true;
+        }
         try
         {
-            if (nativeOptionsInitialization != null)
+            if (nativeOptionsInitialization == null ||
+                nativeOptionsInitialization.Task.IsFaulted ||
+                nativeOptionsInitialization.Task.IsCanceled)
             {
-                await nativeOptionsInitialization.JoinAsync(cancellationToken);
+                nativeOptionsInitialization = JoinableTaskFactory.RunAsync(
+                    () => InitializeNativeOptionsAsync(cancellationToken));
             }
+            await nativeOptionsInitialization.JoinAsync(cancellationToken);
             await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
             var configuredExtensions = GetActivationExtensions(GetOptions().FileExtensions);
             lock (Gate)
             {
-                if (activationStarted ||
-                    !PendingDocuments.Any(
+                if (!PendingDocuments.Any(
                         path => configuredExtensions.Contains(Path.GetExtension(path))))
                 {
+                    activationStarted = false;
                     return;
                 }
-                activationStarted = true;
             }
             HlslStatusBridge.ReportLifecycle(HlslLifecycleState.Activating);
             await LoadLanguageClientAsync(cancellationToken);
@@ -4431,6 +4438,43 @@ public sealed class HlslOptionsPage : DialogPage
     private bool inlayHintPackedOffsets;
     private bool inlayHintArrayStrides;
     private bool inlayHintActiveVariant = true;
+
+    internal void ApplySnapshot(HlslOptionsSnapshot snapshot)
+    {
+        var hints = snapshot.InlayHints;
+        var changed =
+            !string.Equals(fileExtensions, snapshot.FileExtensions, StringComparison.Ordinal) ||
+            !string.Equals(languageVersion, snapshot.LanguageVersion, StringComparison.Ordinal) ||
+            !string.Equals(dxcRuntimeDirectory, snapshot.DxcRuntimeDirectory, StringComparison.Ordinal) ||
+            !string.Equals(compilerBackend, snapshot.CompilerBackend, StringComparison.Ordinal) ||
+            !string.Equals(fxcRuntimePath, snapshot.FxcRuntimePath, StringComparison.Ordinal) ||
+            inlayHintTypes != hints.Types ||
+            inlayHintParameters != hints.Parameters ||
+            inlayHintMatrixOrientation != hints.MatrixOrientation ||
+            inlayHintRegisters != hints.Registers ||
+            inlayHintPackedOffsets != hints.PackedOffsets ||
+            inlayHintArrayStrides != hints.ArrayStrides ||
+            inlayHintActiveVariant != hints.ActiveVariant;
+        if (!changed)
+        {
+            return;
+        }
+
+        fileExtensions = snapshot.FileExtensions;
+        languageVersion = snapshot.LanguageVersion;
+        dxcRuntimeDirectory = snapshot.DxcRuntimeDirectory;
+        compilerBackend = snapshot.CompilerBackend;
+        fxcRuntimePath = snapshot.FxcRuntimePath;
+        inlayHintTypes = hints.Types;
+        inlayHintParameters = hints.Parameters;
+        inlayHintMatrixOrientation = hints.MatrixOrientation;
+        inlayHintRegisters = hints.Registers;
+        inlayHintPackedOffsets = hints.PackedOffsets;
+        inlayHintArrayStrides = hints.ArrayStrides;
+        inlayHintActiveVariant = hints.ActiveVariant;
+
+        HlslBootstrapPackage.NotifyOptionsChanged();
+    }
 
     [Category("Files")]
     [System.ComponentModel.DisplayName("HLSL file extensions")]

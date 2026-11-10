@@ -1,11 +1,19 @@
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
+using System.Reflection;
+using System.Runtime.Serialization;
 using HlslLsp.VisualStudio.Bootstrap;
+using Microsoft.VisualStudio.Utilities.UnifiedSettings;
 using Xunit;
 
 namespace HlslLsp.VisualStudio.Tests;
 
+[CollectionDefinition("HLSL options", DisableParallelization = true)]
+public sealed class HlslOptionsCollection { }
+
+[Collection("HLSL options")]
 public sealed class HlslOptionsTests
 {
     [Theory]
@@ -72,25 +80,25 @@ public sealed class HlslOptionsTests
     [Fact]
     public void NativeReaderDoesNotDependOnTypeDescriptors()
     {
-        var page = new NativeTestPage();
+        var page = CreatePage();
         var provider = new EmptyInstanceProvider();
-        TypeDescriptor.AddProvider(provider, typeof(NativeTestPage));
+        TypeDescriptor.AddProvider(provider, typeof(HlslOptionsPage));
         try
         {
             Assert.Empty(TypeDescriptor.GetProperties(page).Cast<PropertyDescriptor>());
-            Assert.Empty(TypeDescriptor.GetProperties(typeof(NativeTestPage)).Cast<PropertyDescriptor>());
+            Assert.Empty(TypeDescriptor.GetProperties(typeof(HlslOptionsPage)).Cast<PropertyDescriptor>());
             var storage = new NativeTestReader { FileExtensions = ".comp" };
             var reader = new HlslNativeOptionsReader(storage, typeof(NativeTestReader));
             using (reader.Subscribe(page, () => reader.Load(page)))
             {
                 reader.Load(page);
                 Assert.Equal(".comp", page.FileExtensions);
-                Assert.Equal(new[] { "hlslLsp.general.fileExtensions", "hlslLsp.general.inlayHintTypes" }, storage.Monikers);
+                AssertMonikers(storage.Monikers);
             }
         }
         finally
         {
-            TypeDescriptor.RemoveProvider(provider, typeof(NativeTestPage));
+            TypeDescriptor.RemoveProvider(provider, typeof(HlslOptionsPage));
         }
     }
 
@@ -109,7 +117,7 @@ public sealed class HlslOptionsTests
     [Fact]
     public void NativeReaderLoadsConfiguredExtensionsBeforeActivationMatching()
     {
-        var page = new NativeTestPage();
+        var page = CreatePage();
         var storage = new NativeTestReader { FileExtensions = ".comp;.vert" };
         var reader = new HlslNativeOptionsReader(storage, typeof(NativeTestReader));
 
@@ -126,14 +134,17 @@ public sealed class HlslOptionsTests
     [Fact]
     public void NativeReaderSubscribesToExactMonikersAndReloadsChanges()
     {
-        var page = new NativeTestPage();
+        var page = CreatePage();
         var storage = new NativeTestReader();
         var reader = new HlslNativeOptionsReader(storage, typeof(NativeTestReader));
         using (reader.Subscribe(page, () => reader.Load(page)))
         {
-            Assert.Equal(new[] { "hlslLsp.general.fileExtensions", "hlslLsp.general.inlayHintTypes" }, storage.Monikers);
+            AssertMonikers(storage.Monikers);
             storage.FileExtensions = ".comp";
-            storage.Changed(new NativeTestUpdate());
+            storage.Changed(new SettingsUpdate(Guid.Empty, new HashSet<string>
+            {
+                "hlslLsp.general.fileExtensions",
+            }));
             Assert.Equal(".comp", page.FileExtensions);
         }
         Assert.True(storage.Disposed);
@@ -142,32 +153,179 @@ public sealed class HlslOptionsTests
     [Fact]
     public void NativeReaderDoesNotApplyPartialSnapshotWhenReadFails()
     {
-        var page = new NativeTestPage();
+        var page = CreatePage();
         var storage = new NativeTestReader { FileExtensions = ".comp", FailEnabled = true };
         var reader = new HlslNativeOptionsReader(storage, typeof(NativeTestReader));
 
-        Assert.Throws<System.Reflection.TargetInvocationException>(() => reader.Load(page));
-
-        Assert.Equal(".hlsl;.hlsli;.usf", page.FileExtensions);
-        Assert.False(page.InlayHintTypes);
+        var notifications = 0;
+        Action changed = () => ++notifications;
+        HlslBootstrapPackage.OptionsChanged += changed;
+        try
+        {
+            Assert.Throws<TargetInvocationException>(() => reader.Load(page));
+            Assert.Equal(".hlsl;.hlsli;.usf", page.FileExtensions);
+            Assert.Equal("2021", page.LanguageVersion);
+            Assert.Equal("", page.CompilerBackend);
+            Assert.True(page.InlayHintTypes);
+            Assert.Equal(0, notifications);
+        }
+        finally
+        {
+            HlslBootstrapPackage.OptionsChanged -= changed;
+        }
     }
 
-    public sealed class NativeTestPage
+    [Fact]
+    public void NativeReaderPublishesOneCompleteSnapshotAndIgnoresUnchangedValues()
     {
-        public string FileExtensions { get; set; } = ".hlsl;.hlsli;.usf";
-
-        public bool InlayHintTypes { get; set; }
+        var page = CreatePage();
+        var reader = new HlslNativeOptionsReader(new NativeTestReader(), typeof(NativeTestReader));
+        var notifications = 0;
+        Action changed = () =>
+        {
+            ++notifications;
+            Assert.Equal(".fx", page.FileExtensions);
+            Assert.Equal("202x", page.LanguageVersion);
+            Assert.Equal(@"C:\dxc", page.DxcRuntimeDirectory);
+            Assert.Equal("fxc", page.CompilerBackend);
+            Assert.Equal(@"C:\custom\D3DCompiler.dll", page.FxcRuntimePath);
+            Assert.True(page.InlayHintTypes);
+            Assert.True(page.InlayHintParameters);
+            Assert.True(page.InlayHintMatrixOrientation);
+            Assert.True(page.InlayHintRegisters);
+            Assert.True(page.InlayHintPackedOffsets);
+            Assert.True(page.InlayHintArrayStrides);
+            Assert.True(page.InlayHintActiveVariant);
+        };
+        HlslBootstrapPackage.OptionsChanged += changed;
+        try
+        {
+            reader.Load(page);
+            Assert.Equal(1, notifications);
+            reader.Load(page);
+            Assert.Equal(1, notifications);
+        }
+        finally
+        {
+            HlslBootstrapPackage.OptionsChanged -= changed;
+        }
     }
 
-    public sealed class NativeTestUpdate { }
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void NativeInitializationCanRetryAfterReadOrSubscriptionFailure(bool subscriptionFailure)
+    {
+        var page = CreatePage();
+        var storage = new NativeTestReader
+        {
+            FailEnabled = !subscriptionFailure,
+            FailSubscribe = subscriptionFailure,
+        };
+        var reader = HlslNativeOptionsReader.FromManager(new NativeTestManager(storage));
+        var notifications = 0;
+        Action changed = () => ++notifications;
+        HlslBootstrapPackage.OptionsChanged += changed;
+        try
+        {
+            Assert.Throws<TargetInvocationException>(() => reader.Initialize(page, () => reader.Load(page)));
+            Assert.Equal(0, storage.ActiveSubscriptions);
+            Assert.Equal(".hlsl;.hlsli;.usf", page.FileExtensions);
+            Assert.Equal(0, notifications);
 
-    public sealed class NativeTestReader : IDisposable
+            storage.FailEnabled = false;
+            storage.FailSubscribe = false;
+            using (reader.Initialize(page, () => reader.Load(page)))
+            {
+                Assert.Equal(1, storage.ActiveSubscriptions);
+                Assert.Equal(1, notifications);
+                Assert.Equal("fxc", page.CompilerBackend);
+                storage.FileExtensions = ".comp";
+                storage.Changed(new SettingsUpdate(Guid.Empty, new HashSet<string>
+                {
+                    "hlslLsp.general.fileExtensions",
+                }));
+                Assert.Equal(".comp", page.FileExtensions);
+                Assert.Equal(2, notifications);
+            }
+            Assert.Equal(0, storage.ActiveSubscriptions);
+        }
+        finally
+        {
+            HlslBootstrapPackage.OptionsChanged -= changed;
+        }
+    }
+
+    [Fact]
+    public void MissingSettingsApisFailExplicitlyWithoutMutatingThePage()
+    {
+        var page = CreatePage();
+        var reader = new HlslNativeOptionsReader(new object(), typeof(object));
+        Assert.Throws<MissingMethodException>(() => reader.Load(page));
+        Assert.Throws<MissingMethodException>(() => reader.Initialize(page, () => { }));
+        Assert.Throws<InvalidOperationException>(() => HlslNativeOptionsReader.FromManager(new object()));
+        Assert.Throws<InvalidOperationException>(() =>
+            HlslNativeOptionsReader.FromManager(new NativeTestManager(null)));
+        Assert.Equal(".hlsl;.hlsli;.usf", page.FileExtensions);
+    }
+
+    [Fact]
+    public void NativeReaderUsesTheSdkManagerAndReaderContracts()
+    {
+        var page = CreatePage();
+        var storage = new NativeTestReader();
+        var reader = HlslNativeOptionsReader.FromManager(new NativeTestManager(storage));
+        using (reader.Initialize(page, () => reader.Load(page)))
+        {
+            AssertMonikers(storage.Monikers);
+            Assert.Equal(".fx", page.FileExtensions);
+            Assert.Equal(@"C:\custom\D3DCompiler.dll", page.FxcRuntimePath);
+        }
+        Assert.True(storage.Disposed);
+    }
+
+    private static HlslOptionsPage CreatePage()
+    {
+        // DialogPage's constructor needs the VS host; use the real page logic without that host.
+        var page = (HlslOptionsPage)FormatterServices.GetUninitializedObject(typeof(HlslOptionsPage));
+        page.ApplySnapshot(new HlslOptionsSnapshot(
+            ".hlsl;.hlsli;.usf", "2021", "",
+            new InlayHintOptionsSnapshot(true, true, false, false, false, false, true)));
+        return page;
+    }
+
+    private static void AssertMonikers(string[] monikers)
+    {
+        var expected = new[]
+        {
+            "fileExtensions", "languageVersion", "dxcRuntimeDirectory",
+            "compilerBackend", "fxcRuntimePath", "inlayHintTypes", "inlayHintParameters",
+            "inlayHintMatrixOrientation", "inlayHintRegisters", "inlayHintPackedOffsets",
+            "inlayHintArrayStrides", "inlayHintActiveVariant",
+        }.Select(name => "hlslLsp.general." + name);
+        Assert.Equal(expected.OrderBy(name => name), monikers.OrderBy(name => name));
+    }
+
+    public sealed class NativeTestManager : ISettingsManager
+    {
+        private readonly ISettingsReader reader;
+
+        public NativeTestManager(ISettingsReader reader) => this.reader = reader;
+
+        public ISettingsReader GetReader() => reader;
+        public ISettingsWriter GetWriter(string scope) => throw new NotSupportedException();
+        public ISettingsWriter GetWriter(string scope, Guid source) => throw new NotSupportedException();
+    }
+
+    public sealed class NativeTestReader : ISettingsReader
     {
         public string FileExtensions { get; set; } = ".fx";
         public bool FailEnabled { get; set; }
+        public bool FailSubscribe { get; set; }
         public bool Disposed { get; private set; }
+        public int ActiveSubscriptions { get; private set; }
         public string[] Monikers { get; private set; }
-        public Action<NativeTestUpdate> Changed { get; private set; }
+        public Action<SettingsUpdate> Changed { get; private set; }
 
         public object GetValueOrThrow(string moniker, Type type)
         {
@@ -176,23 +334,70 @@ public sealed class HlslOptionsTests
                 Assert.Equal(typeof(string), type);
                 return FileExtensions;
             }
-            Assert.Equal("hlslLsp.general.inlayHintTypes", moniker);
-            Assert.Equal(typeof(bool), type);
             if (FailEnabled)
             {
                 throw new InvalidOperationException("Failed native settings read.");
             }
-            return true;
+            switch (moniker)
+            {
+                case "hlslLsp.general.languageVersion":
+                    Assert.Equal(typeof(string), type);
+                    return "202x";
+                case "hlslLsp.general.dxcRuntimeDirectory":
+                    Assert.Equal(typeof(string), type);
+                    return @"C:\dxc";
+                case "hlslLsp.general.compilerBackend":
+                    Assert.Equal(typeof(string), type);
+                    return "fxc";
+                case "hlslLsp.general.fxcRuntimePath":
+                    Assert.Equal(typeof(string), type);
+                    return @"C:\custom\D3DCompiler.dll";
+                default:
+                    Assert.StartsWith("hlslLsp.general.inlayHint", moniker);
+                    Assert.Equal(typeof(bool), type);
+                    return true;
+            }
         }
 
-        public IDisposable SubscribeToChanges(Action<NativeTestUpdate> changed, string[] monikers)
+        public IDisposable SubscribeToChanges(Action<SettingsUpdate> changed, params string[] monikers)
         {
+            if (FailSubscribe)
+            {
+                throw new InvalidOperationException("Failed native settings subscription.");
+            }
             Changed = changed;
             Monikers = monikers;
-            return this;
+            ++ActiveSubscriptions;
+            return new NativeTestSubscription(this);
         }
 
-        public void Dispose() => Disposed = true;
+        public T GetValueOrThrow<T>(string moniker) => (T)GetValueOrThrow(moniker, typeof(T));
+        public IReadOnlyList<T> GetArrayOrThrow<T>(string moniker) => throw new NotSupportedException();
+        public SettingRetrieval<IReadOnlyList<T>> GetArray<T>(string moniker, SettingReadOptions options) =>
+            throw new NotSupportedException();
+        public SettingRetrieval<T> GetValue<T>(string moniker, SettingReadOptions options) =>
+            throw new NotSupportedException();
+        public SettingRetrieval<object> GetValue(string moniker, Type type, SettingReadOptions options) =>
+            throw new NotSupportedException();
+
+        private sealed class NativeTestSubscription : IDisposable
+        {
+            private readonly NativeTestReader owner;
+            private bool disposed;
+
+            internal NativeTestSubscription(NativeTestReader owner) => this.owner = owner;
+
+            public void Dispose()
+            {
+                if (!disposed)
+                {
+                    disposed = true;
+                    owner.Disposed = true;
+                    owner.Changed = null;
+                    --owner.ActiveSubscriptions;
+                }
+            }
+        }
     }
 
     [Theory]

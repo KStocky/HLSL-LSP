@@ -16,38 +16,70 @@ internal sealed class HlslNativeOptionsReader
         this.readerContract = readerContract;
     }
 
-    internal void Load(object page)
+    internal static HlslNativeOptionsReader FromManager(object manager)
     {
-        var bindings = page.GetType().GetProperties(BindingFlags.Public | BindingFlags.Instance)
-            .Select(property => new
-            {
-                Property = property,
-                Moniker = HlslOptionsPage.GetUnifiedSettingsMoniker(property.Name),
-            })
-            .Where(binding => binding.Moniker != null)
-            .ToArray();
-        if (bindings.Length == 0)
+        var contract = manager.GetType().GetInterfaces().FirstOrDefault(
+            type => type.FullName == "Microsoft.VisualStudio.Utilities.UnifiedSettings.ISettingsManager")
+            ?? throw new InvalidOperationException(
+                "Visual Studio's Unified Settings manager does not expose ISettingsManager.");
+        var getReader = contract.GetMethod("GetReader")
+            ?? throw new MissingMethodException(contract.FullName, "GetReader");
+        var reader = getReader.Invoke(manager, null)
+            ?? throw new InvalidOperationException(
+                "Visual Studio's Unified Settings manager did not return a settings reader.");
+        return new HlslNativeOptionsReader(reader, getReader.ReturnType);
+    }
+
+    internal IDisposable Initialize(HlslOptionsPage page, Action changed)
+    {
+        var subscription = Subscribe(page, changed);
+        try
         {
-            throw new InvalidOperationException("No native settings monikers were found on the options page.");
+            Load(page);
+            return subscription;
         }
+        catch
+        {
+            subscription.Dispose();
+            throw;
+        }
+    }
+
+    internal void Load(HlslOptionsPage page)
+    {
         var getValue = readerContract.GetMethod(
             "GetValueOrThrow", new[] { typeof(string), typeof(Type) });
         if (getValue == null)
         {
             throw new MissingMethodException(readerContract.FullName, "GetValueOrThrow");
         }
-        // Read everything before updating the page so a failed read cannot apply a partial snapshot.
-        var values = bindings.Select(binding =>
+        T Read<T>(string propertyName)
         {
-            return getValue.Invoke(reader, new object[] { binding.Moniker, binding.Property.PropertyType });
-        }).ToArray();
-        for (var index = 0; index < bindings.Length; ++index)
-        {
-            bindings[index].Property.SetValue(page, values[index]);
+            var moniker = HlslOptionsPage.GetUnifiedSettingsMoniker(propertyName)
+                ?? throw new InvalidOperationException(
+                    "No native settings moniker exists for " + propertyName + ".");
+            return (T)getValue.Invoke(reader, new object[] { moniker, typeof(T) });
         }
+
+        var snapshot = new HlslOptionsSnapshot(
+            Read<string>(nameof(HlslOptionsPage.FileExtensions)),
+            Read<string>(nameof(HlslOptionsPage.LanguageVersion)),
+            Read<string>(nameof(HlslOptionsPage.DxcRuntimeDirectory)),
+            new InlayHintOptionsSnapshot(
+                Read<bool>(nameof(HlslOptionsPage.InlayHintTypes)),
+                Read<bool>(nameof(HlslOptionsPage.InlayHintParameters)),
+                Read<bool>(nameof(HlslOptionsPage.InlayHintMatrixOrientation)),
+                Read<bool>(nameof(HlslOptionsPage.InlayHintRegisters)),
+                Read<bool>(nameof(HlslOptionsPage.InlayHintPackedOffsets)),
+                Read<bool>(nameof(HlslOptionsPage.InlayHintArrayStrides)),
+                Read<bool>(nameof(HlslOptionsPage.InlayHintActiveVariant))),
+            Read<string>(nameof(HlslOptionsPage.CompilerBackend)),
+            Read<string>(nameof(HlslOptionsPage.FxcRuntimePath)));
+
+        page.ApplySnapshot(snapshot);
     }
 
-    internal IDisposable Subscribe(object page, Action changed)
+    internal IDisposable Subscribe(HlslOptionsPage page, Action changed)
     {
         var method = readerContract.GetMethod("SubscribeToChanges");
         if (method == null)
