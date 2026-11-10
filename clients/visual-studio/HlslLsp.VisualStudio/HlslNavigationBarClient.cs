@@ -334,7 +334,16 @@ internal sealed class HlslNavigationBarClient :
             return;
         }
 
-        var position = view.Caret.Position.BufferPosition.Position;
+        RefreshSelectionsAt(view.Caret.Position.BufferPosition.Position);
+    }
+
+    internal void RefreshSelectionsAt(int position)
+    {
+        if (dropdownBar == null || scopes.Count == 0)
+        {
+            return;
+        }
+
         var scopeIndex = 0;
         for (var index = 1; index < scopes.Count; ++index)
         {

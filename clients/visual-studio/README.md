@@ -332,7 +332,35 @@ installed or running. Run it with:
 dotnet test clients\visual-studio\HlslLsp.VisualStudio.Tests\HlslLsp.VisualStudio.Tests.csproj
 ```
 
-The rest of the extension's Visual Studio-specific integration surface
-(commands, tool windows, editor content-type switching) requires the full VS
-SDK experimental instance and is verified manually per the build/run
-instructions above; it is not covered by this automated project.
+The tests also exercise complete native-settings snapshots using the real
+options-page logic (without constructing the VS-hosted `DialogPage`), the SDK
+settings manager/reader contracts, failed initialization and subscription
+cleanup, nested navigation scopes, overload selection inside function bodies,
+and transitions between extension-owned and foreign dropdown bars.
+
+### IDE validation checklist
+
+The automated tests do not replace testing inside Visual Studio. Before
+shipping changes to settings or custom-extension activation, run these checks
+in both supported versions (VS 2022 17.14+ and VS 2026), including an experimental
+instance and the regular instance:
+
+1. Save a custom extension list such as `.comp;.vert;.frag` in **Tools > Options >
+   HLSL-LSP > General**, restart the IDE, and open files with those suffixes.
+   Also open `.hlsl` and `.hlsli` controls omitted from the saved list.
+2. Verify colouring, member completion, and F12 on a user-defined function.
+   Edit a file to introduce and fix an error, checking that diagnostics update.
+   Repeat after closing and reopening the custom-extension file.
+3. Change several settings in one apply operation, including the compiler
+   backend and its runtime path. Check that the selected compiler/runtime and
+   diagnostics reflect the complete final settings, without intermediate
+   runtime failures or redundant restarts.
+4. Exercise nested structs/namespaces and overloaded functions in the navigation
+   bar. Move the caret into function bodies and navigate to each overload.
+   Switch between custom-extension HLSL documents and a document with a native
+   navigation bar; closing either document must not remove the other provider's
+   dropdown.
+
+Record which IDE versions/instances and checks were actually exercised in the
+PR validation notes. Leave unavailable checks explicitly unverified rather
+than treating unit tests or the VSIX compatibility validator as IDE proof.

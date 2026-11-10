@@ -91,6 +91,32 @@ public sealed class HlslDocumentSymbolMiddleLayerTests
     }
 
     [Fact]
+    public async Task OverloadsRemainSeparateNativeNavigationTargets()
+    {
+        var layer = new HlslDocumentSymbolMiddleLayer();
+        var request = new JObject { ["textDocument"] = new JObject { ["uri"] = Uri } };
+        var symbols = JArray.Parse(@"[
+            {
+                'name': 'work', 'kind': 12,
+                'range': { 'start': { 'line': 1, 'character': 0 }, 'end': { 'line': 4, 'character': 1 } },
+                'selectionRange': { 'start': { 'line': 1, 'character': 6 }, 'end': { 'line': 1, 'character': 10 } }
+            },
+            {
+                'name': 'work', 'kind': 12,
+                'range': { 'start': { 'line': 6, 'character': 0 }, 'end': { 'line': 9, 'character': 1 } },
+                'selectionRange': { 'start': { 'line': 6, 'character': 6 }, 'end': { 'line': 6, 'character': 10 } }
+            }
+        ]");
+        var result = Assert.IsType<JArray>(await layer.HandleRequestAsync(
+            Method, request, _ => Task.FromResult<JToken>(symbols)));
+        Assert.Equal(2, result.Count);
+        Assert.Equal("work", (string)result[0]["name"]);
+        Assert.Equal("work", (string)result[1]["name"]);
+        Assert.Equal(1, (int)result[0]["location"]["range"]["start"]["line"]);
+        Assert.Equal(6, (int)result[1]["location"]["range"]["start"]["line"]);
+    }
+
+    [Fact]
     public async Task PreservesFlatNullAndEmptyResponses()
     {
         var layer = new HlslDocumentSymbolMiddleLayer();
