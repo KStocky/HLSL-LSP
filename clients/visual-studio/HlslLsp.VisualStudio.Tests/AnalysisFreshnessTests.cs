@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using HlslLsp.VisualStudio;
@@ -155,6 +156,247 @@ public sealed class AnalysisFreshnessTests
         Assert.False(HlslLanguageClient.IsCurrentServerProcess(current, replaced));
         Assert.False(HlslLanguageClient.IsCurrentServerProcess(null, replaced));
     }
+
+    [Fact]
+    public async Task RuntimeRestart_WaitsForHostStopBeforeStartingAgain()
+    {
+        var client = CreateLifecycleClient();
+        var stopEntered = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var finishStop = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var startEntered = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        client.StopAsync += async (_, _) =>
+        {
+            stopEntered.TrySetResult(true);
+            await finishStop.Task;
+        };
+        client.StartAsync += (_, _) =>
+        {
+            startEntered.TrySetResult(true);
+            return Task.CompletedTask;
+        };
+
+        var restart = client.RestartWithRuntimeAsync("202x", @"C:\runtime");
+        try
+        {
+            await stopEntered.Task;
+            await Task.WhenAny(startEntered.Task, Task.Delay(1000));
+            Assert.False(startEntered.Task.IsCompleted);
+            Assert.False(restart.IsCompleted);
+        }
+        finally
+        {
+            finishStop.TrySetResult(true);
+            await restart;
+        }
+        Assert.True(startEntered.Task.IsCompleted);
+    }
+
+    [Fact]
+    public async Task RuntimeRestart_SerializesConcurrentRequestsAndTheirSettings()
+    {
+        var client = CreateLifecycleClient();
+        var finishFirstStop = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var stopCount = 0;
+        var startedRuntimes = new List<string>();
+        client.StopAsync += (_, _) =>
+            Interlocked.Increment(ref stopCount) == 1
+                ? finishFirstStop.Task
+                : Task.CompletedTask;
+        client.StartAsync += (_, _) =>
+        {
+            startedRuntimes.Add(client.RuntimeDirectory);
+            return Task.CompletedTask;
+        };
+
+        var first = client.RestartWithRuntimeAsync("2021", @"C:\first-runtime");
+        var second = client.RestartWithRuntimeAsync("202x", @"C:\second-runtime");
+        try
+        {
+            Assert.Equal(1, Volatile.Read(ref stopCount));
+            Assert.Empty(startedRuntimes);
+        }
+        finally
+        {
+            finishFirstStop.TrySetResult(true);
+            await Task.WhenAll(first, second);
+        }
+        Assert.Equal(new[] { @"C:\first-runtime", @"C:\second-runtime" }, startedRuntimes);
+    }
+
+    [Fact]
+    public async Task RuntimeRestart_WaitsForInitialHostStartup()
+    {
+        var client = CreateLifecycleClient();
+        var finishStartup = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var events = new List<string>();
+        client.StartAsync += (_, _) =>
+        {
+            events.Add("start");
+            return events.Count == 1 ? finishStartup.Task : Task.CompletedTask;
+        };
+        client.StopAsync += (_, _) =>
+        {
+            events.Add("stop");
+            return Task.CompletedTask;
+        };
+
+        var startup = client.OnLoadedAsync();
+        var restart = client.RestartWithRuntimeAsync("202x", @"C:\runtime");
+        try
+        {
+            Assert.Equal(new[] { "start" }, events);
+        }
+        finally
+        {
+            finishStartup.TrySetResult(true);
+            await Task.WhenAll(startup, restart);
+        }
+        Assert.Equal(new[] { "start", "stop", "start" }, events);
+    }
+
+    [Fact]
+    public async Task RuntimeRestart_FailedStopDoesNotStartAndAllowsRetry()
+    {
+        var client = CreateLifecycleClient();
+        var stopCount = 0;
+        var startCount = 0;
+        client.StopAsync += (_, _) =>
+            Interlocked.Increment(ref stopCount) == 1
+                ? Task.FromException(new InvalidOperationException("Host stop failed"))
+                : Task.CompletedTask;
+        client.StartAsync += (_, _) =>
+        {
+            ++startCount;
+            return Task.CompletedTask;
+        };
+
+        await Assert.ThrowsAsync<AggregateException>(
+            () => client.RestartWithRuntimeAsync("202x", @"C:\runtime"));
+        Assert.Equal(0, startCount);
+        Assert.Equal(string.Empty, client.RuntimeDirectory);
+        await client.RestartWithRuntimeAsync("202x", @"C:\runtime");
+        Assert.Equal(1, startCount);
+        Assert.Equal(@"C:\runtime", client.RuntimeDirectory);
+    }
+
+    [Fact]
+    public async Task RuntimeStop_NotifiesHostWhileTransportProcessIsStillAlive()
+    {
+        var client = CreateLifecycleClient();
+        using var process = StartWaitingProcess();
+        using var observer = Process.GetProcessById(process.Id);
+        SetServerProcess(client, process);
+        var transportWasAlive = false;
+        client.StopAsync += (_, _) =>
+        {
+            transportWasAlive = !observer.HasExited;
+            return Task.CompletedTask;
+        };
+        try
+        {
+            await client.StopServerAsync();
+            Assert.True(transportWasAlive);
+            Assert.True(observer.WaitForExit(5000));
+        }
+        finally
+        {
+            if (!observer.HasExited)
+            {
+                observer.Kill();
+                observer.WaitForExit();
+            }
+        }
+    }
+
+    [Fact]
+    public async Task RuntimeStop_FailedHostStopDoesNotKillTheActiveProcess()
+    {
+        var client = CreateLifecycleClient();
+        using var process = StartWaitingProcess();
+        using var observer = Process.GetProcessById(process.Id);
+        SetServerProcess(client, process);
+        client.StopAsync += (_, _) =>
+            Task.FromException(new InvalidOperationException("Host stop failed"));
+        try
+        {
+            var error = await Assert.ThrowsAsync<AggregateException>(
+                client.StopServerAsync);
+            Assert.Equal("Host stop failed", Assert.Single(error.Flatten().InnerExceptions).Message);
+            Assert.False(observer.HasExited);
+        }
+        finally
+        {
+            if (!observer.HasExited)
+            {
+                observer.Kill();
+                observer.WaitForExit();
+            }
+        }
+    }
+
+    [Fact]
+    public async Task RuntimeActivation_IsBlockedWhileHostStopIsInProgress()
+    {
+        var client = CreateLifecycleClient();
+        client.StopAsync += async (_, _) =>
+        {
+            var error = await Assert.ThrowsAsync<InvalidOperationException>(
+                () => client.ActivateAsync(CancellationToken.None));
+            Assert.Contains("being stopped", error.Message);
+        };
+
+        await client.StopServerAsync();
+    }
+
+    [Fact]
+    public async Task RuntimeActivation_RejectsAnAlreadyOwnedProcess()
+    {
+        var client = CreateLifecycleClient();
+        using var process = StartWaitingProcess();
+        using var observer = Process.GetProcessById(process.Id);
+        SetServerProcess(client, process);
+        try
+        {
+            var error = await Assert.ThrowsAsync<InvalidOperationException>(
+                () => client.ActivateAsync(CancellationToken.None));
+            Assert.Contains("already", error.Message);
+            Assert.False(observer.HasExited);
+        }
+        finally
+        {
+            if (!observer.HasExited)
+            {
+                observer.Kill();
+                observer.WaitForExit();
+            }
+        }
+    }
+
+    private static HlslLanguageClient CreateLifecycleClient() => new(
+        "2021", string.Empty, string.Empty,
+        (_, _) => Task.CompletedTask, _ => Task.CompletedTask);
+
+    private static Process StartWaitingProcess() =>
+        Process.Start(new ProcessStartInfo
+        {
+            FileName = Environment.GetEnvironmentVariable("ComSpec") ?? "cmd.exe",
+            Arguments = "/d /q /c \"set /p HLSL_LSP_TEST_WAIT=\"",
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        });
+
+    private static void SetServerProcess(HlslLanguageClient client, Process process) =>
+        typeof(HlslLanguageClient)
+            .GetField("serverProcess", BindingFlags.Instance | BindingFlags.NonPublic)
+            .SetValue(client, process);
 
     [Fact]
     public void NavigationMismatch_DemotesCallHierarchyFromRefreshingToStale()

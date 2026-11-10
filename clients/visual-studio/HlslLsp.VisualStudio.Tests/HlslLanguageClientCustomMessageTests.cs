@@ -347,6 +347,96 @@ public sealed class HlslLanguageClientCustomMessageTests : IDisposable
         Assert.False(runtime.RequiresRestart);
     }
 
+    [Fact]
+    public async Task RuntimeRestart_FailedHostStopKeepsExistingRpcUsable()
+    {
+        var client = new HlslLanguageClient(
+            "2021", string.Empty, string.Empty,
+            (_, _) => Task.CompletedTask, _ => Task.CompletedTask);
+        using var serverRpc = new JsonRpc(serverStream, serverStream, new DxcRuntimeTarget());
+        using var clientRpc = new JsonRpc(clientStream);
+        serverRpc.StartListening();
+        clientRpc.StartListening();
+        await client.AttachForCustomMessageAsync(clientRpc);
+        client.StopAsync += (_, _) =>
+            Task.FromException(new InvalidOperationException("Host stop failed"));
+
+        await Assert.ThrowsAsync<AggregateException>(
+            () => client.RestartWithRuntimeAsync("202x", @"C:\runtime"));
+
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var runtime = await client.GetDxcRuntimeAsync(cancellation.Token);
+        Assert.Equal("bundled", runtime.Source);
+        Assert.Equal("1.9.2607.13", runtime.Version);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task LanguageVersionUpdate_DuringRuntimeRestartReachesReplacementConnection(
+        bool updateDuringHostStop)
+    {
+        var client = new HlslLanguageClient(
+            "2021", string.Empty, string.Empty,
+            (_, _) => Task.CompletedTask, _ => Task.CompletedTask);
+        using var oldServerRpc = new JsonRpc(serverStream);
+        using var oldClientRpc = new JsonRpc(clientStream);
+        oldServerRpc.StartListening();
+        oldClientRpc.StartListening();
+        await client.AttachForCustomMessageAsync(oldClientRpc);
+
+        var (replacementServerStream, replacementClientStream) = FullDuplexStream.CreatePair();
+        using var serverTransport = replacementServerStream;
+        using var clientTransport = replacementClientStream;
+        var received = new TaskCompletionSource<string>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        using var replacementServerRpc = new JsonRpc(
+            serverTransport, serverTransport, new LanguageVersionCaptureTarget(received));
+        using var replacementClientRpc = new JsonRpc(clientTransport);
+        replacementServerRpc.StartListening();
+        replacementClientRpc.StartListening();
+        var finishHostPhase = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        client.StopAsync += (_, _) =>
+            updateDuringHostStop ? finishHostPhase.Task : Task.CompletedTask;
+        client.StartAsync += async (_, _) =>
+        {
+            if (!updateDuringHostStop)
+            {
+                await finishHostPhase.Task;
+            }
+            await client.AttachForCustomMessageAsync(replacementClientRpc);
+        };
+
+        var restart = client.RestartWithRuntimeAsync("2021", @"C:\runtime");
+        var update = client.UpdateLanguageVersionAsync("202x");
+        finishHostPhase.TrySetResult(true);
+        await Task.WhenAll(restart, update);
+
+        var options = JObject.FromObject(client.InitializationOptions);
+        Assert.Equal("202x", options["hlsl"]?.Value<string>("languageVersion"));
+        Assert.True(await WaitOrTimeoutAsync(received.Task));
+        Assert.Equal("202x", await received.Task);
+    }
+
+    private sealed class LanguageVersionCaptureTarget
+    {
+        private readonly TaskCompletionSource<string> received;
+
+        public LanguageVersionCaptureTarget(TaskCompletionSource<string> received)
+        {
+            this.received = received;
+        }
+
+        [JsonRpcMethod(
+            "hlsl/didChangeClientDefaults",
+            UseSingleObjectParameterDeserialization = true)]
+        public void DidChangeClientDefaults(JObject parameters)
+        {
+            received.TrySetResult(parameters["hlsl"]?.Value<string>("languageVersion"));
+        }
+    }
+
     private sealed class DidChangeActiveVariantCaptureTarget
     {
         private readonly TaskCompletionSource<string> received;

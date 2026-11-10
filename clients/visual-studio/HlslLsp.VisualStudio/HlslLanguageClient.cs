@@ -19,6 +19,9 @@ internal sealed class HlslLanguageClient :
     ILanguageClientCustomMessage2
 {
     private Process serverProcess;
+    private readonly object serverProcessGate = new();
+    private readonly SemaphoreSlim lifecycleGate = new(1, 1);
+    private bool stopping;
     private string languageVersion;
     private string dxcRuntimeDirectory;
     private CompilerSettings compilerSettings;
@@ -134,21 +137,30 @@ internal sealed class HlslLanguageClient :
         return Task.CompletedTask;
     }
 
-    internal Task UpdateLanguageVersionAsync(string value)
+    internal async Task UpdateLanguageVersionAsync(string value)
     {
-        Volatile.Write(ref languageVersion, value);
-        var currentRpc = Volatile.Read(ref rpc);
-        return currentRpc == null
-            ? Task.CompletedTask
-            : currentRpc.NotifyAsync(
-                "hlsl/didChangeClientDefaults",
-                new
-                {
-                    hlsl = new
+        await lifecycleGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            Volatile.Write(ref languageVersion, value);
+            var currentRpc = Volatile.Read(ref rpc);
+            if (currentRpc != null)
+            {
+                await currentRpc.NotifyAsync(
+                    "hlsl/didChangeClientDefaults",
+                    new
                     {
-                        languageVersion = value,
-                    },
-                });
+                        hlsl = new
+                        {
+                            languageVersion = value,
+                        },
+                    }).ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            lifecycleGate.Release();
+        }
     }
 
     internal Task UpdateInlayHintsAsync(InlayHintOptionsSnapshot value)
@@ -525,17 +537,31 @@ internal sealed class HlslLanguageClient :
         string languageVersion,
         string dxcRuntimeDirectory)
     {
-        HlslStatusBridge.ReportLifecycle(HlslLifecycleState.Restarting);
-        Volatile.Write(ref this.languageVersion, languageVersion);
-        Volatile.Write(
-            ref this.dxcRuntimeDirectory,
-            dxcRuntimeDirectory ?? string.Empty);
-        rpcAttached.Reset();
-        Volatile.Write(ref rpc, null);
-        await StopServerAsync().ConfigureAwait(false);
-        if (StartAsync != null)
+        await lifecycleGate.WaitAsync().ConfigureAwait(false);
+        try
         {
-            await StartAsync.InvokeAsync(this, EventArgs.Empty).ConfigureAwait(false);
+            HlslStatusBridge.ReportLifecycle(HlslLifecycleState.Restarting);
+            await StopServerCoreAsync(() =>
+            {
+                Volatile.Write(ref this.languageVersion, languageVersion);
+                Volatile.Write(
+                    ref this.dxcRuntimeDirectory,
+                    dxcRuntimeDirectory ?? string.Empty);
+            }).ConfigureAwait(false);
+            if (StartAsync != null)
+            {
+                await StartAsync.InvokeAsync(this, EventArgs.Empty).ConfigureAwait(false);
+            }
+        }
+        catch (Exception error)
+        {
+            HlslStatusBridge.ReportFailure(
+                "The HLSL language server could not restart: " + error.Message);
+            throw;
+        }
+        finally
+        {
+            lifecycleGate.Release();
         }
     }
 
@@ -1053,15 +1079,48 @@ internal sealed class HlslLanguageClient :
 
     public async Task OnLoadedAsync()
     {
-        if (StartAsync != null)
+        await lifecycleGate.WaitAsync().ConfigureAwait(false);
+        try
         {
-            await StartAsync.InvokeAsync(this, EventArgs.Empty);
+            if (StartAsync != null)
+            {
+                await StartAsync.InvokeAsync(this, EventArgs.Empty).ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            lifecycleGate.Release();
         }
     }
 
     public Task<Connection> ActivateAsync(CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
+        lock (serverProcessGate)
+        {
+            if (stopping)
+            {
+                throw new InvalidOperationException(
+                    "The HLSL language server is still being stopped.");
+            }
+            if (serverProcess != null)
+            {
+                if (!serverProcess.HasExited)
+                {
+                    throw new InvalidOperationException(
+                        "The HLSL language server already has an active connection.");
+                }
+                serverProcess.Dispose();
+                serverProcess = null;
+            }
+            rpcAttached.Reset();
+            Volatile.Write(ref rpc, null);
+            return Task.FromResult(ActivateServer());
+        }
+    }
+
+    private Connection ActivateServer()
+    {
         HlslStatusBridge.ReportLifecycle(HlslLifecycleState.Starting);
 
         try
@@ -1102,15 +1161,19 @@ internal sealed class HlslLanguageClient :
             process.EnableRaisingEvents = true;
             process.Exited += (_, _) =>
             {
-                var current = Volatile.Read(ref serverProcess);
-                if (IsCurrentServerProcess(current, process))
+                int exitCode;
+                lock (serverProcessGate)
                 {
-                    onConnectionStateChanged?.Invoke(false);
-                    var exitCode = process.ExitCode;
-                    HlslStatusBridge.ReportFailure(
-                        $"The HLSL language server exited unexpectedly " +
-                        $"(exit code {exitCode}).");
+                    if (stopping || !IsCurrentServerProcess(serverProcess, process))
+                    {
+                        return;
+                    }
+                    exitCode = process.ExitCode;
                 }
+                onConnectionStateChanged?.Invoke(false);
+                HlslStatusBridge.ReportFailure(
+                    $"The HLSL language server exited unexpectedly " +
+                    $"(exit code {exitCode}).");
             };
             process.ErrorDataReceived += (_, eventArgs) =>
             {
@@ -1129,10 +1192,9 @@ internal sealed class HlslLanguageClient :
 
             Volatile.Write(ref serverProcess, process);
             process.BeginErrorReadLine();
-            return Task.FromResult(
-                new Connection(
-                    process.StandardOutput.BaseStream,
-                    process.StandardInput.BaseStream));
+            return new Connection(
+                process.StandardOutput.BaseStream,
+                process.StandardInput.BaseStream);
         }
         catch (Exception error)
         {
@@ -1174,28 +1236,71 @@ internal sealed class HlslLanguageClient :
 
     public async Task StopServerAsync()
     {
-        var process = Interlocked.Exchange(ref serverProcess, null);
-        onConnectionStateChanged?.Invoke(false);
-        if (process != null)
+        await lifecycleGate.WaitAsync().ConfigureAwait(false);
+        try
         {
-            await Task.Run(() =>
-            {
-                if (!process.HasExited)
-                {
-                    process.Kill();
-                    process.WaitForExit();
-                }
-                process.Dispose();
-            }).ConfigureAwait(false);
+            await StopServerCoreAsync().ConfigureAwait(false);
         }
-
-        if (StopAsync != null)
+        catch (Exception error)
         {
-            var stop = StopAsync.InvokeAsync(this, EventArgs.Empty);
-            var completed = await Task.WhenAny(stop, Task.Delay(500)).ConfigureAwait(false);
-            if (completed == stop)
+            HlslStatusBridge.ReportFailure(
+                "The HLSL language server could not stop: " + error.Message);
+            throw;
+        }
+        finally
+        {
+            lifecycleGate.Release();
+        }
+    }
+
+    private async Task StopServerCoreAsync(Action configureNextStart = null)
+    {
+        Process process;
+        lock (serverProcessGate)
+        {
+            stopping = true;
+            process = serverProcess;
+        }
+        try
+        {
+            // Let the host finish shutdown before closing its transport. Killing
+            // first is treated as a crash and can start competing recovery.
+            if (StopAsync != null)
             {
-                await stop.ConfigureAwait(false);
+                await StopAsync.InvokeAsync(this, EventArgs.Empty).ConfigureAwait(false);
+            }
+            lock (serverProcessGate)
+            {
+                serverProcess = null;
+                rpcAttached.Reset();
+                Volatile.Write(ref rpc, null);
+            }
+            onConnectionStateChanged?.Invoke(false);
+            if (process != null)
+            {
+                await Task.Run(() =>
+                {
+                    try
+                    {
+                        if (!process.HasExited)
+                        {
+                            process.Kill();
+                            process.WaitForExit();
+                        }
+                    }
+                    finally
+                    {
+                        process.Dispose();
+                    }
+                }).ConfigureAwait(false);
+            }
+            configureNextStart?.Invoke();
+        }
+        finally
+        {
+            lock (serverProcessGate)
+            {
+                stopping = false;
             }
         }
     }

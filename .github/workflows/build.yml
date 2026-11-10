@@ -83,7 +83,7 @@ jobs:
             -DBUILD_TESTING=ON
           cmake --build out/build/ci --config ${{ matrix.build-type }}
           ctest --test-dir out/build/ci `
-            --build-config ${{ matrix.build-type }} --output-on-failure
+            --build-config ${{ matrix.build-type }} --timeout 300 --output-on-failure
 
       - name: Configure on Linux
         if: runner.os == 'Linux'
@@ -103,6 +103,7 @@ jobs:
         run: >-
           ctest --test-dir out/build/ci
           --build-config ${{ matrix.build-type }}
+          --timeout 300
           --output-on-failure
 
       - name: Prove Linux DXC IntelliSense runtime

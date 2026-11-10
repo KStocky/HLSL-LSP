@@ -3,7 +3,6 @@
 #include <hlsl_intellisense/json_rpc/dispatcher.h>
 
 #include <atomic>
-#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -84,8 +83,6 @@ class Scheduler final {
     std::atomic<std::size_t> peak_queued_{};
     std::atomic<std::size_t> active_{};
     std::atomic<std::size_t> outstanding_{};
-    mutable std::mutex idle_mutex_;
-    std::condition_variable idle_;
 };
 
 } // namespace hlsl_intellisense::analysis
