@@ -2054,8 +2054,11 @@ optional_string_setting(const Json& settings, const Json* hlsl, std::string_view
         return {};
     }
     std::error_code error;
-    const auto normalized =
+    auto normalized =
         std::filesystem::absolute(std::filesystem::path{directory}, error).lexically_normal();
+    if (normalized.has_relative_path() && !normalized.has_filename()) {
+        normalized = normalized.parent_path();
+    }
     std::string key = error ? directory : normalized.string();
 #ifdef _WIN32
     std::ranges::transform(key, key.begin(), [](char character) {

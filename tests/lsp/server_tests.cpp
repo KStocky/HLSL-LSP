@@ -4456,6 +4456,18 @@ TEST_CASE("Resolved runtime conflicts can be reported again",
     CHECK(count_method(fixture.notifications, "window/showMessage") == 2);
 }
 
+TEST_CASE("A loaded runtime directory with a trailing separator does not require restart",
+          "[lsp][runtime][runtime-conflict][integration]") {
+    hlsl_intellisense::lsp::ServerOptions options;
+    options.analysis.runtime.directory =
+        (std::filesystem::path{HLSL_TEST_DXC_RUNTIME_DIR} / "").string();
+    RuntimeConflictFixture fixture{std::move(options)};
+    fixture.configure("configured", HLSL_TEST_DXC_RUNTIME_DIR);
+    fixture.open("configured/shader.hlsl");
+    CHECK(count_method(fixture.notifications, "hlsl/dxcRuntimeRestartRequired") == 0);
+    CHECK(count_method(fixture.notifications, "window/showMessage") == 0);
+}
+
 TEST_CASE("Runtime conflict logs identify changed contributing documents without extra warnings",
           "[lsp][runtime][runtime-conflict][integration]") {
     RuntimeConflictFixture fixture;
