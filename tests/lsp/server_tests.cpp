@@ -4468,6 +4468,35 @@ TEST_CASE("A loaded runtime directory with a trailing separator does not require
     CHECK(count_method(fixture.notifications, "window/showMessage") == 0);
 }
 
+TEST_CASE("Runtime diagnostic logging becomes quiet again after conflict resolution",
+          "[lsp][runtime][runtime-conflict][integration]") {
+    RuntimeConflictFixture fixture;
+    fixture.configure("configured", HLSL_TEST_DXC_RUNTIME_DIR);
+    fixture.open("temporary.hlsl");
+    fixture.open("configured/shader.hlsl");
+    REQUIRE(fixture.conflict_logs().size() == 1);
+    fixture.close("configured/shader.hlsl");
+    REQUIRE_FALSE(fixture.logs.empty());
+    const auto& resolution = fixture.logs.back();
+    constexpr std::string_view prefix = "DXC runtime selection: ";
+    REQUIRE(resolution.starts_with(prefix));
+    CHECK(Json::parse(resolution.substr(prefix.size()))["state"] == "selected");
+    const auto resolved_log_count = fixture.logs.size();
+
+    fixture.reload();
+    fixture.send("textDocument/didSave",
+                 Json{{"textDocument", {{"uri", fixture.uri("temporary.hlsl")}}}});
+    fixture.open("another-temporary.hlsl");
+    fixture.close("another-temporary.hlsl");
+    fixture.close("temporary.hlsl");
+    fixture.open("replacement-temporary.hlsl");
+    CHECK(fixture.logs.size() == resolved_log_count);
+
+    fixture.open("configured/shader.hlsl");
+    CHECK(fixture.conflict_logs().size() == 2);
+    CHECK(count_method(fixture.notifications, "window/showMessage") == 2);
+}
+
 TEST_CASE("Runtime conflict logs identify changed contributing documents without extra warnings",
           "[lsp][runtime][runtime-conflict][integration]") {
     RuntimeConflictFixture fixture;

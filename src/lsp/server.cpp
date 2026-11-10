@@ -6841,6 +6841,9 @@ void Server::reevaluate_runtime_selection(std::string_view event) {
             record["serverSession"] = runtime_session_id_;
             diagnostics = std::move(record);
         }
+        if (!requested_runtime_key_ && !reported_runtime_issue_key_) {
+            runtime_diagnostics_key_.reset();
+        }
     }
 
     if (diagnostics) {
