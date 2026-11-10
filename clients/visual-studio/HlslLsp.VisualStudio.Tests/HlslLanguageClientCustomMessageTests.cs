@@ -347,6 +347,29 @@ public sealed class HlslLanguageClientCustomMessageTests : IDisposable
         Assert.False(runtime.RequiresRestart);
     }
 
+    [Fact]
+    public async Task RuntimeRestart_FailedHostStopKeepsExistingRpcUsable()
+    {
+        var client = new HlslLanguageClient(
+            "2021", string.Empty, string.Empty,
+            (_, _) => Task.CompletedTask, _ => Task.CompletedTask);
+        using var serverRpc = new JsonRpc(serverStream, serverStream, new DxcRuntimeTarget());
+        using var clientRpc = new JsonRpc(clientStream);
+        serverRpc.StartListening();
+        clientRpc.StartListening();
+        await client.AttachForCustomMessageAsync(clientRpc);
+        client.StopAsync += (_, _) =>
+            Task.FromException(new InvalidOperationException("Host stop failed"));
+
+        await Assert.ThrowsAsync<AggregateException>(
+            () => client.RestartWithRuntimeAsync("202x", @"C:\runtime"));
+
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var runtime = await client.GetDxcRuntimeAsync(cancellation.Token);
+        Assert.Equal("bundled", runtime.Source);
+        Assert.Equal("1.9.2607.13", runtime.Version);
+    }
+
     private sealed class DidChangeActiveVariantCaptureTarget
     {
         private readonly TaskCompletionSource<string> received;
