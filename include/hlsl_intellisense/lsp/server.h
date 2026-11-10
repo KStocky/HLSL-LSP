@@ -297,7 +297,9 @@ class Server final {
     // against the runtime this process loaded. A valid, different selection
     // triggers a single controlled-restart request; invalid or conflicting
     // selections are reported without a restart so no restart loop can form.
-    void reevaluate_runtime_selection();
+    void reevaluate_runtime_selection(std::string_view event);
+    void log_runtime_document_event(std::string_view event, std::string_view uri) const;
+    void log_runtime_record(std::string_view prefix, json_rpc::Json record) const;
     // Checks whether the active variant is defined, applicable, and free of
     // schema errors for the open documents. Problems surface as a single
     // deduplicated window/showMessage; a variant change reanalyzes rather than
@@ -414,6 +416,7 @@ class Server final {
     RequestSender request_sender_;
     Logger logger_;
     ServerOptions options_;
+    const std::string runtime_session_id_;
     analysis::Manager analysis_;
     capture::Session capture_;
     std::mutex capture_mutex_;
@@ -443,6 +446,7 @@ class Server final {
     // already reported, both stored as normalized comparison keys.
     std::optional<std::string> requested_runtime_key_;
     std::optional<std::string> reported_runtime_issue_key_;
+    std::optional<std::string> runtime_diagnostics_key_;
     // The variant problem already reported, so an unchanged issue is not shown
     // repeatedly on every reanalysis or configuration event.
     std::optional<std::string> reported_variant_issue_key_;

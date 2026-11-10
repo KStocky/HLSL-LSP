@@ -16,6 +16,7 @@
 #include <fstream>
 #include <functional>
 #include <future>
+#include <map>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -4317,7 +4318,261 @@ find_last(const std::vector<hlsl_intellisense::json_rpc::Notification>& items,
     return found;
 }
 
+class RuntimeConflictFixture final {
+  public:
+    TestDirectory directory;
+    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
+    std::vector<std::string> logs;
+    hlsl_intellisense::lsp::Server server;
+
+    explicit RuntimeConflictFixture(hlsl_intellisense::lsp::ServerOptions options = {})
+        : server{[this](const auto& value) { notifications.push_back(value); },
+                 [this](std::string_view value) { logs.emplace_back(value); }, std::move(options)} {
+        static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
+            .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
+        send("initialized");
+    }
+
+    void send(std::string method, Json params = Json::object()) {
+        static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
+            .method = std::move(method), .params = std::move(params)}));
+    }
+
+    [[nodiscard]] std::string uri(std::string_view file) const {
+        return hlsl_intellisense::workspace::DocumentUri::from_path(
+                   (directory.path() / file).string())
+            .uri();
+    }
+
+    void configure(std::string_view folder, const std::string& runtime) const {
+        const auto path = directory.path() / folder;
+        std::filesystem::create_directories(path);
+        std::ofstream config{path / "shadertoolsconfig.json", std::ios::trunc};
+        REQUIRE(config);
+        Json settings{{"root", true}};
+        if (!runtime.empty()) {
+            settings["hlsl.dxcRuntimeDirectory"] = runtime;
+        }
+        config << settings;
+        REQUIRE(config);
+    }
+
+    void open(std::string_view file) {
+        send("textDocument/didOpen",
+             Json{{"textDocument",
+                   {{"uri", uri(file)},
+                    {"languageId", "hlsl"},
+                    {"version", 1},
+                    {"text", "float4 main() : SV_Target { return 0; }\n"}}}});
+    }
+
+    void close(std::string_view file) {
+        send("textDocument/didClose", Json{{"textDocument", {{"uri", uri(file)}}}});
+    }
+
+    void reload() { send("workspace/didChangeConfiguration", Json{{"settings", Json::object()}}); }
+
+    [[nodiscard]] std::vector<Json> conflict_logs() const {
+        std::vector<Json> result;
+        constexpr std::string_view prefix = "DXC runtime selection: ";
+        for (const auto& line : logs) {
+            if (line.starts_with(prefix)) {
+                const auto record = Json::parse(line.substr(prefix.size()));
+                if (record["state"] == "conflict") {
+                    result.push_back(record);
+                }
+            }
+        }
+        return result;
+    }
+};
+
 } // namespace
+
+TEST_CASE("Runtime conflict warnings ignore selection encounter order and repeated saves",
+          "[lsp][runtime][runtime-conflict][integration]") {
+    RuntimeConflictFixture fixture;
+    fixture.configure("first", HLSL_TEST_DXC_RUNTIME_DIR);
+    fixture.configure("second", "");
+    SECTION("Configured document opened first") {
+        fixture.open("first/shader.hlsl");
+        fixture.open("second/shader.hlsl");
+    }
+    SECTION("Bundled document opened first") {
+        fixture.open("second/shader.hlsl");
+        fixture.open("first/shader.hlsl");
+    }
+    REQUIRE(count_method(fixture.notifications, "window/showMessage") == 1);
+
+    // Reverse the selections without changing the open-document iteration order.
+    fixture.configure("first", "");
+    fixture.configure("second", HLSL_TEST_DXC_RUNTIME_DIR);
+    fixture.reload();
+    CHECK(count_method(fixture.notifications, "window/showMessage") == 1);
+    for (int repeat = 0; repeat != 3; ++repeat) {
+        fixture.send("textDocument/didSave",
+                     Json{{"textDocument", {{"uri", fixture.uri("second/shader.hlsl")}}}});
+        fixture.reload();
+    }
+    CHECK(count_method(fixture.notifications, "window/showMessage") == 1);
+    const auto* warning = find_last(fixture.notifications, "window/showMessage");
+    REQUIRE(warning != nullptr);
+    CHECK((*warning->params)["message"].get<std::string>().find("build compiler") !=
+          std::string::npos);
+}
+
+TEST_CASE("Runtime conflicts track every normalized runtime selection",
+          "[lsp][runtime][runtime-conflict][integration]") {
+    RuntimeConflictFixture fixture;
+    fixture.configure("first", HLSL_TEST_DXC_RUNTIME_DIR);
+    fixture.configure("second", "");
+    fixture.configure("third", (fixture.directory.path() / "runtime-third").string());
+    fixture.open("first/shader.hlsl");
+    fixture.open("second/shader.hlsl");
+    fixture.open("third/shader.hlsl");
+    REQUIRE(count_method(fixture.notifications, "window/showMessage") == 2);
+
+    for (const auto* folder : {"first", "second", "third"}) {
+        fixture.configure(folder,
+                          (fixture.directory.path() / (std::string{folder} + "-new")).string());
+        fixture.reload();
+    }
+    CHECK(count_method(fixture.notifications, "window/showMessage") == 5);
+    fixture.configure("third", (fixture.directory.path() / "third-new" / ".").string());
+    fixture.reload();
+    CHECK(count_method(fixture.notifications, "window/showMessage") == 5);
+}
+
+TEST_CASE("Resolved runtime conflicts can be reported again",
+          "[lsp][runtime][runtime-conflict][integration]") {
+    RuntimeConflictFixture fixture;
+    fixture.configure("configured", HLSL_TEST_DXC_RUNTIME_DIR);
+    fixture.configure("temporary", "");
+    fixture.open("temporary/TFSTemp.hlsl");
+    fixture.open("configured/shader.hlsl");
+    REQUIRE(count_method(fixture.notifications, "window/showMessage") == 1);
+    fixture.close("configured/shader.hlsl");
+    fixture.open("configured/shader.hlsl");
+    CHECK(count_method(fixture.notifications, "window/showMessage") == 2);
+}
+
+TEST_CASE("A loaded runtime directory with a trailing separator does not require restart",
+          "[lsp][runtime][runtime-conflict][integration]") {
+    hlsl_intellisense::lsp::ServerOptions options;
+    options.analysis.runtime.directory =
+        (std::filesystem::path{HLSL_TEST_DXC_RUNTIME_DIR} / "").string();
+    RuntimeConflictFixture fixture{std::move(options)};
+    fixture.configure("configured", HLSL_TEST_DXC_RUNTIME_DIR);
+    fixture.open("configured/shader.hlsl");
+    CHECK(count_method(fixture.notifications, "hlsl/dxcRuntimeRestartRequired") == 0);
+    CHECK(count_method(fixture.notifications, "window/showMessage") == 0);
+}
+
+TEST_CASE("Runtime diagnostic logging becomes quiet again after conflict resolution",
+          "[lsp][runtime][runtime-conflict][integration]") {
+    RuntimeConflictFixture fixture;
+    fixture.configure("configured", HLSL_TEST_DXC_RUNTIME_DIR);
+    fixture.open("temporary.hlsl");
+    fixture.open("configured/shader.hlsl");
+    REQUIRE(fixture.conflict_logs().size() == 1);
+    fixture.close("configured/shader.hlsl");
+    REQUIRE_FALSE(fixture.logs.empty());
+    const auto& resolution = fixture.logs.back();
+    constexpr std::string_view prefix = "DXC runtime selection: ";
+    REQUIRE(resolution.starts_with(prefix));
+    CHECK(Json::parse(resolution.substr(prefix.size()))["state"] == "selected");
+    const auto resolved_log_count = fixture.logs.size();
+
+    fixture.reload();
+    fixture.send("textDocument/didSave",
+                 Json{{"textDocument", {{"uri", fixture.uri("temporary.hlsl")}}}});
+    fixture.open("another-temporary.hlsl");
+    fixture.close("another-temporary.hlsl");
+    fixture.close("temporary.hlsl");
+    fixture.open("replacement-temporary.hlsl");
+    CHECK(fixture.logs.size() == resolved_log_count);
+
+    fixture.open("configured/shader.hlsl");
+    CHECK(fixture.conflict_logs().size() == 2);
+    CHECK(count_method(fixture.notifications, "window/showMessage") == 2);
+}
+
+TEST_CASE("Runtime conflict logs identify changed contributing documents without extra warnings",
+          "[lsp][runtime][runtime-conflict][integration]") {
+    RuntimeConflictFixture fixture;
+    fixture.configure("configured", HLSL_TEST_DXC_RUNTIME_DIR);
+    fixture.open("configured/shader.hlsl");
+    fixture.open("TFSTemp.hlsl");
+    auto records = fixture.conflict_logs();
+    REQUIRE(records.size() == 1);
+    CHECK(records.back()["event"] == "textDocument/didOpen");
+    CHECK(records.back()["processId"].get<std::int64_t>() > 0);
+    CHECK_FALSE(records.back()["serverSession"].get<std::string>().empty());
+    CHECK(records.back()["loadedRuntime"] == "bundled default");
+    REQUIRE(records.back()["documents"].size() == 2);
+    std::map<std::string, Json> documents;
+    for (const auto& document : records.back()["documents"]) {
+        documents.emplace(document["uri"].get<std::string>(), document);
+        CHECK_FALSE(document["path"].get<std::string>().empty());
+        CHECK_FALSE(document.contains("text"));
+    }
+    CHECK(documents.at(fixture.uri("TFSTemp.hlsl"))["runtime"] == "bundled default");
+    CHECK(documents.at(fixture.uri("TFSTemp.hlsl"))["origin"] == "bundled default");
+    CHECK(documents.at(fixture.uri("TFSTemp.hlsl"))["disagreesWithLoadedRuntime"] == false);
+    CHECK(documents.at(fixture.uri("configured/shader.hlsl"))["disagreesWithLoadedRuntime"] ==
+          true);
+    CHECK(documents.at(fixture.uri("configured/shader.hlsl"))["configurationUri"] ==
+          fixture.uri("configured/shadertoolsconfig.json"));
+    CHECK(std::filesystem::equivalent(
+        documents.at(fixture.uri("configured/shader.hlsl"))["runtime"].get<std::string>(),
+        HLSL_TEST_DXC_RUNTIME_DIR));
+
+    fixture.reload();
+    CHECK(fixture.conflict_logs().size() == 1);
+    fixture.open("another-temporary.hlsl");
+    records = fixture.conflict_logs();
+    REQUIRE(records.size() == 2);
+    CHECK(records.back()["documents"].size() == 3);
+    CHECK(records.front()["serverSession"] == records.back()["serverSession"]);
+    fixture.close("TFSTemp.hlsl");
+    REQUIRE(fixture.conflict_logs().size() == 3);
+    CHECK(count_method(fixture.notifications, "window/showMessage") == 1);
+    fixture.send("textDocument/didSave",
+                 Json{{"textDocument", {{"uri", fixture.uri("configured/shader.hlsl")}}},
+                      {"text", "float4 main() : SV_Target { return 1; }\n"}});
+    CHECK(fixture.conflict_logs().size() == 3);
+    REQUIRE_FALSE(fixture.logs.empty());
+    CHECK(std::ranges::any_of(fixture.logs, [&](const auto& line) {
+        return line.starts_with("DXC document event: ") &&
+               line.find("textDocument/didSave") != std::string::npos;
+    }));
+    for (const auto& line : fixture.logs) {
+        CHECK(line.find("SV_Target") == std::string::npos);
+    }
+}
+
+TEST_CASE("Runtime document diagnostics respect protocol trace path redaction",
+          "[lsp][runtime][runtime-conflict][trace]") {
+    hlsl_intellisense::lsp::ServerOptions options;
+    options.protocol_trace = true;
+    RuntimeConflictFixture fixture{std::move(options)};
+    fixture.configure("configured", HLSL_TEST_DXC_RUNTIME_DIR);
+    fixture.open("configured/private-shader.hlsl");
+    fixture.open("TFSTemp.hlsl");
+    fixture.send("textDocument/didSave",
+                 Json{{"textDocument", {{"uri", fixture.uri("configured/private-shader.hlsl")}}}});
+    bool saw_redacted_record = false;
+    for (const auto& line : fixture.logs) {
+        if (line.starts_with("DXC runtime selection: ") ||
+            line.starts_with("DXC document event: ")) {
+            CHECK(line.find(fixture.uri("TFSTemp.hlsl")) == std::string::npos);
+            CHECK(line.find("private-shader") == std::string::npos);
+            CHECK(line.find("<redacted>") != std::string::npos);
+            saw_redacted_record = true;
+        }
+    }
+    CHECK(saw_redacted_record);
+}
 
 TEST_CASE("Server requests a controlled restart for a shadertoolsconfig DXC runtime",
           "[lsp][runtime][integration]") {
