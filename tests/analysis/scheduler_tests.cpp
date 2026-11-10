@@ -53,6 +53,19 @@ class Gate final {
 
 } // namespace
 
+TEST_CASE("Scheduler idle waits do not lose concurrent completion notifications",
+          "[analysis][scheduler][concurrency]") {
+    analysis::Scheduler scheduler{{.worker_count = 1, .queue_capacity = 1}};
+    constexpr std::int64_t iterations = 100000;
+    for (std::int64_t iteration = 0; iteration < iterations; ++iteration) {
+        json_rpc::CancellationToken cancellation;
+        REQUIRE(scheduler.submit("root", iteration, analysis::WorkPriority::interactive,
+                                 cancellation, [](std::size_t, const auto&) {}));
+        scheduler.wait_idle();
+    }
+    CHECK(scheduler.metrics().completed == iterations);
+}
+
 TEST_CASE("Scheduler bounds its queue and coalesces superseded root versions",
           "[analysis][scheduler]") {
     analysis::Scheduler scheduler{{.worker_count = 1, .queue_capacity = 3}};

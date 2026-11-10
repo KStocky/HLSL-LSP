@@ -1,6 +1,7 @@
 #include <hlsl_intellisense/analysis/scheduler.h>
 
 #include <algorithm>
+#include <condition_variable>
 #include <stdexcept>
 #include <utility>
 
@@ -105,6 +106,7 @@ bool Scheduler::submit(std::string root, std::int64_t version, WorkPriority prio
         worker.queue.erase(removable);
         queued_.fetch_sub(1, std::memory_order_relaxed);
         outstanding_.fetch_sub(1, std::memory_order_relaxed);
+        outstanding_.notify_all();
         coalesced_.fetch_add(1, std::memory_order_relaxed);
     }
 
@@ -176,12 +178,15 @@ void Scheduler::cancel_root(std::string_view root) {
             running->second.cancel();
         }
     }
-    idle_.notify_all();
+    outstanding_.notify_all();
 }
 
 void Scheduler::wait_idle() {
-    std::unique_lock lock{idle_mutex_};
-    idle_.wait(lock, [this] { return outstanding_.load(std::memory_order_acquire) == 0; });
+    auto outstanding = outstanding_.load(std::memory_order_acquire);
+    while (outstanding != 0) {
+        outstanding_.wait(outstanding, std::memory_order_acquire);
+        outstanding = outstanding_.load(std::memory_order_acquire);
+    }
 }
 
 void Scheduler::shutdown() {
@@ -208,7 +213,7 @@ void Scheduler::shutdown() {
     for (auto& thread : threads_) {
         thread.request_stop();
     }
-    idle_.notify_all();
+    outstanding_.notify_all();
     threads_.clear();
 }
 
@@ -275,7 +280,7 @@ void Scheduler::worker_loop(std::size_t index, const std::stop_token& stop) {
             std::scoped_lock lock{worker.mutex};
             worker.running.erase(task.root);
         }
-        idle_.notify_all();
+        outstanding_.notify_all();
     }
     if (cleanup_) {
         cleanup_(index);
