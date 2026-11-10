@@ -5,6 +5,19 @@ namespace HlslLsp.VisualStudio.Tests;
 public sealed class HlslClassifierTests
 {
     [Theory]
+    [InlineData("shader.comp", true, true)]
+    [InlineData("shader.COMP", true, true)]
+    [InlineData("shader.comp", false, false)]
+    [InlineData("shader.hlsl", false, true)]
+    [InlineData("shader.HLSL", false, true)]
+    [InlineData("header.hlsli", false, true)]
+    [InlineData("shader.usf", false, true)]
+    [InlineData("notes.txt", false, false)]
+    public void ClassifierRecognizesPromotedCustomExtensions(
+        string path, bool isHlslContentType, bool expected)
+        => Assert.Equal(expected, HlslClassifierProvider.SupportsDocument(path, isHlslContentType));
+
+    [Theory]
     [InlineData("float2x2")]
     [InlineData("float3x4")]
     [InlineData("float4x1")]
