@@ -29,11 +29,30 @@
 #include <utility>
 #include <vector>
 
+#ifdef _WIN32
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
+
 namespace hlsl_intellisense::lsp {
 namespace {
 
 using json_rpc::HandlerError;
 using json_rpc::Json;
+
+[[nodiscard]] auto process_id() {
+#ifdef _WIN32
+    return _getpid();
+#else
+    return getpid();
+#endif
+}
+
+[[nodiscard]] std::string runtime_session_id() {
+    static std::atomic_uint64_t next_id{};
+    return std::to_string(process_id()) + ":" + std::to_string(++next_id);
+}
 
 struct EffectiveShaderTarget {
     std::string entry_point;
@@ -2313,6 +2332,7 @@ Server::Server(NotificationSender sender, Logger logger, ServerOptions options,
                RequestSender request_sender)
     : sender_{std::move(sender)}, request_sender_{std::move(request_sender)},
       logger_{std::move(logger)}, options_{std::move(options)},
+      runtime_session_id_{runtime_session_id()},
       analysis_{[this](const auto& snapshot, const auto& diagnostics, std::uint64_t generation) {
                     analysis_completed(snapshot, diagnostics, generation);
                 },
@@ -5590,10 +5610,11 @@ void Server::did_open(const std::optional<Json>& params) {
                                 integer_member(document, "version"),
                                 string_member(document, "text"));
         }
+        log_runtime_document_event("textDocument/didOpen", uri);
         invalidate_inlay_hints(false);
         refresh_inlay_hints = true;
         analyze_affected(uri);
-        reevaluate_runtime_selection();
+        reevaluate_runtime_selection("textDocument/didOpen");
         reevaluate_variant_selection();
     } catch (const std::exception& error) {
         log(error.what());
@@ -5671,6 +5692,7 @@ void Server::did_save(const std::optional<Json>& params) {
             std::scoped_lock state_lock{state_mutex_};
             documents_.did_save(uri, std::move(text));
         }
+        log_runtime_document_event("textDocument/didSave", uri);
         invalidate_inlay_hints(false);
         refresh_inlay_hints = true;
         analyze_affected(uri);
@@ -5723,7 +5745,8 @@ void Server::did_close(const std::optional<Json>& params) {
         sender_(json_rpc::Notification{
             .method = "textDocument/publishDiagnostics",
             .params = Json{{"uri", snapshot.uri()}, {"diagnostics", Json::array()}}});
-        reevaluate_runtime_selection();
+        log_runtime_document_event("textDocument/didClose", uri);
+        reevaluate_runtime_selection("textDocument/didClose");
         reevaluate_variant_selection();
     } catch (const std::exception& error) {
         log(error.what());
@@ -5759,7 +5782,7 @@ void Server::did_change_configuration(const std::optional<Json>& params) {
             refresh_inlay_hints = true;
         }
         reanalyze_all();
-        reevaluate_runtime_selection();
+        reevaluate_runtime_selection("workspace/didChangeConfiguration");
         reevaluate_variant_selection();
     } catch (const std::exception& error) {
         log(error.what());
@@ -5830,7 +5853,7 @@ void Server::did_change_active_variant(const std::optional<Json>& params) {
             // A variant change reanalyzes open documents; only a differing runtime
             // selection escalates to the controlled restart shared with issue #14.
             reanalyze_all();
-            reevaluate_runtime_selection();
+            reevaluate_runtime_selection("hlsl/didChangeActiveVariant");
         }
         reevaluate_variant_selection();
     } catch (const std::exception& error) {
@@ -5915,7 +5938,7 @@ void Server::did_change_workspace_folders(const std::optional<Json>& params) {
             refresh_inlay_hints = true;
         }
         reanalyze_all();
-        reevaluate_runtime_selection();
+        reevaluate_runtime_selection("workspace/didChangeWorkspaceFolders");
         reevaluate_variant_selection();
     } catch (const std::exception& error) {
         log(error.what());
@@ -6067,7 +6090,7 @@ void Server::did_change_watched_files(const std::optional<Json>& params) {
     }
     if (!changed_configuration_uris.empty()) {
         try {
-            reevaluate_runtime_selection();
+            reevaluate_runtime_selection("workspace/didChangeWatchedFiles");
             reevaluate_variant_selection();
         } catch (const std::exception& error) {
             log(error.what());
@@ -6663,65 +6686,110 @@ void Server::reanalyze_all() {
 
 std::string Server::loaded_runtime_directory() const { return options_.analysis.runtime.directory; }
 
-void Server::reevaluate_runtime_selection() {
+void Server::log_runtime_document_event(std::string_view event, std::string_view uri) const {
+    {
+        std::scoped_lock state_lock{state_mutex_};
+        if (!requested_runtime_key_ && !reported_runtime_issue_key_) {
+            return;
+        }
+    }
+    log_runtime_record("DXC document event: ", Json{{"event", event},
+                                                    {"uri", uri},
+                                                    {"processId", process_id()},
+                                                    {"serverSession", runtime_session_id_}});
+}
+
+void Server::log_runtime_record(std::string_view prefix, Json record) const {
+    if (options_.protocol_trace && !options_.trace_source) {
+        Json summary{{"details", "<redacted>"}};
+        for (const auto* key : {"event", "processId", "serverSession", "state"}) {
+            if (record.contains(key)) {
+                summary[key] = record[key];
+            }
+        }
+        record = std::move(summary);
+    }
+    log(std::string{prefix} + record.dump());
+}
+
+void Server::reevaluate_runtime_selection(std::string_view event) {
     std::optional<std::string> notify_directory;
     std::string notify_reason;
     std::string issue_message;
+    std::optional<Json> diagnostics;
     bool issue_is_error = false;
     {
         std::scoped_lock state_lock{state_mutex_};
         if (state_ != State::running) {
             return;
         }
-        const auto open_documents = documents_.open_snapshots();
-        if (open_documents.empty()) {
-            return;
-        }
-
-        std::optional<std::optional<std::filesystem::path>> desired;
-        std::string desired_key;
-        std::string desired_label;
-        bool conflict = false;
-        std::string conflict_label;
+        auto open_documents = documents_.open_snapshots();
+        std::ranges::sort(open_documents, {},
+                          [](const auto& snapshot) { return snapshot.document_uri().identity(); });
+        const auto loaded_key = runtime_directory_key(options_.analysis.runtime.directory);
+        std::map<std::string, std::optional<std::filesystem::path>> selections;
+        Json document_selections = Json::array();
         for (const auto& snapshot : open_documents) {
-            std::optional<std::filesystem::path> selection;
+            Json document{{"uri", snapshot.uri()}, {"path", snapshot.path()}};
             try {
-                selection = configuration_for(snapshot, editor_settings_).dxc_runtime_directory;
-            } catch (const std::exception&) {
+                const auto configuration = configuration_for(snapshot, editor_settings_);
+                const auto& selection = configuration.dxc_runtime_directory;
+                const auto directory = selection ? selection->string() : std::string{};
+                const auto key = runtime_directory_key(directory);
+                selections.try_emplace(key, selection);
+                document["runtime"] = selection ? directory : "bundled default";
+                document["normalizedRuntime"] = key;
+                document["disagreesWithLoadedRuntime"] = key != loaded_key;
+                const auto origin = configuration.setting_origins.find("dxcRuntimeDirectory");
+                document["origin"] = origin != configuration.setting_origins.end()
+                                         ? origin->second
+                                         : "bundled default";
+                const auto file = configuration.setting_origin_files.find("dxcRuntimeDirectory");
+                document["configurationUri"] =
+                    file != configuration.setting_origin_files.end()
+                        ? Json(workspace::DocumentUri::from_path(file->second.string()).uri())
+                        : Json(nullptr);
+            } catch (const std::exception& error) {
                 // Configuration errors already surface through analysis diagnostics.
-                continue;
+                document["configurationError"] = error.what();
             }
-            const auto label = selection ? selection->string() : std::string{"bundled default"};
-            const auto key = runtime_directory_key(selection ? selection->string() : std::string{});
-            if (!desired) {
-                desired = std::move(selection);
-                desired_key = key;
-                desired_label = label;
-            } else if (key != desired_key) {
-                conflict = true;
-                conflict_label = label;
-                break;
+            document_selections.push_back(std::move(document));
+        }
+        if (selections.size() > 1) {
+            Json keys = Json::array();
+            std::string labels;
+            for (const auto& [key, selection] : selections) {
+                static_cast<void>(selection);
+                keys.push_back(key);
+                if (!labels.empty()) {
+                    labels += ", ";
+                }
+                labels += "'" + (key.empty() ? std::string{"bundled default"} : key) + "'";
             }
-        }
-        if (!desired) {
-            return;
-        }
-
-        if (conflict) {
-            const auto key = "conflict:" + desired_key + "|" + conflict_label;
+            const auto key = "conflict:" + keys.dump();
             if (reported_runtime_issue_key_ != key) {
                 reported_runtime_issue_key_ = key;
-                issue_message = "Open HLSL documents select different DXC runtimes ('" +
-                                desired_label + "' and '" + conflict_label +
-                                "'). DXC is loaded per process, so the active runtime is unchanged "
-                                "until the conflict is resolved.";
+                issue_message =
+                    "Open HLSL documents select different DXC analysis runtimes (" + labels +
+                    "). Analysis keeps the currently loaded runtime ('" +
+                    (options_.analysis.runtime.directory.empty()
+                         ? std::string{"bundled default"}
+                         : options_.analysis.runtime.directory) +
+                    "'). This does not change the project's build compiler. Align "
+                    "hlsl.dxcRuntimeDirectory in project/editor settings or close conflicting "
+                    "documents. See the server log for document paths and configuration origins.";
             }
             requested_runtime_key_.reset();
-        } else {
-            const auto loaded_key = runtime_directory_key(options_.analysis.runtime.directory);
-            const auto desired_runtime = desired.value_or(std::nullopt);
+        } else if (!selections.empty()) {
+            const auto& [desired_key, desired_runtime] = *selections.begin();
             const std::string desired_directory =
                 desired_runtime ? desired_runtime->string() : std::string{};
+            const auto desired_label =
+                desired_runtime ? desired_directory : std::string{"bundled default"};
+            if (reported_runtime_issue_key_ &&
+                reported_runtime_issue_key_->starts_with("conflict:")) {
+                reported_runtime_issue_key_.reset();
+            }
             if (desired_key == loaded_key) {
                 requested_runtime_key_.reset();
                 reported_runtime_issue_key_.reset();
@@ -6747,9 +6815,34 @@ void Server::reevaluate_runtime_selection() {
                     }
                 }
             }
+        } else {
+            requested_runtime_key_.reset();
+            reported_runtime_issue_key_.reset();
+        }
+
+        Json record{{"state", selections.size() > 1 ? "conflict"
+                              : selections.empty()  ? "empty"
+                                                    : "selected"},
+                    {"loadedRuntime", options_.analysis.runtime.directory.empty()
+                                          ? "bundled default"
+                                          : options_.analysis.runtime.directory},
+                    {"requestedRuntime",
+                     requested_runtime_key_ ? Json(*requested_runtime_key_) : Json(nullptr)},
+                    {"documents", std::move(document_selections)}};
+        const auto key = record.dump();
+        if (runtime_diagnostics_key_ != key &&
+            (runtime_diagnostics_key_ || requested_runtime_key_ || reported_runtime_issue_key_)) {
+            runtime_diagnostics_key_ = key;
+            record["event"] = event;
+            record["processId"] = process_id();
+            record["serverSession"] = runtime_session_id_;
+            diagnostics = std::move(record);
         }
     }
 
+    if (diagnostics) {
+        log_runtime_record("DXC runtime selection: ", std::move(*diagnostics));
+    }
     if (notify_directory) {
         log(notify_reason);
         sender_(json_rpc::Notification{
