@@ -137,21 +137,30 @@ internal sealed class HlslLanguageClient :
         return Task.CompletedTask;
     }
 
-    internal Task UpdateLanguageVersionAsync(string value)
+    internal async Task UpdateLanguageVersionAsync(string value)
     {
-        Volatile.Write(ref languageVersion, value);
-        var currentRpc = Volatile.Read(ref rpc);
-        return currentRpc == null
-            ? Task.CompletedTask
-            : currentRpc.NotifyAsync(
-                "hlsl/didChangeClientDefaults",
-                new
-                {
-                    hlsl = new
+        await lifecycleGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            Volatile.Write(ref languageVersion, value);
+            var currentRpc = Volatile.Read(ref rpc);
+            if (currentRpc != null)
+            {
+                await currentRpc.NotifyAsync(
+                    "hlsl/didChangeClientDefaults",
+                    new
                     {
-                        languageVersion = value,
-                    },
-                });
+                        hlsl = new
+                        {
+                            languageVersion = value,
+                        },
+                    }).ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            lifecycleGate.Release();
+        }
     }
 
     internal Task UpdateInlayHintsAsync(InlayHintOptionsSnapshot value)
