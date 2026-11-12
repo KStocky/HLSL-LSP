@@ -408,8 +408,7 @@ Use a Shader Model 6.6 or newer profile when code references
 ## DXC runtime selection
 
 By default HLSL-LSP loads the bundled, pinned DXC runtime. `hlsl.dxcRuntimeDirectory`
-selects a different compatible DXC runtime for a project without changing the
-bundled default for other workspaces.
+selects a different compatible DXC runtime for the language-server session.
 
 DXC IntelliSense is loaded only in the language server's isolated analysis
 worker processes. Every worker is launched with the same selected runtime, so
@@ -430,6 +429,14 @@ workspace-level* semantics:
   directory, HLSL-LSP reports an actionable configuration error instead of
   silently switching runtimes. Nested files may repeat the same resolved
   directory, but they must not select different ones.
+- Documents without a runtime selection use the session runtime; they do not
+  request the bundled runtime or conflict with an explicitly configured runtime.
+  This includes dependency headers beneath a nested `"root": true` configuration
+  and temporary documents outside the project. Ordinary configuration inheritance
+  still stops at the nested root.
+- Different explicit runtime directories selected by open documents remain a
+  conflict. Closing the last explicitly configured document leaves unspecified
+  documents on the loaded runtime rather than forcing another restart.
 
 Changing the effective runtime triggers a single controlled restart of the
 language server; open documents are re-analyzed against the new runtime. Invalid,
@@ -470,4 +477,7 @@ For `hlsl.dxcRuntimeDirectory`, an explicit editor setting (Visual Studio Code's
 `hlsl.dxcRuntimeDirectory` or Visual Studio's **Tools > Options > HLSL-LSP > DXC
 runtime directory**) overrides any `shadertoolsconfig.json` selection. Clearing
 the editor setting restores the `shadertoolsconfig.json`-driven selection, or the
-bundled default when none is configured.
+loaded session runtime when none is configured. A new session starts with the
+bundled default unless a runtime is selected. An explicit empty or null runtime
+value in the configuration notification requests the bundled runtime; omitting
+the property leaves selection to project configuration and the session runtime.

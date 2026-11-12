@@ -7,6 +7,7 @@
 #include <hlsl_intellisense/workspace/text_position.h>
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 
 #include <algorithm>
 #include <atomic>
@@ -4357,6 +4358,22 @@ class RuntimeConflictFixture final {
         REQUIRE(config);
     }
 
+    [[nodiscard]] std::string other_runtime() const {
+        const auto path = directory.path() / "other-runtime";
+        std::filesystem::create_directories(path);
+#ifdef _WIN32
+        const std::array libraries{"dxcompiler.dll", "dxil.dll"};
+#else
+        const std::array libraries{"libdxcompiler.so"};
+#endif
+        for (const auto* library : libraries) {
+            std::filesystem::copy_file(std::filesystem::path{HLSL_TEST_DXC_RUNTIME_DIR} / library,
+                                       path / library,
+                                       std::filesystem::copy_options::skip_existing);
+        }
+        return path.string();
+    }
+
     void open(std::string_view file) {
         send("textDocument/didOpen",
              Json{{"textDocument",
@@ -4389,11 +4406,73 @@ class RuntimeConflictFixture final {
 
 } // namespace
 
+TEST_CASE("Dependency headers without a runtime do not veto the project runtime",
+          "[lsp][runtime][runtime-conflict][integration]") {
+    hlsl_intellisense::lsp::ServerOptions options;
+    const auto already_loaded = GENERATE(false, true);
+    if (already_loaded) {
+        options.analysis.runtime.directory = HLSL_TEST_DXC_RUNTIME_DIR;
+    }
+    RuntimeConflictFixture fixture{std::move(options)};
+    fixture.configure("project", HLSL_TEST_DXC_RUNTIME_DIR);
+    fixture.configure("project/dependency", "");
+    SECTION("Dependency header opened first") {
+        fixture.open("project/dependency/type_traits.hlsli");
+        fixture.open("project/shader.hlsl");
+    }
+    SECTION("Project shader opened first") {
+        fixture.open("project/shader.hlsl");
+        fixture.open("project/dependency/type_traits.hlsli");
+    }
+    CHECK(count_method(fixture.notifications, "window/showMessage") == 0);
+    CHECK(count_method(fixture.notifications, "hlsl/dxcRuntimeRestartRequired") ==
+          (already_loaded ? 0 : 1));
+    fixture.reload();
+    CHECK(count_method(fixture.notifications, "window/showMessage") == 0);
+    CHECK(count_method(fixture.notifications, "hlsl/dxcRuntimeRestartRequired") ==
+          (already_loaded ? 0 : 1));
+}
+
+TEST_CASE(
+    "Closing the last explicit runtime selection keeps unspecified headers on the session runtime",
+    "[lsp][runtime][integration]") {
+    hlsl_intellisense::lsp::ServerOptions options;
+    options.analysis.runtime.directory = HLSL_TEST_DXC_RUNTIME_DIR;
+    RuntimeConflictFixture fixture{std::move(options)};
+    fixture.configure("project", HLSL_TEST_DXC_RUNTIME_DIR);
+    fixture.configure("project/dependency", "");
+    fixture.open("project/shader.hlsl");
+    fixture.open("project/dependency/type_traits.hlsli");
+    CHECK(count_method(fixture.notifications, "window/showMessage") == 0);
+    CHECK(count_method(fixture.notifications, "hlsl/dxcRuntimeRestartRequired") == 0);
+    fixture.close("project/shader.hlsl");
+    CHECK(count_method(fixture.notifications, "window/showMessage") == 0);
+    CHECK(count_method(fixture.notifications, "hlsl/dxcRuntimeRestartRequired") == 0);
+}
+
+TEST_CASE("An explicit editor runtime reset still requests the bundled runtime",
+          "[lsp][runtime][integration]") {
+    hlsl_intellisense::lsp::ServerOptions options;
+    options.analysis.runtime.directory = HLSL_TEST_DXC_RUNTIME_DIR;
+    RuntimeConflictFixture fixture{std::move(options)};
+    fixture.configure("project", HLSL_TEST_DXC_RUNTIME_DIR);
+    fixture.configure("project/dependency", "");
+    fixture.open("project/shader.hlsl");
+    fixture.open("project/dependency/header.hlsli");
+    fixture.send("workspace/didChangeConfiguration",
+                 Json{{"settings", {{"hlsl", {{"dxcRuntimeDirectory", ""}}}}}});
+    REQUIRE(count_method(fixture.notifications, "hlsl/dxcRuntimeRestartRequired") == 1);
+    const auto* restart = find_last(fixture.notifications, "hlsl/dxcRuntimeRestartRequired");
+    REQUIRE(restart != nullptr);
+    CHECK((*restart->params)["directory"] == "");
+    CHECK(count_method(fixture.notifications, "window/showMessage") == 0);
+}
+
 TEST_CASE("Runtime conflict warnings ignore selection encounter order and repeated saves",
           "[lsp][runtime][runtime-conflict][integration]") {
     RuntimeConflictFixture fixture;
     fixture.configure("first", HLSL_TEST_DXC_RUNTIME_DIR);
-    fixture.configure("second", "");
+    fixture.configure("second", fixture.other_runtime());
     SECTION("Configured document opened first") {
         fixture.open("first/shader.hlsl");
         fixture.open("second/shader.hlsl");
@@ -4405,7 +4484,7 @@ TEST_CASE("Runtime conflict warnings ignore selection encounter order and repeat
     REQUIRE(count_method(fixture.notifications, "window/showMessage") == 1);
 
     // Reverse the selections without changing the open-document iteration order.
-    fixture.configure("first", "");
+    fixture.configure("first", fixture.other_runtime());
     fixture.configure("second", HLSL_TEST_DXC_RUNTIME_DIR);
     fixture.reload();
     CHECK(count_method(fixture.notifications, "window/showMessage") == 1);
@@ -4425,7 +4504,7 @@ TEST_CASE("Runtime conflicts track every normalized runtime selection",
           "[lsp][runtime][runtime-conflict][integration]") {
     RuntimeConflictFixture fixture;
     fixture.configure("first", HLSL_TEST_DXC_RUNTIME_DIR);
-    fixture.configure("second", "");
+    fixture.configure("second", fixture.other_runtime());
     fixture.configure("third", (fixture.directory.path() / "runtime-third").string());
     fixture.open("first/shader.hlsl");
     fixture.open("second/shader.hlsl");
@@ -4447,7 +4526,7 @@ TEST_CASE("Resolved runtime conflicts can be reported again",
           "[lsp][runtime][runtime-conflict][integration]") {
     RuntimeConflictFixture fixture;
     fixture.configure("configured", HLSL_TEST_DXC_RUNTIME_DIR);
-    fixture.configure("temporary", "");
+    fixture.configure("temporary", fixture.other_runtime());
     fixture.open("temporary/TFSTemp.hlsl");
     fixture.open("configured/shader.hlsl");
     REQUIRE(count_method(fixture.notifications, "window/showMessage") == 1);
@@ -4470,8 +4549,11 @@ TEST_CASE("A loaded runtime directory with a trailing separator does not require
 
 TEST_CASE("Runtime diagnostic logging becomes quiet again after conflict resolution",
           "[lsp][runtime][runtime-conflict][integration]") {
-    RuntimeConflictFixture fixture;
-    fixture.configure("configured", HLSL_TEST_DXC_RUNTIME_DIR);
+    hlsl_intellisense::lsp::ServerOptions options;
+    options.analysis.runtime.directory = HLSL_TEST_DXC_RUNTIME_DIR;
+    RuntimeConflictFixture fixture{std::move(options)};
+    fixture.configure("", HLSL_TEST_DXC_RUNTIME_DIR);
+    fixture.configure("configured", fixture.other_runtime());
     fixture.open("temporary.hlsl");
     fixture.open("configured/shader.hlsl");
     REQUIRE(fixture.conflict_logs().size() == 1);
@@ -4501,8 +4583,9 @@ TEST_CASE("Runtime conflict logs identify changed contributing documents without
           "[lsp][runtime][runtime-conflict][integration]") {
     RuntimeConflictFixture fixture;
     fixture.configure("configured", HLSL_TEST_DXC_RUNTIME_DIR);
+    fixture.configure("temporary", fixture.other_runtime());
     fixture.open("configured/shader.hlsl");
-    fixture.open("TFSTemp.hlsl");
+    fixture.open("temporary/TFSTemp.hlsl");
     auto records = fixture.conflict_logs();
     REQUIRE(records.size() == 1);
     CHECK(records.back()["event"] == "textDocument/didOpen");
@@ -4516,9 +4599,12 @@ TEST_CASE("Runtime conflict logs identify changed contributing documents without
         CHECK_FALSE(document["path"].get<std::string>().empty());
         CHECK_FALSE(document.contains("text"));
     }
-    CHECK(documents.at(fixture.uri("TFSTemp.hlsl"))["runtime"] == "bundled default");
-    CHECK(documents.at(fixture.uri("TFSTemp.hlsl"))["origin"] == "bundled default");
-    CHECK(documents.at(fixture.uri("TFSTemp.hlsl"))["disagreesWithLoadedRuntime"] == false);
+    CHECK(documents.at(fixture.uri("temporary/TFSTemp.hlsl"))["runtime"] ==
+          fixture.other_runtime());
+    CHECK(documents.at(fixture.uri("temporary/TFSTemp.hlsl"))["configurationUri"] ==
+          fixture.uri("temporary/shadertoolsconfig.json"));
+    CHECK(documents.at(fixture.uri("temporary/TFSTemp.hlsl"))["disagreesWithLoadedRuntime"] ==
+          true);
     CHECK(documents.at(fixture.uri("configured/shader.hlsl"))["disagreesWithLoadedRuntime"] ==
           true);
     CHECK(documents.at(fixture.uri("configured/shader.hlsl"))["configurationUri"] ==
@@ -4529,12 +4615,12 @@ TEST_CASE("Runtime conflict logs identify changed contributing documents without
 
     fixture.reload();
     CHECK(fixture.conflict_logs().size() == 1);
-    fixture.open("another-temporary.hlsl");
+    fixture.open("temporary/another-temporary.hlsl");
     records = fixture.conflict_logs();
     REQUIRE(records.size() == 2);
     CHECK(records.back()["documents"].size() == 3);
     CHECK(records.front()["serverSession"] == records.back()["serverSession"]);
-    fixture.close("TFSTemp.hlsl");
+    fixture.close("temporary/TFSTemp.hlsl");
     REQUIRE(fixture.conflict_logs().size() == 3);
     CHECK(count_method(fixture.notifications, "window/showMessage") == 1);
     fixture.send("textDocument/didSave",
@@ -4669,44 +4755,17 @@ TEST_CASE("Server reports an invalid shadertoolsconfig DXC runtime without resta
 
 TEST_CASE("Server reevaluates DXC runtime conflicts when a document closes",
           "[lsp][runtime][integration]") {
-    TestDirectory bundled_directory;
-    TestDirectory configured_directory;
-    {
-        std::ofstream config{configured_directory.path() / "shadertoolsconfig.json"};
-        REQUIRE(config);
-        config << R"({"root":true,"hlsl.dxcRuntimeDirectory":")"
-               << runtime_json_path(HLSL_TEST_DXC_RUNTIME_DIR) << R"("})";
-        REQUIRE(config);
-    }
-    const auto bundled_document = hlsl_intellisense::workspace::DocumentUri::from_path(
-        (bundled_directory.path() / "bundled.hlsl").string());
-    const auto configured_document = hlsl_intellisense::workspace::DocumentUri::from_path(
-        (configured_directory.path() / "configured.hlsl").string());
-    std::vector<hlsl_intellisense::json_rpc::Notification> notifications;
-    hlsl_intellisense::lsp::Server server{
-        [&notifications](const auto& value) { notifications.push_back(value); }};
-
-    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Request{
-        .id = std::int64_t{1}, .method = "initialize", .params = Json::object()}));
-    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
-        .method = "initialized", .params = Json::object()}));
-    for (const auto& document : {bundled_document, configured_document}) {
-        static_cast<void>(server.handle(
-            hlsl_intellisense::json_rpc::Notification{.method = "textDocument/didOpen",
-                                                      .params = Json{{"textDocument",
-                                                                      {{"uri", document.uri()},
-                                                                       {"languageId", "hlsl"},
-                                                                       {"version", 1},
-                                                                       {"text", valid_hlsl()}}}}}));
-    }
-    CHECK(count_method(notifications, "hlsl/dxcRuntimeRestartRequired") == 0);
-
-    static_cast<void>(server.handle(hlsl_intellisense::json_rpc::Notification{
-        .method = "textDocument/didClose",
-        .params = Json{{"textDocument", {{"uri", bundled_document.uri()}}}}}));
-
-    REQUIRE(count_method(notifications, "hlsl/dxcRuntimeRestartRequired") == 1);
-    const auto* restart = find_last(notifications, "hlsl/dxcRuntimeRestartRequired");
+    RuntimeConflictFixture fixture;
+    fixture.configure("configured", HLSL_TEST_DXC_RUNTIME_DIR);
+    fixture.configure("other", fixture.other_runtime());
+    fixture.open("other/shader.hlsl");
+    REQUIRE(count_method(fixture.notifications, "hlsl/dxcRuntimeRestartRequired") == 1);
+    fixture.open("configured/shader.hlsl");
+    CHECK(count_method(fixture.notifications, "window/showMessage") == 1);
+    CHECK(count_method(fixture.notifications, "hlsl/dxcRuntimeRestartRequired") == 1);
+    fixture.close("other/shader.hlsl");
+    REQUIRE(count_method(fixture.notifications, "hlsl/dxcRuntimeRestartRequired") == 2);
+    const auto* restart = find_last(fixture.notifications, "hlsl/dxcRuntimeRestartRequired");
     REQUIRE(restart != nullptr);
     CHECK(std::filesystem::equivalent((*restart->params)["directory"].get<std::string>(),
                                       HLSL_TEST_DXC_RUNTIME_DIR));

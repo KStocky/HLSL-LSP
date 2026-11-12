@@ -6739,14 +6739,20 @@ void Server::reevaluate_runtime_selection(std::string_view event) {
                 const auto& selection = configuration.dxc_runtime_directory;
                 const auto directory = selection ? selection->string() : std::string{};
                 const auto key = runtime_directory_key(directory);
-                selections.try_emplace(key, selection);
-                document["runtime"] = selection ? directory : "bundled default";
-                document["normalizedRuntime"] = key;
-                document["disagreesWithLoadedRuntime"] = key != loaded_key;
                 const auto origin = configuration.setting_origins.find("dxcRuntimeDirectory");
+                const auto explicit_selection =
+                    selection.has_value() || origin != configuration.setting_origins.end();
+                if (explicit_selection) {
+                    selections.try_emplace(key, selection);
+                }
+                document["runtime"] = explicit_selection
+                                          ? (selection ? directory : "bundled default")
+                                          : "session runtime";
+                document["normalizedRuntime"] = explicit_selection ? key : loaded_key;
+                document["disagreesWithLoadedRuntime"] = explicit_selection && key != loaded_key;
                 document["origin"] = origin != configuration.setting_origins.end()
                                          ? origin->second
-                                         : "bundled default";
+                                         : "session runtime";
                 const auto file = configuration.setting_origin_files.find("dxcRuntimeDirectory");
                 document["configurationUri"] =
                     file != configuration.setting_origin_files.end()
@@ -6757,6 +6763,14 @@ void Server::reevaluate_runtime_selection(std::string_view event) {
                 document["configurationError"] = error.what();
             }
             document_selections.push_back(std::move(document));
+        }
+        // An omitted runtime is not a request to replace the process-wide runtime.
+        // Keep dependency headers and temporary documents on the current session.
+        if (selections.empty() && !open_documents.empty()) {
+            selections.try_emplace(loaded_key, loaded_key.empty()
+                                                   ? std::nullopt
+                                                   : std::optional{std::filesystem::path{
+                                                         options_.analysis.runtime.directory}});
         }
         if (selections.size() > 1) {
             Json keys = Json::array();
